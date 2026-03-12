@@ -1,0 +1,5 @@
+.env
+esi_token.json
+__pycache__/
+.venv/
+*.pyc

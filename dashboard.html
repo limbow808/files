@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CREST // Capsuleer Resource &amp; Economic Strategy Tool</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@400;600;700&display=swap" rel="stylesheet" />
+
+  <!-- React + ReactDOM (pinned, jsDelivr CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel standalone (JSX transform in-browser) -->
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
+
+  <style>
+    /* ── Design tokens ─────────────────────────────────────────────── */
+    :root {
+      --bg:      #000000;
+      --text:    #c8c8b7;
+      --accent:  #ff4700;
+      --border:  #333333;
+      --dim:     #555544;
+      --mono:    'Share Tech Mono', monospace;
+      --head:    'Barlow Condensed', sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body, #root {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+
+    /* Scanline overlay */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.07) 2px,
+        rgba(0,0,0,0.07) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* No rounded corners globally */
+    * { border-radius: 0 !important; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0a0a0a; }
+    ::-webkit-scrollbar-thumb { background: var(--accent); }
+
+    /* ── Header ─────────────────────────────────────────────────────── */
+    #crest-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 20px;
+      border-bottom: 1px solid var(--accent);
+      background: #000;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .logo-text  { font-family: var(--head); font-size: 22px; font-weight: 700; color: var(--accent); letter-spacing: 4px; }
+    .logo-sub   { font-family: var(--mono); font-size: 10px; color: var(--text); letter-spacing: 2px; margin-top: 2px; opacity: 0.7; }
+    .clock-text { font-family: var(--mono); font-size: 13px; }
+
+    /* ── KPI bar ──────────────────────────────────────────────────────── */
+    .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--border); }
+    .kpi-card { padding: 16px 20px; border-right: 1px solid var(--border); }
+    .kpi-card:last-child { border-right: none; }
+    .kpi-label { font-family: var(--head); font-size: 10px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; margin-bottom: 6px; }
+    .kpi-value { font-family: var(--head); font-size: 26px; font-weight: 700; color: var(--text); line-height: 1.1; margin-bottom: 6px; }
+    .kpi-value.accent { color: var(--accent); }
+    .kpi-sub   { font-size: 10px; color: var(--dim); letter-spacing: 1px; display: flex; align-items: center; justify-content: space-between; }
+
+    /* ── Panel sections ──────────────────────────────────────────────── */
+    .panel { border-bottom: 1px solid var(--border); }
+    .panel-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 20px;
+      border-bottom: 1px solid var(--border);
+      background: #030303;
+    }
+    .panel-title { font-family: var(--head); font-size: 11px; letter-spacing: 3px; color: var(--accent); text-transform: uppercase; }
+
+    /* ── Bottom split grid ───────────────────────────────────────────── */
+    .bottom-grid  { display: grid; grid-template-columns: 3fr 2fr; border-top: 1px solid var(--border); }
+    .bottom-left  { border-right: 1px solid var(--border); padding: 20px; }
+    .bottom-right { padding: 20px; }
+
+    /* ── Table ──────────────────────────────────────────────────────── */
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      font-family: var(--head);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 2px;
+      text-align: right;
+      padding: 8px 12px;
+      color: var(--accent);
+      border-bottom: 1px solid var(--accent);
+      white-space: nowrap;
+    }
+    th:first-child, th:nth-child(2) { text-align: left; }
+    td {
+      padding: 7px 12px;
+      text-align: right;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    td:first-child, td:nth-child(2) { text-align: left; }
+    tr.row-profitable:hover { background: rgba(200,200,183,0.04); cursor: pointer; }
+    tr.row-unprofitable     { opacity: 0.4; cursor: pointer; }
+    tr.row-unprofitable:hover { opacity: 0.6; }
+    tr.row-selected { background: rgba(255,71,0,0.07) !important; }
+
+    /* ── Margin bar cell ────────────────────────────────────────────── */
+    .margin-cell { position: relative; }
+    .margin-bar  {
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      background: rgba(255,71,0,0.18);
+      pointer-events: none;
+    }
+    .margin-val  { position: relative; z-index: 1; }
+
+    /* ── Detail panel ───────────────────────────────────────────────── */
+    .detail-panel {
+      background: #080808;
+      border: 1px solid var(--accent);
+      margin: 0 16px 16px;
+      padding: 20px 24px;
+    }
+    .detail-title { font-family: var(--head); font-size: 16px; letter-spacing: 3px; color: var(--accent); margin-bottom: 16px; }
+    .detail-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
+    .cost-row     { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #111; }
+    .cost-label   { color: var(--dim); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+    .cost-val     { font-size: 13px; }
+    .cost-total   { border-top: 1px solid var(--accent); padding-top: 8px; margin-top: 4px; }
+    .cost-total .cost-label { color: var(--text); }
+    .cost-total .cost-val   { color: var(--accent); font-size: 15px; }
+
+    /* Missing materials */
+    .missing-title { font-family: var(--head); font-size: 13px; letter-spacing: 2px; color: var(--accent); margin: 20px 0 10px; }
+    .missing-table th { color: var(--accent); font-size: 10px; }
+    .missing-table td { color: var(--accent); }
+
+    /* ── Mineral cards ───────────────────────────────────────────────── */
+    .mineral-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 20px; }
+    .mineral-card {
+      border: 1px solid var(--border);
+      padding: 14px 16px;
+      background: #050505;
+    }
+    .mineral-name  { font-family: var(--head); font-size: 15px; font-weight: 600; letter-spacing: 2px; color: var(--text); margin-bottom: 6px; }
+    .mineral-price { font-size: 18px; color: var(--accent); }
+    .mineral-sub   { font-size: 10px; color: var(--dim); margin-top: 2px; letter-spacing: 1px; }
+
+    /* ── PLEX tracker ────────────────────────────────────────────────── */
+    .plex-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px; }
+    .plex-card { border: 1px solid var(--border); padding: 18px 20px; background: #050505; }
+    .plex-label { font-family: var(--head); font-size: 11px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; margin-bottom: 6px; }
+    .plex-value { font-size: 22px; color: var(--text); }
+    .plex-value.accent { color: var(--accent); }
+
+    .progress-track {
+      height: 10px;
+      background: #111;
+      border: 1px solid var(--border);
+      margin: 16px 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 0.8s ease;
+    }
+    .progress-labels {
+      display: flex; justify-content: space-between;
+      padding: 4px 20px 20px;
+      font-size: 11px; color: var(--dim); letter-spacing: 1px;
+    }
+
+    /* ── Skeleton pulse ──────────────────────────────────────────────── */
+    @keyframes pulse { 0%,100% { opacity: 0.3 } 50% { opacity: 0.7 } }
+    .skeleton-row td { animation: pulse 1.5s ease-in-out infinite; background: #111; height: 36px; }
+
+    /* ── Error banner ────────────────────────────────────────────────── */
+    .error-banner {
+      background: rgba(255,71,0,0.1);
+      border: 1px solid var(--accent);
+      padding: 12px 20px;
+      margin: 16px;
+      font-size: 12px;
+      letter-spacing: 1px;
+    }
+    .error-banner span { color: var(--accent); font-family: var(--head); font-size: 14px; font-weight: 700; letter-spacing: 2px; }
+
+    /* ── Stat bar ────────────────────────────────────────────────────── */
+    .stat-bar { display: flex; gap: 24px; padding: 12px 20px; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
+    .stat-item { font-size: 11px; letter-spacing: 1px; }
+    .stat-item b { color: var(--accent); font-weight: normal; }
+
+    /* ── Buttons ─────────────────────────────────────────────────────── */
+    .btn {
+      font-family: var(--head);
+      font-size: 12px;
+      letter-spacing: 2px;
+      font-weight: 600;
+      text-transform: uppercase;
+      background: transparent;
+      border: 1px solid var(--accent);
+      color: var(--accent);
+      padding: 6px 16px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn:hover  { background: rgba(255,71,0,0.15); }
+    .btn:active { background: rgba(255,71,0,0.3); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Connection dot ──────────────────────────────────────────────── */
+    .dot { width: 8px; height: 8px; display: inline-block; border-radius: 50% !important; margin-right: 6px; vertical-align: middle; }
+    .dot-green { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
+    .dot-red   { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 1s infinite; }
+
+    /* ── Hangar badge ────────────────────────────────────────────────── */
+    .badge-ok   { color: #00cc66; }
+    .badge-fail { color: var(--accent); }
+    .badge-na   { color: var(--dim); }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <div id="boot-msg" style="color:#ff4700;font-family:monospace;padding:40px;font-size:14px;">
+      CREST // Loading scripts...<br/>
+      <span style="color:#555;font-size:11px;">If this persists, open the browser console (F12) and look for errors.</span>
+    </div>
+  </div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const API = '';
+
+    // ── Formatters ────────────────────────────────────────────────────────────
+    function fmtISK(v) {
+      if (v == null) return '—';
+      const abs = Math.abs(v);
+      const sign = v < 0 ? '-' : '';
+      if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(2)}B`;
+      if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(1)}M`;
+      if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)}K`;
+      return `${sign}${abs.toFixed(0)}`;
+    }
+    function fmtVol(v) {
+      if (!v) return '—';
+      return new Intl.NumberFormat('en-US').format(Math.round(v));
+    }
+    function fmtTS(ts) {
+      if (!ts) return '—';
+      return new Date(ts * 1000).toUTCString().replace(' GMT', '') + ' UTC';
+    }
+
+    // ── Clock ─────────────────────────────────────────────────────────────────
+    function useClock() {
+      const [t, setT] = useState('');
+      useEffect(() => {
+        const tick = () => {
+          const d = new Date();
+          const h = String(d.getUTCHours()).padStart(2,'0');
+          const m = String(d.getUTCMinutes()).padStart(2,'0');
+          const s = String(d.getUTCSeconds()).padStart(2,'0');
+          setT(`EVE ${h}:${m}:${s}`);
+        };
+        tick();
+        const id = setInterval(tick, 1000);
+        return () => clearInterval(id);
+      }, []);
+      return t;
+    }
+
+    // ── API hook ──────────────────────────────────────────────────────────────
+    function useApi(url, deps = []) {
+      const [data, setData]       = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [error, setError]     = useState(false);
+      const fetchData = useCallback(async () => {
+        setLoading(true); setError(false);
+        try {
+          const res = await fetch(url, { signal: AbortSignal.timeout(30000) });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          setData(await res.json());
+        } catch { setError(true); }
+        finally  { setLoading(false); }
+      }, [url]);
+      useEffect(() => { fetchData(); }, deps);
+      return { data, loading, error, refetch: fetchData };
+    }
+
+    // ── Header ────────────────────────────────────────────────────────────────
+    function Header({ online }) {
+      const clock = useClock();
+      return (
+        <div id="crest-header">
+          <div>
+            <div className="logo-text">CREST</div>
+            <div className="logo-sub">CAPSULEER RESOURCE &amp; ECONOMIC STRATEGY TOOL</div>
+          </div>
+          <div style={{ display:'flex', alignItems:'center', gap:20 }}>
+            <div className="clock-text" style={{ color:'var(--text)' }}>{clock}</div>
+            <div style={{ fontSize:11, letterSpacing:1 }}>
+              <span className={`dot ${online ? 'dot-green' : 'dot-red'}`} />
+              {online ? 'ONLINE' : 'OFFLINE'}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Error banner ──────────────────────────────────────────────────────────
+    function ErrorBanner() {
+      return (
+        <div className="error-banner">
+          <span>CREST OFFLINE</span> — Start server with:{' '}
+          <code style={{ color:'var(--accent)' }}>python server.py</code>
+        </div>
+      );
+    }
+
+    // ── Skeleton rows ─────────────────────────────────────────────────────────
+    function SkeletonRows({ cols = 9, count = 5 }) {
+      return Array.from({ length: count }).map((_, i) => (
+        <tr key={i} className="skeleton-row">
+          {Array.from({ length: cols }).map((_, j) => <td key={j}>&nbsp;</td>)}
+        </tr>
+      ));
+    }
+
+    // ── Hangar badge ──────────────────────────────────────────────────────────
+    function HangarBadge({ can_build, max_runs }) {
+      if (can_build === null || can_build === undefined) return <span className="badge-na">—</span>;
+      if (can_build) return <span className="badge-ok">✓ {max_runs}x</span>;
+      return <span className="badge-fail">✗ {max_runs}x</span>;
+    }
+
+    // ── Detail panel (expanded table row) ────────────────────────────────────
+    function DetailPanel({ item }) {
+      const totalCost = (item.material_cost||0) + (item.job_cost||0) + (item.sales_tax||0) + (item.broker_fee||0);
+      const profitColor = item.net_profit >= 0 ? 'var(--text)' : 'var(--accent)';
+      return (
+        <tr>
+          <td colSpan={9} style={{ padding:0, background:'#000' }}>
+            <div className="detail-panel">
+              <div className="detail-title">{item.name} — COST BREAKDOWN</div>
+              <div className="detail-grid">
+                <div>
+                  {[
+                    ['Gross Revenue', item.gross_revenue],
+                    ['Material Cost', item.material_cost],
+                    ['Job Install',   item.job_cost],
+                    ['Sales Tax',     item.sales_tax],
+                    ['Broker Fee',    item.broker_fee],
+                  ].map(([label, val]) => (
+                    <div key={label} className="cost-row">
+                      <span className="cost-label">{label}</span>
+                      <span className="cost-val">{fmtISK(val)} ISK</span>
+                    </div>
+                  ))}
+                  <div className="cost-row cost-total">
+                    <span className="cost-label">Total Cost</span>
+                    <span className="cost-val">{fmtISK(totalCost)} ISK</span>
+                  </div>
+                  <div className="cost-row cost-total" style={{ marginTop:4 }}>
+                    <span className="cost-label" style={{ color:'var(--text)', fontSize:13 }}>NET PROFIT</span>
+                    <span className="cost-val" style={{ color:profitColor, fontSize:17 }}>
+                      {fmtISK(item.net_profit)} ISK &nbsp;
+                      <span style={{ fontSize:12 }}>({item.margin_pct?.toFixed(1)}%)</span>
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  {item.missing && item.missing.length > 0 ? (
+                    <>
+                      <div className="missing-title">◈ MATERIAL SHORTFALLS</div>
+                      <table className="missing-table" style={{ width:'100%', borderCollapse:'collapse' }}>
+                        <thead><tr>
+                          {['MATERIAL','HAVE','NEED','SHORT BY'].map(h => (
+                            <th key={h} style={{ textAlign: h==='MATERIAL'?'left':'right', padding:'4px 8px', fontSize:10 }}>{h}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>
+                          {item.missing.map((m, i) => (
+                            <tr key={i}>
+                              <td style={{ textAlign:'left',  padding:'4px 8px', borderBottom:'1px solid #1a1a1a' }}>{m.name}</td>
+                              <td style={{ textAlign:'right', padding:'4px 8px', borderBottom:'1px solid #1a1a1a' }}>{fmtVol(m.have)}</td>
+                              <td style={{ textAlign:'right', padding:'4px 8px', borderBottom:'1px solid #1a1a1a' }}>{fmtVol(m.need)}</td>
+                              <td style={{ textAlign:'right', padding:'4px 8px', borderBottom:'1px solid #1a1a1a', color:'var(--accent)' }}>{fmtVol(m.short_by)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
+                  ) : item.can_build === true ? (
+                    <div style={{ color:'#00cc66', fontSize:12, marginTop:8 }}>
+                      ✓ All materials in hangar — {item.max_runs} run{item.max_runs!==1?'s':''} possible
+                    </div>
+                  ) : (
+                    <div style={{ color:'var(--dim)', fontSize:11, marginTop:8, letterSpacing:1 }}>
+                      Hangar data unavailable — run server with ESI token
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      );
+    }
+
+    // ── Wallet sparkline ──────────────────────────────────────────────────────
+    function WalletSparkline({ history, target }) {
+      if (!history || history.length < 2) {
+        return (
+          <div style={{
+            height:68, display:'flex', alignItems:'center',
+            color:'var(--dim)', fontSize:10, letterSpacing:2,
+            background:'#050505', border:'1px solid #111',
+            paddingLeft:12, marginBottom:14,
+          }}>
+            WALLET SPARKLINE — COLLECTING DATA (UPDATES EVERY 5 MIN)
+          </div>
+        );
+      }
+      const W = 400, H = 68;
+      const now       = Date.now() / 1000;
+      const d         = new Date();
+      const mStart    = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(),   1) / 1000;
+      const mEnd      = Date.UTC(d.getUTCFullYear(), d.getUTCMonth()+1, 1) / 1000;
+      const span      = mEnd - mStart || 1;
+      const tgt       = target || 1;
+      const toX  = ts  => Math.max(0, Math.min(W, ((ts - mStart) / span) * W));
+      const toY  = val => Math.max(2, H - 2 - (Math.min(Math.max(val, 0), tgt) / tgt) * (H - 4));
+      const nowX = toX(now);
+      const paceAtNow = ((now - mStart) / span) * tgt;
+      const pts  = history.filter(p => p.ts >= mStart)
+                          .map(p => `${toX(p.ts).toFixed(1)},${toY(p.balance).toFixed(1)}`);
+      const last = history[history.length - 1];
+      const lx   = toX(last.ts), ly = toY(last.balance);
+      const fillPts = pts.length > 0
+        ? `0,${H} ${pts.join(' ')} ${lx.toFixed(1)},${H}`
+        : null;
+      return (
+        <div style={{ marginBottom:14, border:'1px solid #111', background:'#030303' }}>
+          <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:68, display:'block' }} preserveAspectRatio="none">
+            {/* Target ceiling */}
+            <line x1="0" y1="2" x2={W} y2="2" stroke="#1e1e1e" strokeWidth="1" />
+            {/* Ideal pace line up to now */}
+            <line x1="0" y1={H} x2={nowX} y2={toY(paceAtNow)}
+                  stroke="#2a2a2a" strokeWidth="1.5" strokeDasharray="4,3" />
+            {/* Fill */}
+            {fillPts && <polygon points={fillPts} fill="rgba(255,71,0,0.07)" />}
+            {/* Balance line */}
+            {pts.length > 1 && (
+              <polyline points={pts.join(' ')} fill="none" stroke="var(--accent)" strokeWidth="1.5" />
+            )}
+            {/* Current dot */}
+            <circle cx={lx} cy={ly} r="3" fill="var(--accent)" />
+          </svg>
+        </div>
+      );
+    }
+
+    // ── KPI bar ───────────────────────────────────────────────────────────────
+    function KPIBar({ scanData, plexData, loading, onRefresh, refreshing }) {
+      const results    = scanData?.results || [];
+      const topItem    = results[0];
+      const profitable = results.filter(r => r.is_profitable).length;
+      const balance    = plexData?.current_balance ?? 0;
+      const target     = plexData?.monthly_target  ?? 0;
+      const pct        = target > 0 ? (balance / target * 100) : 0;
+      return (
+        <div className="kpi-row">
+          <div className="kpi-card">
+            <div className="kpi-label">Wallet Balance</div>
+            <div className="kpi-value accent">{loading && !plexData ? '—' : fmtISK(balance) + ' ISK'}</div>
+            <div className="kpi-sub">ISK LIQUID</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-label">Monthly Goal</div>
+            <div className="kpi-value">{loading && !plexData ? '—' : pct.toFixed(1) + '%'}</div>
+            <div className="kpi-sub">{fmtISK(target)} ISK TARGET</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-label">Best Opportunity</div>
+            <div className="kpi-value">{loading && !scanData ? '—' : (topItem ? topItem.margin_pct.toFixed(1) + '%' : '—')}</div>
+            <div className="kpi-sub">{topItem?.name ?? (loading ? '...' : 'NO DATA')}</div>
+          </div>
+          <div className="kpi-card">
+            <div className="kpi-label">Items Scanned</div>
+            <div className="kpi-value">{loading && !scanData ? '—' : `${profitable} / ${results.length}`}</div>
+            <div className="kpi-sub">
+              <span>PROFITABLE</span>
+              <button className="btn" onClick={onRefresh} disabled={refreshing} style={{ padding:'4px 12px', fontSize:11 }}>
+                {refreshing ? '⟳' : '⟳ SCAN'}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Opportunities section ─────────────────────────────────────────────────
+    function OpportunitiesSection({ scanData, loading, error }) {
+      const [selectedIdx, setSelectedIdx] = useState(null);
+      const results   = scanData?.results || [];
+      const maxMargin = Math.max(...results.map(r => r.margin_pct || 0), 1);
+      return (
+        <div className="panel">
+          <div className="panel-hdr">
+            <span className="panel-title">◈ Manufacturing Opportunities</span>
+            <span style={{ fontSize:10, color:'var(--dim)', letterSpacing:1 }}>
+              {scanData?.scanned_at ? `LAST SCAN  ${fmtTS(scanData.scanned_at)}` : ''}
+            </span>
+          </div>
+          {error && <ErrorBanner />}
+          <div style={{ overflowX:'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width:52 }}>RANK</th>
+                  <th>ITEM</th>
+                  <th>REVENUE</th>
+                  <th>MAT COST</th>
+                  <th>JOB COST</th>
+                  <th>NET PROFIT</th>
+                  <th style={{ width:120 }}>MARGIN</th>
+                  <th>VOLUME</th>
+                  <th>HANGAR</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && !scanData ? (
+                  <SkeletonRows cols={9} count={5} />
+                ) : (
+                  results.map((r, i) => {
+                    const isSel       = selectedIdx === i;
+                    const profitColor = r.net_profit >= 0 ? 'var(--text)' : 'var(--accent)';
+                    const barW        = Math.min(100, ((r.margin_pct || 0) / maxMargin) * 100);
+                    return (
+                      <React.Fragment key={r.output_id ?? i}>
+                        <tr
+                          className={`${r.is_profitable ? 'row-profitable' : 'row-unprofitable'}${isSel ? ' row-selected' : ''}`}
+                          onClick={() => setSelectedIdx(p => p === i ? null : i)}
+                        >
+                          <td style={{ color:'var(--dim)', fontSize:11 }}>#{i + 1}</td>
+                          <td style={{ color: isSel ? 'var(--accent)' : 'var(--text)', fontFamily:'var(--head)', fontSize:14, letterSpacing:1 }}>
+                            {r.name}
+                          </td>
+                          <td>{fmtISK(r.gross_revenue)}</td>
+                          <td style={{ color:'var(--dim)' }}>{fmtISK(r.material_cost)}</td>
+                          <td style={{ color:'var(--dim)' }}>{fmtISK(r.job_cost)}</td>
+                          <td style={{ color: profitColor }}>{fmtISK(r.net_profit)}</td>
+                          <td className="margin-cell">
+                            <div className="margin-bar" style={{ width:`${barW}%` }} />
+                            <span className="margin-val">{r.margin_pct?.toFixed(1)}%</span>
+                          </td>
+                          <td style={{ color:'var(--dim)' }}>{fmtVol(r.avg_daily_volume)}</td>
+                          <td><HangarBadge can_build={r.can_build} max_runs={r.max_runs} /></td>
+                        </tr>
+                        {isSel && <DetailPanel item={r} />}
+                      </React.Fragment>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+          {!loading && results.length === 0 && !error && (
+            <div style={{ padding:'32px 20px', color:'var(--dim)', textAlign:'center', letterSpacing:2, fontSize:11 }}>
+              NO DATA — CLICK ⟳ SCAN TO RUN A MARKET SCAN
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── PLEX section ──────────────────────────────────────────────────────────
+    function PlexSection({ plexData, walletHistory, loading }) {
+      const balance   = plexData?.current_balance  ?? 0;
+      const target    = plexData?.monthly_target   ?? 0;
+      const daysLeft  = plexData?.days_remaining   ?? 0;
+      const plexPrice = plexData?.plex_price       ?? 0;
+      const accounts  = plexData?.accounts         ?? 0;
+      const ppa       = plexData?.plex_per_account ?? 0;
+      const needed    = Math.max(0, target - balance);
+      const pct       = target > 0 ? Math.min(100, balance / target * 100) : 0;
+      const perDay    = daysLeft > 0 ? needed / daysLeft : 0;
+      const projOk    = pct >= 100;
+      const month     = new Date().toLocaleString('en-US', { month:'long', year:'numeric' }).toUpperCase();
+      const stats = [
+        ['MONTHLY TARGET',  fmtISK(target) + ' ISK'],
+        ['STILL NEEDED',    fmtISK(needed) + ' ISK'],
+        ['ISK / DAY',       fmtISK(perDay) + ' ISK'],
+        ['DAYS REMAINING',  String(daysLeft)],
+        ['PLEX PRICE',      fmtISK(plexPrice) + ' ISK'],
+        ['ACCOUNTS',        `${accounts} × ${ppa} PLEX`],
+      ];
+      return (
+        <div className="bottom-left">
+          <div className="panel-title" style={{ marginBottom:16 }}>◈ PLEX TRACKER — {month}</div>
+
+          {/* Big balance */}
+          <div style={{ marginBottom:16 }}>
+            <div style={{ fontFamily:'var(--head)', fontSize:10, letterSpacing:2, color:'var(--dim)', marginBottom:4 }}>WALLET BALANCE</div>
+            <div style={{ fontFamily:'var(--head)', fontSize:34, fontWeight:700, color:'var(--accent)', lineHeight:1 }}>
+              {loading && !plexData ? '—' : `${fmtISK(balance)} ISK`}
+            </div>
+          </div>
+
+          {/* Sparkline */}
+          <WalletSparkline history={walletHistory ?? []} target={target} />
+
+          {/* Progress bar */}
+          <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'var(--dim)', letterSpacing:1, marginBottom:5 }}>
+            <span>0</span>
+            <span style={{ color: projOk ? '#00cc66' : 'var(--text)' }}>{pct.toFixed(1)}% OF TARGET</span>
+            <span>{fmtISK(target)} ISK</span>
+          </div>
+          <div style={{ height:8, background:'#0a0a0a', border:'1px solid var(--border)', marginBottom:6 }}>
+            <div style={{ height:'100%', width:`${pct}%`, background: projOk ? '#00cc66' : 'var(--accent)', transition:'width 0.8s ease' }} />
+          </div>
+          <div style={{ fontSize:11, color: projOk ? '#00cc66' : 'var(--accent)', letterSpacing:1, marginBottom:16, textAlign:'right' }}>
+            {projOk ? 'TARGET ACHIEVED ✓' : `SHORT BY ${fmtISK(needed)} ISK AT CURRENT PACE`}
+          </div>
+
+          {/* Stats grid */}
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:1, background:'var(--border)' }}>
+            {stats.map(([label, val]) => (
+              <div key={label} style={{ background:'#050505', padding:'10px 12px' }}>
+                <div style={{ fontFamily:'var(--head)', fontSize:10, letterSpacing:2, color:'var(--dim)', marginBottom:3 }}>{label}</div>
+                <div style={{ fontSize:13, color:'var(--text)' }}>{loading && !plexData ? '—' : val}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Minerals section ──────────────────────────────────────────────────────
+    const MINERAL_ORDER = ['Tritanium','Pyerite','Mexallon','Isogen','Nocxium','Zydrine','Megacyte','Morphite'];
+
+    function MineralsSection({ scanData, loading }) {
+      const minerals = scanData?.minerals || {};
+      return (
+        <div className="bottom-right">
+          <div className="panel-title" style={{ marginBottom:16 }}>◈ Jita Mineral Prices</div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:1, background:'var(--border)' }}>
+            {MINERAL_ORDER.map(name => {
+              const m = minerals[name];
+              return (
+                <div key={name} style={{ background:'#050505', padding:'12px 14px' }}>
+                  <div style={{ fontFamily:'var(--head)', fontSize:13, fontWeight:600, letterSpacing:2, color:'var(--text)', marginBottom:4 }}>
+                    {name.toUpperCase()}
+                  </div>
+                  {loading && !scanData ? (
+                    <div style={{ background:'#111', height:18, width:80, animation:'pulse 1.5s infinite' }} />
+                  ) : (
+                    <>
+                      <div style={{ fontSize:16, color:'var(--accent)' }}>{m ? fmtISK(m.sell) : '—'} ISK</div>
+                      <div style={{ fontSize:10, color:'var(--dim)', marginTop:2, letterSpacing:1 }}>
+                        BUY {m ? fmtISK(m.buy) : '—'}
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {scanData?.scanned_at && (
+            <div style={{ fontSize:10, color:'var(--dim)', letterSpacing:1, marginTop:10, textAlign:'right' }}>
+              {fmtTS(scanData.scanned_at)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── App ───────────────────────────────────────────────────────────────────
+    const AUTO_REFRESH_MS = 5 * 60 * 1000;
+
+    function App() {
+      const [refreshKey, setRefreshKey] = useState(0);
+      const [refreshing, setRefreshing] = useState(false);
+      const timerRef = useRef(null);
+
+      const { data: scanData, loading: scanLoading, error: scanError, refetch } = useApi(`${API}/api/scan`,           [refreshKey]);
+      const { data: plexData, loading: plexLoading                              } = useApi(`${API}/api/plex`,           [refreshKey]);
+      const { data: walletRaw                                                   } = useApi(`${API}/api/wallet/history`, [refreshKey]);
+
+      const walletHistory = Array.isArray(walletRaw) ? walletRaw : null;
+      const online = !scanError;
+
+      useEffect(() => {
+        timerRef.current = setInterval(() => setRefreshKey(k => k + 1), AUTO_REFRESH_MS);
+        return () => clearInterval(timerRef.current);
+      }, []);
+
+      async function handleRefresh() {
+        setRefreshing(true);
+        await refetch();
+        setRefreshing(false);
+      }
+
+      return (
+        <div>
+          <Header online={online} />
+          <KPIBar
+            scanData={scanData} plexData={plexData}
+            loading={scanLoading || plexLoading}
+            onRefresh={handleRefresh} refreshing={refreshing || scanLoading}
+          />
+          <OpportunitiesSection
+            scanData={scanData} loading={scanLoading} error={scanError}
+          />
+          <div className="bottom-grid">
+            <PlexSection plexData={plexData} walletHistory={walletHistory} loading={plexLoading} />
+            <MineralsSection scanData={scanData} loading={scanLoading} />
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

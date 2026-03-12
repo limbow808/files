@@ -41,7 +41,7 @@ MINERALS = {
 BLUEPRINTS = [
     {
         "name": "Hammerhead II",
-        "output_id": 2454,
+        "output_id": 2185,
         "output_qty": 1,
         "me_level": 0,      # UPDATE THIS to your actual ME level
         "materials": [
@@ -103,7 +103,7 @@ BLUEPRINTS = [
     },
     {
         "name": "Hobgoblin I",       # T1 baseline - useful to compare T1 vs T2 margins
-        "output_id": 2455,
+        "output_id": 2454,
         "output_qty": 10,            # T1 BPOs produce in batches
         "me_level": 0,
         "materials": [

@@ -30,11 +30,12 @@ CONFIG = {
     # System Cost Index for your manufacturing system
     # Find yours at: https://www.fuzzwork.co.uk/industry/
     # Lower = better. Quiet highsec systems can be 0.003-0.01
-    "system_cost_index":  0.005,   # UPDATE with your actual system SCI
+    "system_cost_index":  0.0714,   # UPDATE with your actual system SCI
     
     # Structure manufacturing bonus (ME reduction as decimal)
     # E-UNI structures may offer 1% ME bonus = 0.01
     "structure_me_bonus": 0.01,    # UPDATE based on E-UNI structure
+    "job_cost_structure_discount": 0.04,   # E-UNI Engingeering Complex
 }
 
 
@@ -101,7 +102,7 @@ def calculate_profit(blueprint: dict, prices: dict) -> dict | None:
 
     # ── Job installation cost (System Cost Index) ─────────────────────────────
     # SCI is applied to the estimated job cost (sum of material values at sell price)
-    job_cost = material_cost * CONFIG["system_cost_index"]
+    job_cost = material_cost * CONFIG["system_cost_index"] * (1 - CONFIG["job_cost_structure_discount"])
 
     # ── Taxes and fees ────────────────────────────────────────────────────────
     sales_tax   = gross_revenue * CONFIG["sales_tax"]
