@@ -66,6 +66,8 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
     output_id  = blueprint["output_id"]
     output_qty = blueprint["output_qty"]
     me_level   = blueprint["me_level"]
+    te_level   = blueprint.get("te_level", 0)
+    base_time  = blueprint.get("time_seconds", 0)
 
     # Check we have the output price
     if output_id not in prices:
@@ -118,6 +120,13 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
     net_profit   = gross_revenue - total_cost
     margin_pct   = (net_profit / gross_revenue * 100) if gross_revenue > 0 else 0
 
+    # ── Duration with TE applied ──────────────────────────────────────────────
+    # Formula: base_time * (1 - te_level/100)
+    # Structure time bonus not currently modelled; add cfg key if needed
+    te_reduction  = 1 - (te_level / 100)
+    time_seconds  = max(1, round(base_time * te_reduction)) if base_time else 0
+    isk_per_hour  = (net_profit / time_seconds * 3600) if time_seconds > 0 else None
+
     return {
         "name":               blueprint["name"],
         "output_id":          output_id,
@@ -129,10 +138,12 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
         "broker_fee":         broker_fee,
         "net_profit":         net_profit,
         "margin_pct":         margin_pct,
+        "time_seconds":       time_seconds,
+        "isk_per_hour":       isk_per_hour,
         "material_breakdown": material_breakdown,
-    "is_profitable":      net_profit > 0,
-    # Propagate any avg_daily_volume for the output (if present)
-    "avg_daily_volume":   prices.get(output_id, {}).get("avg_daily_volume")
+        "is_profitable":      net_profit > 0,
+        # Propagate any avg_daily_volume for the output (if present)
+        "avg_daily_volume":   prices.get(output_id, {}).get("avg_daily_volume")
     }
 
 

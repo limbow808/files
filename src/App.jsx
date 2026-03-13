@@ -36,18 +36,13 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Header online={online} activeTab={activeTab} onTabChange={setActiveTab} />
+      <Header online={online} activeTab={activeTab} onTabChange={setActiveTab} onRefresh={handleRefresh} refreshing={refreshing || scanLoading} />
       <div className="app-content">
         {activeTab === 'OVERVIEW' && (
           <OverviewPage
-            scanData={scanData}
             plexData={plexData}
             walletHistory={walletHistory}
-            scanLoading={scanLoading}
             plexLoading={plexLoading}
-            scanError={scanError}
-            onRefresh={handleRefresh}
-            refreshing={refreshing}
           />
         )}
         {activeTab === 'CALCULATOR' && <CalculatorPage />}

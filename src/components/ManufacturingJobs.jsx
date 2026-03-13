@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { useApi } from '../hooks/useApi';
-import { SkeletonRows } from './ui';
 
 const ACTIVITY_COLORS = {
   'Manufacturing': 'var(--accent)',
@@ -68,7 +67,9 @@ export default function ManufacturingJobs() {
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {loading && !data ? (
-          <table><tbody><SkeletonRows cols={4} count={4} /></tbody></table>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
+            LOADING…
+          </div>
         ) : jobs.length === 0 ? (
           <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 2, textAlign: 'center' }}>
             NO ACTIVE JOBS

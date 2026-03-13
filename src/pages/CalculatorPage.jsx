@@ -1,14 +1,14 @@
 import { useState, useRef, Fragment, useMemo } from 'react';
 import { useApi } from '../hooks/useApi';
+import { useCalcProgress } from '../hooks/useCalcProgress';
 import { fmtISK, fmtVol, fmtDuration, toggleSet, roiTier } from '../utils/fmt';
-import { SkeletonRows } from '../components/ui';
 import SystemInput from '../components/SystemInput';
 import EsiBlueprintPanel from '../components/EsiBlueprintPanel';
 import CalcDetailPanel from '../components/CalcDetailPanel';
 import ShoppingList from '../components/ShoppingList';
 import { API } from '../App';
 
-const BP_FILTERS   = ['Personal', 'Corporate', 'Not Owned', 'Favorites', 'BPOs', 'BPCs'];
+const BP_FILTERS   = ['Personal', 'Corporate', 'Not Owned', 'BPOs', 'BPCs'];
 const TYPE_FILTERS = ['Ships', 'Modules', 'Charges', 'Drones', 'Rigs', 'Structures', 'Booster', 'Implants', 'Components', 'Other'];
 const TECH_FILTERS = ['I', 'II', 'III'];
 const SIZE_FILTERS = ['S', 'M', 'L', 'XL', 'U'];
@@ -81,15 +81,17 @@ export default function CalculatorPage() {
   }
 
   const { data: calcData, loading, error } = useApi(buildUrl(), [calcKey]);
+  const progress = useCalcProgress(system, facility, loading && !calcData);
   const { data: skillsData } = useApi(`${API}/api/skills`, []);
   const { data: esiBpData  } = useApi(`${API}/api/blueprints/esi`, []);
   const charSkills = skillsData?.skills || null;
 
-  // Build ESI BP lookup: normalised lowercase name → { hasBPO, hasBPC }
+  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC }
+  // ESI names include " Blueprint" suffix — strip it to match calculator product names
   const esiBpMap = useMemo(() => {
     const map = {};
     for (const bp of (esiBpData?.blueprints || [])) {
-      const key = bp.name.toLowerCase();
+      const key = bp.name.toLowerCase().replace(/\s+blueprint$/, '');
       if (!map[key]) map[key] = { hasBPO: false, hasBPC: false };
       if (bp.bp_type === 'BPO') map[key].hasBPO = true;
       else                       map[key].hasBPC = true;
@@ -127,9 +129,8 @@ export default function CalculatorPage() {
       if (bpFilters.has('Not Owned') && !isOwned)             passes = true;
       if (bpFilters.has('BPOs')      && hasBPO)               passes = true;
       if (bpFilters.has('BPCs')      && hasBPC)               passes = true;
-      // Corporate / Favorites: no data yet → treat as pass-through when selected
+      // Corporate: no data yet → treat as pass-through when selected
       if (bpFilters.has('Corporate'))                          passes = true;
-      if (bpFilters.has('Favorites'))                          passes = true;
       if (!passes) return false;
     }
 
@@ -155,6 +156,16 @@ export default function CalculatorPage() {
   }
   function setOverride(id, field, val) {
     setOverrides(prev => ({ ...prev, [id]: { ...(prev[id] || {}), [field]: val } }));
+  }
+  // Raw string stored while typing; resolved to int ≥ 1 on blur
+  function getOverrideRaw(id, field, def) {
+    const v = overrides[id]?.[field];
+    return v !== undefined ? v : def;
+  }
+  function commitOverride(id, field, def) {
+    const raw = overrides[id]?.[field];
+    const n   = parseInt(raw, 10);
+    if (isNaN(n) || n < 1) setOverride(id, field, def);
   }
 
   const sciInfo = calcData?.sci != null
@@ -286,21 +297,12 @@ export default function CalculatorPage() {
             </tr>
           </thead>
           <tbody>
-            {loading ? (
-              <>
-                <SkeletonRows cols={17} count={6} />
-                <tr>
-                  <td colSpan={17} style={{ textAlign: 'center', padding: '10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: 'none', animation: 'pulse 1.5s ease-in-out infinite' }}>
-                    FETCHING JITA PRICES — MAY TAKE ~60s ON FIRST LOAD
-                  </td>
-                </tr>
-              </>
-            ) : (
+            {loading ? null : (
               results.map((r, i) => {
                 const isSel    = selectedIdx === i;
                 const isChk    = checkedIds.has(r.output_id);
-                const qty      = getOverride(r.output_id, 'qty',  r.output_qty);
-                const runs     = getOverride(r.output_id, 'runs', 1);
+                const qty      = Math.max(1, parseInt(getOverrideRaw(r.output_id, 'qty',  r.output_qty), 10) || 1);
+                const runs     = Math.max(1, parseInt(getOverrideRaw(r.output_id, 'runs', 1),             10) || 1);
                 const totalTax = (r.sales_tax || 0) + (r.broker_fee || 0);
                 const roi      = r.roi || 0;
                 const tier     = roiTier(roi);
@@ -328,12 +330,16 @@ export default function CalculatorPage() {
                       <td style={{ color: 'var(--dim)' }}>{fmtDuration(r.duration)}</td>
                       <td style={{ color: 'var(--dim)' }}>{fmtVol(r.avg_daily_volume)}</td>
                       <td onClick={e => e.stopPropagation()}>
-                        <input className="inline-num" type="number" min="1" value={qty}
-                          onChange={e => setOverride(r.output_id, 'qty', parseInt(e.target.value) || 1)} />
+                        <input className="inline-num" type="number" min="1"
+                          value={getOverrideRaw(r.output_id, 'qty', r.output_qty)}
+                          onChange={e => setOverride(r.output_id, 'qty', e.target.value)}
+                          onBlur={() => commitOverride(r.output_id, 'qty', r.output_qty)} />
                       </td>
                       <td onClick={e => e.stopPropagation()}>
-                        <input className="inline-num" type="number" min="1" value={runs}
-                          onChange={e => setOverride(r.output_id, 'runs', parseInt(e.target.value) || 1)} />
+                        <input className="inline-num" type="number" min="1"
+                          value={getOverrideRaw(r.output_id, 'runs', 1)}
+                          onChange={e => setOverride(r.output_id, 'runs', e.target.value)}
+                          onBlur={() => commitOverride(r.output_id, 'runs', 1)} />
                       </td>
                       <td style={{ color: 'var(--dim)' }}>{fmtISK((r.material_cost + r.job_cost) * runs)}</td>
                       <td>{fmtISK(r.gross_revenue * runs)}</td>
@@ -365,8 +371,32 @@ export default function CalculatorPage() {
           </div>
         )}
         {loading && !calcData && (
-          <div style={{ padding: '32px 20px', color: 'var(--dim)', textAlign: 'center', letterSpacing: 2, fontSize: 11, animation: 'pulse 1.5s ease-in-out infinite' }}>
-            FETCHING MARKET DATA — This takes ~60s on first load…
+          <div style={{ padding: '40px 20px', textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', letterSpacing: 2 }}>
+            {progress && progress.stage === 'prices' ? (
+              <div style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>
+                FETCHING MARKET DATA…
+              </div>
+            ) : progress && progress.stage === 'calc' ? (
+              <div>
+                <div style={{ color: 'var(--text)', marginBottom: 8, fontSize: 12, letterSpacing: 1 }}>
+                  {progress.msg}
+                </div>
+                <div style={{ color: 'var(--dim)', fontSize: 10 }}>
+                  {progress.done} / {progress.total}
+                </div>
+                <div style={{ marginTop: 10, width: 240, margin: '10px auto 0', height: 2, background: '#1a1a1a', position: 'relative' }}>
+                  <div style={{
+                    position: 'absolute', left: 0, top: 0, bottom: 0,
+                    width: `${Math.round((progress.done / progress.total) * 100)}%`,
+                    background: 'var(--accent)', transition: 'width 0.3s'
+                  }} />
+                </div>
+              </div>
+            ) : (
+              <div style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>
+                LOADING…
+              </div>
+            )}
           </div>
         )}
       </div>

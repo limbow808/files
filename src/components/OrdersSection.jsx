@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi';
-import { SkeletonRows } from './ui';
 import { fmtISK } from '../utils/fmt';
 
 function OrderTable({ orders, isBuy }) {
@@ -82,18 +81,7 @@ export default function OrdersSection() {
             <button
               key={t}
               onClick={() => setTab(t)}
-              style={{
-                padding: '9px 18px',
-                fontSize: 11,
-                fontFamily: 'var(--head)',
-                letterSpacing: 2,
-                background: 'none',
-                border: 'none',
-                borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
-                color: tab === t ? 'var(--text)' : 'var(--dim)',
-                cursor: 'pointer',
-                textTransform: 'uppercase',
-              }}
+              className={`tab-btn${tab === t ? ' active' : ''}`}
             >
               {t === 'sell' ? `◈ Sell Orders (${sell.length})` : `◈ Buy Orders (${buy.length})`}
             </button>
@@ -114,7 +102,9 @@ export default function OrdersSection() {
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {loading && !data ? (
-          <table><tbody><SkeletonRows cols={tab === 'buy' ? 6 : 5} count={4} /></tbody></table>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
+            LOADING…
+          </div>
         ) : (
           <OrderTable orders={tab === 'sell' ? sell : buy} isBuy={tab === 'buy'} />
         )}

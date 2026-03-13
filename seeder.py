@@ -75,7 +75,8 @@ def _init_crest(conn: sqlite3.Connection) -> None:
             size_class    TEXT    NOT NULL DEFAULT 'U',
             slot_type     TEXT,
             me_level      INTEGER NOT NULL DEFAULT 0,
-            te_level      INTEGER NOT NULL DEFAULT 0
+            te_level      INTEGER NOT NULL DEFAULT 0,
+            time_seconds  INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS blueprint_materials (
@@ -172,6 +173,23 @@ def _load_materials(sde: sqlite3.Connection) -> dict[int, list[dict]]:
     return mats
 
 
+def _load_times(sde: sqlite3.Connection) -> dict[int, int]:
+    """
+    Load manufacturing time (activityID=1) for all blueprints from the SDE.
+    Returns { blueprint_type_id: time_in_seconds }
+    """
+    print("  Loading industryActivityTimes...", end="", flush=True)
+    cur = sde.cursor()
+    cur.execute("""
+        SELECT typeID, time
+        FROM   industryActivity
+        WHERE  activityID = 1
+    """)
+    times = {row["typeID"]: row["time"] for row in cur.fetchall()}
+    print(f" {len(times)} entries loaded")
+    return times
+
+
 def seed_from_sde() -> tuple[int, int]:
     """
     Main seeding function. Connects to both databases, reads the SDE,
@@ -192,6 +210,9 @@ def seed_from_sde() -> tuple[int, int]:
 
     # ── 2. Pre-load all material rows ─────────────────────────────────────────
     materials_by_bp = _load_materials(sde)
+
+    # ── 2b. Pre-load manufacturing times ──────────────────────────────────────
+    times_by_bp = _load_times(sde)
 
     # ── 3. Query all manufacturable blueprint outputs ─────────────────────────
     print("  Querying manufacturable blueprints...", end="", flush=True)
@@ -228,8 +249,8 @@ def seed_from_sde() -> tuple[int, int]:
         INSERT OR REPLACE INTO blueprints
             (blueprint_id, output_id, output_name, output_qty,
              category, item_group, tech_level, volume_m3,
-             size_class, slot_type, me_level, te_level)
-        VALUES (?,?,?,?,?,?,?,?,?,?,0,0)
+             size_class, slot_type, me_level, te_level, time_seconds)
+        VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?)
     """
     mat_insert = """
         INSERT INTO blueprint_materials
@@ -247,6 +268,7 @@ def seed_from_sde() -> tuple[int, int]:
         size  = size_map.get(output_id, "U")
         slot  = slot_map.get(output_id)
         vol   = row["volume_m3"] or 0.01
+        time_s = times_by_bp.get(bp_id, 0)
 
         # Normalise category string for dashboard filter chips
         raw_cat   = row["category"] or "Other"
@@ -263,6 +285,7 @@ def seed_from_sde() -> tuple[int, int]:
             vol,
             size,
             slot,
+            time_s,
         ))
 
         # Insert materials — delete old rows first so re-runs stay clean

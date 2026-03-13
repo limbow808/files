@@ -235,12 +235,18 @@ def get_price(type_id: int) -> dict | None:
     return price
 
 
-def get_prices_bulk(type_ids: list[int]) -> dict:
+def get_prices_bulk(type_ids: list[int], history_ids: list[int] | None = None) -> dict:
     """
     Get prices for a list of type IDs.
     Ensures the market dump is fresh ONCE, then answers all queries locally.
     No per-item API calls for orders — all order lookups are SQLite queries.
     Volume history calls are parallelised across a thread pool.
+
+    Args:
+        type_ids:    All type IDs to fetch buy/sell prices for.
+        history_ids: Subset to fetch avg_daily_volume for (defaults to all).
+                     Pass only output item IDs to avoid fetching history for
+                     thousands of raw materials.
 
     Returns { type_id: { 'sell', 'buy', 'avg_daily_volume' } }
     """
@@ -254,9 +260,10 @@ def get_prices_bulk(type_ids: list[int]) -> dict:
         if price:
             results[type_id] = price
 
-    # Fetch volume history for all found items in parallel
+    # Fetch volume history only for the requested subset (or all if not specified)
+    ids_to_fetch = [tid for tid in (history_ids if history_ids is not None else list(results.keys())) if tid in results]
+
     # Workers capped at 10 to stay polite to ESI
-    ids_to_fetch = list(results.keys())
     with ThreadPoolExecutor(max_workers=10) as pool:
         futures = {pool.submit(_get_avg_volume, tid): tid for tid in ids_to_fetch}
         for future in as_completed(futures):

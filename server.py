@@ -13,7 +13,7 @@ Endpoints:
     GET /api/minerals - Return Jita mineral prices
 """
 
-from flask import Flask, jsonify, send_file, send_from_directory
+from flask import Flask, jsonify, send_file, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 import time
 import json
@@ -42,6 +42,57 @@ SCAN_CACHE_TTL = 300  # 5 minutes
 def _scan_is_fresh() -> bool:
     ts = _scan_cache.get("scanned_at", 0)
     return (time.time() - ts) < SCAN_CACHE_TTL
+
+
+# ── Calculator cache (keyed by facility+system params, TTL 5 min) ─────────────
+_calc_cache: dict = {}
+CALC_CACHE_TTL = 300  # 5 minutes
+
+
+def _calc_cache_key(system: str, facility: str) -> str:
+    return f"{system.lower()}|{facility.lower()}"
+
+
+def _calc_is_fresh(key: str) -> bool:
+    entry = _calc_cache.get(key)
+    if not entry:
+        return False
+    return (time.time() - entry.get("generated_at", 0)) < CALC_CACHE_TTL
+
+
+# ── Live progress broadcast (SSE) ─────────────────────────────────────────────
+# Maps cache_key → list of subscriber queues
+import queue as _queue
+_progress_subscribers: dict[str, list] = {}
+_progress_lock = threading.Lock()
+
+
+def _broadcast_progress(cache_key: str, msg: dict):
+    """Push a progress message to all SSE subscribers for this key."""
+    with _progress_lock:
+        subs = _progress_subscribers.get(cache_key, [])
+        dead = []
+        for q in subs:
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            subs.remove(q)
+
+
+def _subscribe_progress(cache_key: str) -> _queue.Queue:
+    q = _queue.Queue(maxsize=200)
+    with _progress_lock:
+        _progress_subscribers.setdefault(cache_key, []).append(q)
+    return q
+
+
+def _unsubscribe_progress(cache_key: str, q: _queue.Queue):
+    with _progress_lock:
+        subs = _progress_subscribers.get(cache_key, [])
+        if q in subs:
+            subs.remove(q)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -318,6 +369,11 @@ def api_calculator():
         sell_loc       = flask_request.args.get("sell_loc", "jita").strip().lower()
         buy_loc        = flask_request.args.get("buy_loc",  "jita").strip().lower()
 
+        # ── Return from cache if fresh ────────────────────────────────────────
+        cache_key = _calc_cache_key(system_param, facility_param)
+        if _calc_is_fresh(cache_key):
+            return jsonify(_calc_cache[cache_key])
+
         # ── Resolve SCI for the requested system ──────────────────────────────
         sci = _resolve_sci(system_param)
 
@@ -326,18 +382,25 @@ def api_calculator():
 
         # ── Gather all type IDs needed ────────────────────────────────────────
         _all_blueprints = load_blueprints()
+        total_bps    = len(_all_blueprints)
         all_type_ids = set()
+        output_ids   = set()
         for bp in _all_blueprints:
+            output_ids.add(bp["output_id"])
             all_type_ids.add(bp["output_id"])
             for mat in bp["materials"]:
                 all_type_ids.add(mat["type_id"])
         all_type_ids.update(MINERALS.values())
 
-        prices = get_prices_bulk(list(all_type_ids))
+        _broadcast_progress(cache_key, {"stage": "prices", "msg": "Fetching Jita market data…", "done": 0, "total": total_bps})
+
+        # Only fetch volume history for outputs — skips thousands of material IDs
+        prices = get_prices_bulk(list(all_type_ids), history_ids=list(output_ids))
 
         # ── Build results ──────────────────────────────────────────────────────
         mineral_names = {v: k for k, v in MINERALS.items()}
         results = []
+        done = 0
         for bp in _all_blueprints:
             from calculator import calculate_profit, CONFIG
             # Build a per-request config override
@@ -349,6 +412,17 @@ def api_calculator():
                 "sales_tax":                  facility_cfg["sales_tax"],
             }
             result = calculate_profit(bp, prices, config_override=cfg_override)
+            done += 1
+
+            # Broadcast progress every 50 items
+            if done % 50 == 0 or done == total_bps:
+                _broadcast_progress(cache_key, {
+                    "stage": "calc",
+                    "msg":   bp["name"],
+                    "done":  done,
+                    "total": total_bps,
+                })
+
             if not result:
                 continue
 
@@ -370,10 +444,11 @@ def api_calculator():
             # Derived metrics
             cost       = result.get("material_cost", 0) + result.get("job_cost", 0) + result.get("sales_tax", 0) + result.get("broker_fee", 0)
             profit     = result.get("net_profit", 0)
-            duration_h = bp.get("duration", 0) / 3600.0 if bp.get("duration", 0) else 0
-            result["roi"]         = (profit / cost * 100) if cost > 0 else 0
-            result["isk_per_hour"] = (profit / duration_h) if duration_h > 0 else 0
-            result["isk_per_m3"]  = (profit / result["volume"]) if result.get("volume", 0) > 0 else 0
+            time_s     = result.get("time_seconds") or bp.get("time_seconds", 0)
+            duration_h = time_s / 3600.0 if time_s else 0
+            result["roi"]          = (profit / cost * 100) if cost > 0 else 0
+            result["isk_per_hour"] = (profit / duration_h) if duration_h > 0 else None
+            result["isk_per_m3"]   = (profit / result["volume"]) if result.get("volume", 0) > 0 else 0
 
             # Annotate which facility/system was used
             result["resolved_sci"]      = sci
@@ -393,17 +468,60 @@ def api_calculator():
             seen_output_ids.add(oid)
             deduped.append(r)
 
-        return jsonify({
+        payload = {
             "results":      deduped,
             "generated_at": int(time.time()),
             "sci":          sci,
             "facility":     facility_cfg,
-        })
+        }
+        _calc_cache[cache_key] = payload
+        # Signal done to all SSE subscribers
+        _broadcast_progress(cache_key, {"stage": "done", "msg": "Ready", "done": total_bps, "total": total_bps})
+        return jsonify(payload)
 
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/calculator/progress", methods=["GET"])
+def api_calculator_progress():
+    """
+    SSE endpoint — streams progress events while /api/calculator is computing.
+    Query params must match those sent to /api/calculator (system, facility).
+    Client connects before or during the calculation; events arrive in real time.
+    """
+    from flask import request as freq
+    system_param   = freq.args.get("system",   "").strip()
+    facility_param = freq.args.get("facility", "station").strip().lower()
+    cache_key = _calc_cache_key(system_param, facility_param)
+
+    # If already cached, immediately send a "done" event and close
+    if _calc_is_fresh(cache_key):
+        def instant():
+            yield f"data: {json.dumps({'stage':'done','msg':'Ready','done':1,'total':1})}\n\n"
+        return Response(stream_with_context(instant()), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    q = _subscribe_progress(cache_key)
+
+    def generate():
+        try:
+            while True:
+                try:
+                    msg = q.get(timeout=60)
+                    yield f"data: {json.dumps(msg)}\n\n"
+                    if msg.get("stage") == "done":
+                        break
+                except _queue.Empty:
+                    # keepalive ping so the connection doesn't time out
+                    yield ": ping\n\n"
+        finally:
+            _unsubscribe_progress(cache_key, q)
+
+    return Response(stream_with_context(generate()), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ── System Cost Index lookup ───────────────────────────────────────────────────

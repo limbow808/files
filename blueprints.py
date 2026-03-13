@@ -88,7 +88,8 @@ def load_blueprints(
         SELECT
             b.blueprint_id, b.output_id, b.output_name, b.output_qty,
             b.category, b.item_group, b.tech_level, b.volume_m3,
-            b.size_class, b.slot_type, b.me_level, b.te_level
+            b.size_class, b.slot_type, b.me_level, b.te_level,
+            b.time_seconds
         FROM blueprints b
         {where_sql}
         ORDER BY b.output_name
@@ -125,20 +126,21 @@ def load_blueprints(
     for row in bp_rows:
         bp_id = row["blueprint_id"]
         results.append({
-            "name":        row["output_name"],
-            "output_id":   row["output_id"],
-            "output_qty":  row["output_qty"],
-            "me_level":    row["me_level"],
-            "te_level":    row["te_level"],
-            "category":    row["category"],
-            "item_group":  row["item_group"],
-            "tech_level":  row["tech_level"],
-            "tech":        f"{'II' if row['tech_level'] == 2 else 'III' if row['tech_level'] == 3 else 'I'}",
-            "size":        row["size_class"],
-            "size_class":  row["size_class"],
-            "slot_type":   row["slot_type"],
-            "volume":      row["volume_m3"],
-            "materials":   mats_by_bp.get(bp_id, []),
+            "name":         row["output_name"],
+            "output_id":    row["output_id"],
+            "output_qty":   row["output_qty"],
+            "me_level":     row["me_level"],
+            "te_level":     row["te_level"],
+            "category":     row["category"],
+            "item_group":   row["item_group"],
+            "tech_level":   row["tech_level"],
+            "tech":         f"{'II' if row['tech_level'] == 2 else 'III' if row['tech_level'] == 3 else 'I'}",
+            "size":         row["size_class"],
+            "size_class":   row["size_class"],
+            "slot_type":    row["slot_type"],
+            "volume":       row["volume_m3"],
+            "time_seconds": row["time_seconds"] or 0,
+            "materials":    mats_by_bp.get(bp_id, []),
         })
 
     return results
