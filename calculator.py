@@ -20,6 +20,7 @@ Update the CONFIG section below with your real values.
 
 import math
 from pricer import get_prices_bulk
+from blueprints import load_blueprints
 
 # ─── CONFIG: Update these to match your setup ────────────────────────────────
 CONFIG = {
@@ -48,17 +49,20 @@ def apply_me(base_qty: int, me_level: int, structure_bonus: float = 0.0) -> int:
     return max(1, math.ceil(base_qty * reduction))
 
 
-def calculate_profit(blueprint: dict, prices: dict) -> dict | None:
+def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None) -> dict | None:
     """
     Calculate profit for one blueprint run given a price dictionary.
 
     Args:
-        blueprint:  One entry from blueprints.BLUEPRINTS
-        prices:     Dict of { type_id: { 'sell': float, 'buy': float } }
+        blueprint:       One entry from blueprints.BLUEPRINTS
+        prices:          Dict of { type_id: { 'sell': float, 'buy': float } }
+        config_override: Optional dict to override CONFIG values for this call
 
     Returns:
         Dict with full profit breakdown, or None if prices missing
     """
+    cfg = {**CONFIG, **(config_override or {})}
+
     output_id  = blueprint["output_id"]
     output_qty = blueprint["output_qty"]
     me_level   = blueprint["me_level"]
@@ -85,7 +89,7 @@ def calculate_profit(blueprint: dict, prices: dict) -> dict | None:
         actual_qty = apply_me(
             mat["quantity"],
             me_level,
-            CONFIG["structure_me_bonus"]
+            cfg["structure_me_bonus"]
         )
 
         # Use SELL price for inputs (conservative - what you actually pay)
@@ -102,11 +106,11 @@ def calculate_profit(blueprint: dict, prices: dict) -> dict | None:
 
     # ── Job installation cost (System Cost Index) ─────────────────────────────
     # SCI is applied to the estimated job cost (sum of material values at sell price)
-    job_cost = material_cost * CONFIG["system_cost_index"] * (1 - CONFIG["job_cost_structure_discount"])
+    job_cost = material_cost * cfg["system_cost_index"] * (1 - cfg["job_cost_structure_discount"])
 
     # ── Taxes and fees ────────────────────────────────────────────────────────
-    sales_tax   = gross_revenue * CONFIG["sales_tax"]
-    broker_fee  = gross_revenue * CONFIG["broker_fee"]
+    sales_tax   = gross_revenue * cfg["sales_tax"]
+    broker_fee  = gross_revenue * cfg["broker_fee"]
     total_tax   = sales_tax + broker_fee
 
     # ── Final profit ──────────────────────────────────────────────────────────
@@ -132,12 +136,17 @@ def calculate_profit(blueprint: dict, prices: dict) -> dict | None:
     }
 
 
-def calculate_all(blueprints: list, min_volume: float = 0.0) -> list:
+def calculate_all(blueprints: list = None, min_volume: float = 0.0) -> list:
     """
     Run profit calculation for every blueprint.
     Fetches all required prices in one batch, then calculates.
     Returns list of results sorted by net_profit descending.
+
+    If `blueprints` is None, loads all blueprints from crest.db
+    (or the hardcoded fallback list if crest.db is absent).
     """
+    if blueprints is None:
+        blueprints = load_blueprints()
     # Collect all unique type IDs we need prices for
     all_type_ids = set()
     for bp in blueprints:
@@ -159,8 +168,8 @@ def calculate_all(blueprints: list, min_volume: float = 0.0) -> list:
                 # Skip low-volume items
                 continue
             results.append(result)
-        else:
-            print(f"  [!] Skipped '{bp['name']}' - missing price data")
+        # silently skip items with missing price data — expected for
+        # discontinued/special-edition items with no Jita market
 
     # Sort by net profit, best first
     results.sort(key=lambda x: x["net_profit"], reverse=True)

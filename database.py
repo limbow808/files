@@ -103,3 +103,35 @@ def get_wallet_history(days: int = 30) -> List[Dict[str, Any]]:
     rows = cur.fetchall()
     conn.close()
     return [{"ts": r["ts"], "balance": r["balance"]} for r in rows]
+
+
+# ─── SDE / crest.db seeding helper ───────────────────────────────────────────
+
+def seed_from_sde(
+    sde_path:   str = "sqlite-latest.sqlite",
+    crest_path: str = "crest.db",
+) -> tuple:
+    """
+    Thin wrapper that delegates to seeder.seed_from_sde() with custom paths.
+    Kept here for backwards-compatibility so callers can do:
+        from database import seed_from_sde; seed_from_sde()
+
+    Returns (blueprint_count, material_row_count).
+    Raises FileNotFoundError (via sys.exit in seeder.py) if SDE is absent.
+    """
+    import os, importlib, sys
+
+    # Temporarily patch paths if non-default values supplied
+    import seeder as _seeder
+    original_sde   = _seeder.SDE_PATH
+    original_crest = _seeder.CREST_PATH
+
+    _seeder.SDE_PATH   = os.path.abspath(sde_path)
+    _seeder.CREST_PATH = os.path.abspath(crest_path)
+    try:
+        result = _seeder.seed_from_sde()
+    finally:
+        _seeder.SDE_PATH   = original_sde
+        _seeder.CREST_PATH = original_crest
+
+    return result

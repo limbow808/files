@@ -19,8 +19,9 @@ import time
 import json
 import os
 import threading
+import requests
 
-from blueprints import BLUEPRINTS, MINERALS
+from blueprints import load_blueprints, MINERALS
 from calculator import calculate_all
 from database import save_scan, record_wallet_snapshot, get_wallet_history
 
@@ -91,7 +92,7 @@ def api_scan():
         return jsonify(_scan_cache)
 
     try:
-        results = calculate_all(BLUEPRINTS)
+        results = calculate_all()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -100,7 +101,7 @@ def api_scan():
         from hangar import enrich_results_with_hangar
         from assets import CHARACTER_ID
         from auth import get_auth_header
-        results = enrich_results_with_hangar(results, BLUEPRINTS, CHARACTER_ID, get_auth_header())
+        results = enrich_results_with_hangar(results, load_blueprints(), CHARACTER_ID, get_auth_header())
     except Exception:
         # No ESI token — hangar data will be absent (can_build = None)
         pass
@@ -127,9 +128,19 @@ def api_scan():
     for r in results:
         r.pop("material_breakdown", None)
 
+    # Deduplicate by output_id — keep highest-profit entry per product
+    seen = set()
+    deduped = []
+    for r in results:
+        oid = r.get("output_id")
+        if oid in seen:
+            continue
+        seen.add(oid)
+        deduped.append(r)
+
     _scan_cache = {
         "scanned_at": int(time.time()),
-        "results":    results,
+        "results":    deduped[:50],   # Overview: top 50 by net profit
         "minerals":   _mineral_prices(prices),
     }
     return jsonify(_scan_cache)
@@ -201,6 +212,479 @@ def api_minerals():
             "buy":     entry.get("buy", 0),
         }
     return jsonify(data)
+
+
+# Maps SDE invCategories.categoryName → frontend TYPE_FILTERS chip labels
+_CATEGORY_MAP = {
+    "Ship":                    "Ships",
+    "Module":                  "Modules",
+    "Charge":                  "Charges",
+    "Drone":                   "Drones",
+    "Fighter":                 "Drones",        # fighters shown under Drones
+    "Implant":                 "Implants",
+    "Booster":                 "Booster",
+    "Subsystem":               "Modules",
+    "Structure":               "Structures",
+    "Structure Module":        "Structures",
+    "Starbase":                "Structures",
+    "Deployable":              "Structures",
+    "Sovereignty Structures":  "Structures",
+    "Infrastructure Upgrades": "Structures",
+    "Commodity":               "Components",
+    "Material":                "Components",
+    "Asteroid":                "Components",
+    "Celestial":               "Components",
+    "Orbitals":                "Components",
+    "Special Edition Assets":  "Other",
+    # pass-through for already-correct labels (hardcoded fallback BPs)
+    "Ships":       "Ships",
+    "Modules":     "Modules",
+    "Charges":     "Charges",
+    "Drones":      "Drones",
+    "Rigs":        "Rigs",
+    "Structures":  "Structures",
+    "Components":  "Components",
+    "Implants":    "Implants",
+    "Other":       "Other",
+}
+
+def _normalize_category(raw: str) -> str:
+    """Normalise SDE category name → frontend TYPE_FILTERS chip label."""
+    return _CATEGORY_MAP.get(raw, "Other")
+
+
+@app.route("/api/calculator", methods=["GET"])
+def api_calculator():
+    """
+    Return full manufacturing data for the calculator page.
+    Accepts optional query params:
+      system    - system name or ID to use for SCI lookup
+      facility  - facility type: 'station', 'medium', 'large', 'xl' (structure size)
+      sell_loc  - sell location: 'jita', 'amarr', 'dodixie', 'rens', 'hek'
+      buy_loc   - buy location: same options
+    """
+    from flask import request as flask_request
+    try:
+        from pricer import get_prices_bulk
+
+        # ── Parse query params ────────────────────────────────────────────────
+        system_param   = flask_request.args.get("system", "").strip()
+        facility_param = flask_request.args.get("facility", "station").strip().lower()
+        sell_loc       = flask_request.args.get("sell_loc", "jita").strip().lower()
+        buy_loc        = flask_request.args.get("buy_loc",  "jita").strip().lower()
+
+        # ── Resolve SCI for the requested system ──────────────────────────────
+        sci = _resolve_sci(system_param)
+
+        # ── Resolve structure bonuses ─────────────────────────────────────────
+        facility_cfg = _facility_config(facility_param)
+
+        # ── Gather all type IDs needed ────────────────────────────────────────
+        _all_blueprints = load_blueprints()
+        all_type_ids = set()
+        for bp in _all_blueprints:
+            all_type_ids.add(bp["output_id"])
+            for mat in bp["materials"]:
+                all_type_ids.add(mat["type_id"])
+        all_type_ids.update(MINERALS.values())
+
+        prices = get_prices_bulk(list(all_type_ids))
+
+        # ── Build results ──────────────────────────────────────────────────────
+        mineral_names = {v: k for k, v in MINERALS.items()}
+        results = []
+        for bp in _all_blueprints:
+            from calculator import calculate_profit, CONFIG
+            # Build a per-request config override
+            cfg_override = {
+                **CONFIG,
+                "system_cost_index":          sci,
+                "structure_me_bonus":         facility_cfg["me_bonus"],
+                "job_cost_structure_discount": facility_cfg["job_discount"],
+                "sales_tax":                  facility_cfg["sales_tax"],
+            }
+            result = calculate_profit(bp, prices, config_override=cfg_override)
+            if not result:
+                continue
+
+            # Resolve material names
+            for mat in result.get("material_breakdown", []):
+                mat["name"] = mineral_names.get(mat["type_id"], f"Type {mat['type_id']}")
+
+            # Add blueprint metadata
+            result["me_level"]       = bp.get("me_level", 0)
+            result["te_level"]       = bp.get("te_level", 0)
+            result["category"]       = _normalize_category(bp.get("category", "Other"))
+            result["tech"]           = bp.get("tech", "I")
+            result["size"]           = bp.get("size", "U")
+            result["bp_type"]        = bp.get("bp_type", "BPO")
+            result["duration"]       = bp.get("duration", 0)
+            result["volume"]         = bp.get("volume", 0)
+            result["required_skills"] = bp.get("required_skills", [])
+
+            # Derived metrics
+            cost       = result.get("material_cost", 0) + result.get("job_cost", 0) + result.get("sales_tax", 0) + result.get("broker_fee", 0)
+            profit     = result.get("net_profit", 0)
+            duration_h = bp.get("duration", 0) / 3600.0 if bp.get("duration", 0) else 0
+            result["roi"]         = (profit / cost * 100) if cost > 0 else 0
+            result["isk_per_hour"] = (profit / duration_h) if duration_h > 0 else 0
+            result["isk_per_m3"]  = (profit / result["volume"]) if result.get("volume", 0) > 0 else 0
+
+            # Annotate which facility/system was used
+            result["resolved_sci"]      = sci
+            result["facility_label"]    = facility_cfg["label"]
+
+            results.append(result)
+
+        results.sort(key=lambda x: x["net_profit"], reverse=True)
+
+        # Deduplicate by output_id — keep the highest-profit entry per product
+        seen_output_ids = set()
+        deduped = []
+        for r in results:
+            oid = r.get("output_id")
+            if oid in seen_output_ids:
+                continue
+            seen_output_ids.add(oid)
+            deduped.append(r)
+
+        return jsonify({
+            "results":      deduped,
+            "generated_at": int(time.time()),
+            "sci":          sci,
+            "facility":     facility_cfg,
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+# ── System Cost Index lookup ───────────────────────────────────────────────────
+_SCI_CACHE: dict = {}
+_SCI_CACHE_TS: float = 0
+_SCI_TTL = 3600  # 1 hour
+
+def _resolve_sci(system_name_or_id: str) -> float:
+    """
+    Look up the manufacturing SCI for a solar system via ESI.
+    Falls back to the CONFIG default if ESI is unavailable or system not found.
+    """
+    from calculator import CONFIG as CALC_CONFIG
+    default_sci = CALC_CONFIG["system_cost_index"]
+
+    if not system_name_or_id:
+        return default_sci
+
+    global _SCI_CACHE, _SCI_CACHE_TS
+    try:
+        # Refresh industry systems cache if stale
+        if not _SCI_CACHE or (time.time() - _SCI_CACHE_TS) > _SCI_TTL:
+            resp = requests.get(
+                "https://esi.evetech.net/latest/industry/systems/",
+                timeout=10
+            )
+            if resp.ok:
+                data = resp.json()
+                _SCI_CACHE = {}
+                for entry in data:
+                    sid = str(entry.get("solar_system_id", ""))
+                    for cost in entry.get("cost_indices", []):
+                        if cost.get("activity") == "manufacturing":
+                            _SCI_CACHE[sid] = cost.get("cost_index", default_sci)
+                            break
+                _SCI_CACHE_TS = time.time()
+
+        # Try lookup by ID first
+        if system_name_or_id.isdigit():
+            return _SCI_CACHE.get(system_name_or_id, default_sci)
+
+        # Try name → ID via ESI search
+        search_resp = requests.get(
+            "https://esi.evetech.net/latest/search/",
+            params={"categories": "solar_system", "search": system_name_or_id, "strict": False},
+            timeout=5
+        )
+        if search_resp.ok:
+            ids = search_resp.json().get("solar_system", [])
+            if ids:
+                return _SCI_CACHE.get(str(ids[0]), default_sci)
+    except Exception:
+        pass
+
+    return default_sci
+
+
+# ── Facility configuration ─────────────────────────────────────────────────────
+_FACILITY_PRESETS = {
+    "station":  {"label": "NPC Station",          "me_bonus": 0.00, "job_discount": 0.00, "sales_tax": 0.036},
+    "medium":   {"label": "Medium Eng. Complex",  "me_bonus": 0.01, "job_discount": 0.03, "sales_tax": 0.036},
+    "large":    {"label": "Large Eng. Complex",   "me_bonus": 0.01, "job_discount": 0.04, "sales_tax": 0.036},
+    "xl":       {"label": "XL Eng. Complex",      "me_bonus": 0.01, "job_discount": 0.05, "sales_tax": 0.036},
+    "raitaru":  {"label": "Raitaru",              "me_bonus": 0.01, "job_discount": 0.03, "sales_tax": 0.036},
+    "azbel":    {"label": "Azbel",                "me_bonus": 0.01, "job_discount": 0.04, "sales_tax": 0.036},
+    "sotiyo":   {"label": "Sotiyo",               "me_bonus": 0.01, "job_discount": 0.05, "sales_tax": 0.036},
+}
+
+def _facility_config(key: str) -> dict:
+    return _FACILITY_PRESETS.get(key, _FACILITY_PRESETS["station"])
+
+
+@app.route("/api/systems/search", methods=["GET"])
+def api_systems_search():
+    """
+    Search for solar systems by name prefix and return SCI for each.
+    Query param: q=<search string>
+    """
+    from flask import request as freq
+    q = freq.args.get("q", "").strip()
+    if not q or len(q) < 2:
+        return jsonify([])
+
+    try:
+        # Refresh SCI cache if needed
+        _resolve_sci("")  # warm the cache
+
+        search_resp = requests.get(
+            "https://esi.evetech.net/latest/search/",
+            params={"categories": "solar_system", "search": q, "strict": False},
+            timeout=5
+        )
+        if not search_resp.ok:
+            return jsonify([])
+
+        ids = search_resp.json().get("solar_system", [])[:10]
+        if not ids:
+            return jsonify([])
+
+        # Resolve names
+        names_resp = requests.post(
+            "https://esi.evetech.net/latest/universe/names/",
+            json=ids,
+            timeout=5
+        )
+        names = {}
+        if names_resp.ok:
+            for item in names_resp.json():
+                names[str(item["id"])] = item["name"]
+
+        results = []
+        for sid in ids:
+            name = names.get(str(sid), str(sid))
+            sci  = _SCI_CACHE.get(str(sid), None)
+            results.append({"id": sid, "name": name, "sci": sci})
+        results.sort(key=lambda x: x["name"])
+        return jsonify(results)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/skills", methods=["GET"])
+def api_skills():
+    """
+    Return the character's manufacturing-relevant skill levels from ESI.
+    Requires a valid ESI token.
+    """
+    try:
+        from auth import get_auth_header
+        from assets import CHARACTER_ID
+
+        headers = get_auth_header()
+        resp = requests.get(
+            f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/skills/",
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Manufacturing-relevant skill IDs
+        MFG_SKILLS = {
+            3380: "Industry",
+            3387: "Advanced Industry",
+            3388: "Mass Production",
+            3394: "Production Efficiency",
+            24625: "Advanced Mass Production",
+            11395: "Metallurgy",
+            3386: "Research",
+            3409: "Science",
+            11454: "Laboratory Operation",
+            11452: "Advanced Laboratory Operation",
+            # Drone skills
+            3436: "Drone Interfacing",
+            3441: "Light Drone Operation",
+            3442: "Medium Drone Operation",
+            23606: "Gallente Drone Specialization",
+            23609: "Minmatar Drone Specialization",
+            # Fitting / tank
+            3394: "Production Efficiency",
+            11207: "Hull Upgrades",
+            3392: "Mechanics",
+        }
+
+        skill_map = {s["skill_id"]: s["active_skill_level"] for s in data.get("skills", [])}
+
+        result = {}
+        for sid, name in MFG_SKILLS.items():
+            result[name] = skill_map.get(sid, 0)
+
+        return jsonify({
+            "skills": result,
+            "total_sp": data.get("total_sp", 0),
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e), "skills": {}}), 200  # 200 so UI can still render
+
+
+@app.route("/api/blueprints/esi", methods=["GET"])
+def api_blueprints_esi():
+    """
+    Return character blueprints from ESI (personal + optionally corp).
+    Returns list of { type_id, type_name, me_level, te_level, runs, location_id, bp_type }
+    """
+    try:
+        from auth import get_auth_header
+        from assets import CHARACTER_ID
+        import requests as req
+
+        headers = get_auth_header()
+
+        # Fetch character blueprints
+        resp = req.get(
+            f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/blueprints/",
+            headers=headers,
+            timeout=15
+        )
+        resp.raise_for_status()
+        bps = resp.json()
+
+        if not bps:
+            return jsonify({"blueprints": []})
+
+        # Resolve type names
+        type_ids = list({bp["type_id"] for bp in bps})
+        names_resp = req.post(
+            "https://esi.evetech.net/latest/universe/names/",
+            json=type_ids[:1000],
+            timeout=10
+        )
+        names = {}
+        if names_resp.ok:
+            for item in names_resp.json():
+                names[item["id"]] = item["name"]
+
+        result = []
+        for bp in bps:
+            result.append({
+                "type_id":      bp["type_id"],
+                "name":         names.get(bp["type_id"], f"Type {bp['type_id']}"),
+                "me_level":     bp.get("material_efficiency", 0),
+                "te_level":     bp.get("time_efficiency", 0),
+                "runs":         bp.get("runs", -1),   # -1 = BPO (infinite)
+                "bp_type":      "BPO" if bp.get("runs", -1) == -1 else "BPC",
+                "location_id":  bp.get("location_id"),
+                "quantity":     bp.get("quantity", 1),
+            })
+
+        result.sort(key=lambda x: x["name"])
+        return jsonify({"blueprints": result, "count": len(result)})
+
+    except Exception as e:
+        return jsonify({"error": str(e), "blueprints": []}), 200
+
+
+# ── Character Assets ──────────────────────────────────────────────────────────
+_ASSETS_CACHE:    dict  = {}
+_ASSETS_CACHE_TS: float = 0
+_ASSETS_TTL = 300  # 5 minutes
+
+@app.route("/api/assets", methods=["GET"])
+def api_assets():
+    """
+    Return character assets as { type_id: total_quantity } plus name map.
+    Response: { assets: {type_id: qty}, names: {type_id: name}, cached_at: ts }
+    """
+    global _ASSETS_CACHE, _ASSETS_CACHE_TS
+    try:
+        from flask import request as flask_request
+        force = flask_request.args.get("force", "0") == "1"
+        if not force and _ASSETS_CACHE and (time.time() - _ASSETS_CACHE_TS) < _ASSETS_TTL:
+            return jsonify(_ASSETS_CACHE)
+
+        from auth import get_auth_header
+        from assets import CHARACTER_ID
+        import requests as req
+
+        headers = get_auth_header()
+
+        all_items = []
+        page = 1
+        while True:
+            resp = req.get(
+                f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/assets/",
+                headers=headers, params={"page": page}, timeout=15
+            )
+            resp.raise_for_status()
+            page_items = resp.json()
+            if not page_items:
+                break
+            all_items.extend(page_items)
+            if len(page_items) < 1000:
+                break
+            page += 1
+
+        from collections import defaultdict
+        inventory: dict = defaultdict(int)
+        for item in all_items:
+            inventory[item["type_id"]] += item["quantity"]
+
+        type_ids = list(inventory.keys())
+        names: dict = {}
+
+        # Resolve names from crest.db first
+        try:
+            import sqlite3 as _sql
+            conn = _sql.connect("crest.db")
+            placeholders = ",".join("?" * len(type_ids))
+            rows = conn.execute(
+                f"SELECT output_id, output_name FROM blueprints WHERE output_id IN ({placeholders})",
+                type_ids
+            ).fetchall()
+            conn.close()
+            for tid, name in rows:
+                names[tid] = name
+        except Exception:
+            pass
+
+        # Remaining via ESI universe/names
+        missing_ids = [t for t in type_ids if t not in names]
+        if missing_ids:
+            try:
+                for i in range(0, len(missing_ids), 1000):
+                    chunk = missing_ids[i:i+1000]
+                    nr = req.post(
+                        "https://esi.evetech.net/latest/universe/names/",
+                        json=chunk, timeout=10
+                    )
+                    if nr.ok:
+                        for item in nr.json():
+                            names[item["id"]] = item["name"]
+            except Exception:
+                pass
+
+        _ASSETS_CACHE = {
+            "assets":    dict(inventory),
+            "names":     {str(k): v for k, v in names.items()},
+            "cached_at": int(time.time()),
+        }
+        _ASSETS_CACHE_TS = time.time()
+        return jsonify(_ASSETS_CACHE)
+
+    except Exception as e:
+        return jsonify({"error": str(e), "assets": {}, "names": {}}), 200
 
 
 if __name__ == "__main__":
