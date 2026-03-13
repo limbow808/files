@@ -61,7 +61,7 @@
     /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: #0a0a0a; }
-    ::-webkit-scrollbar-thumb { background: var(--accent); }
+    ::-webkit-scrollbar-thumb { background: var(--border); }
 
     /* ── Header ─────────────────────────────────────────────────────── */
     #crest-header {
@@ -69,14 +69,14 @@
       align-items: center;
       justify-content: space-between;
       padding: 10px 20px;
-      border-bottom: 1px solid var(--accent);
+      border-bottom: 1px solid var(--border);
       background: #000;
       position: sticky;
       top: 0;
       z-index: 100;
     }
-    .logo-text  { font-family: var(--head); font-size: 22px; font-weight: 700; color: var(--accent); letter-spacing: 4px; }
-    .logo-sub   { font-family: var(--mono); font-size: 10px; color: var(--text); letter-spacing: 2px; margin-top: 2px; opacity: 0.7; }
+    .logo-text  { font-family: var(--head); font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: 4px; }
+    .logo-sub   { font-family: var(--mono); font-size: 10px; color: var(--text); letter-spacing: 2px; margin-top: 2px; opacity: 0.5; }
     .clock-text { font-family: var(--mono); font-size: 13px; }
 
     /* ── KPI bar ──────────────────────────────────────────────────────── */
@@ -98,7 +98,7 @@
       border-bottom: 1px solid var(--border);
       background: #030303;
     }
-    .panel-title { font-family: var(--head); font-size: 11px; letter-spacing: 3px; color: var(--accent); text-transform: uppercase; }
+    .panel-title { font-family: var(--head); font-size: 11px; letter-spacing: 3px; color: var(--text); text-transform: uppercase; opacity: 0.6; }
 
     /* ── Bottom split grid ───────────────────────────────────────────── */
     .bottom-grid  { display: grid; grid-template-columns: 3fr 2fr; border-top: 1px solid var(--border); }
@@ -114,8 +114,8 @@
       letter-spacing: 2px;
       text-align: right;
       padding: 8px 12px;
-      color: var(--accent);
-      border-bottom: 1px solid var(--accent);
+      color: var(--dim);
+      border-bottom: 1px solid var(--border);
       white-space: nowrap;
     }
     th:first-child, th:nth-child(2) { text-align: left; }
@@ -144,23 +144,23 @@
     /* ── Detail panel ───────────────────────────────────────────────── */
     .detail-panel {
       background: #080808;
-      border: 1px solid var(--accent);
+      border: 1px solid var(--border);
       margin: 0 16px 16px;
       padding: 20px 24px;
     }
-    .detail-title { font-family: var(--head); font-size: 16px; letter-spacing: 3px; color: var(--accent); margin-bottom: 16px; }
+    .detail-title { font-family: var(--head); font-size: 16px; letter-spacing: 3px; color: var(--text); margin-bottom: 16px; }
     .detail-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
     .cost-row     { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #111; }
     .cost-label   { color: var(--dim); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
     .cost-val     { font-size: 13px; }
-    .cost-total   { border-top: 1px solid var(--accent); padding-top: 8px; margin-top: 4px; }
+    .cost-total   { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
     .cost-total .cost-label { color: var(--text); }
-    .cost-total .cost-val   { color: var(--accent); font-size: 15px; }
+    .cost-total .cost-val   { color: var(--text); font-size: 15px; }
 
     /* Missing materials */
-    .missing-title { font-family: var(--head); font-size: 13px; letter-spacing: 2px; color: var(--accent); margin: 20px 0 10px; }
-    .missing-table th { color: var(--accent); font-size: 10px; }
-    .missing-table td { color: var(--accent); }
+    .missing-title { font-family: var(--head); font-size: 13px; letter-spacing: 2px; color: var(--text); margin: 20px 0 10px; opacity: 0.7; }
+    .missing-table th { color: var(--dim); font-size: 10px; }
+    .missing-table td { color: var(--text); }
 
     /* ── Mineral cards ───────────────────────────────────────────────── */
     .mineral-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 20px; }
@@ -170,7 +170,7 @@
       background: #050505;
     }
     .mineral-name  { font-family: var(--head); font-size: 15px; font-weight: 600; letter-spacing: 2px; color: var(--text); margin-bottom: 6px; }
-    .mineral-price { font-size: 18px; color: var(--accent); }
+    .mineral-price { font-size: 18px; color: var(--text); }
     .mineral-sub   { font-size: 10px; color: var(--dim); margin-top: 2px; letter-spacing: 1px; }
 
     /* ── PLEX tracker ────────────────────────────────────────────────── */
@@ -178,7 +178,7 @@
     .plex-card { border: 1px solid var(--border); padding: 18px 20px; background: #050505; }
     .plex-label { font-family: var(--head); font-size: 11px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; margin-bottom: 6px; }
     .plex-value { font-size: 22px; color: var(--text); }
-    .plex-value.accent { color: var(--accent); }
+    .plex-value.accent { color: var(--text); }
 
     .progress-track {
       height: 10px;
@@ -205,19 +205,19 @@
 
     /* ── Error banner ────────────────────────────────────────────────── */
     .error-banner {
-      background: rgba(255,71,0,0.1);
-      border: 1px solid var(--accent);
+      background: rgba(200,200,183,0.04);
+      border: 1px solid var(--border);
       padding: 12px 20px;
       margin: 16px;
       font-size: 12px;
       letter-spacing: 1px;
     }
-    .error-banner span { color: var(--accent); font-family: var(--head); font-size: 14px; font-weight: 700; letter-spacing: 2px; }
+    .error-banner span { color: var(--text); font-family: var(--head); font-size: 14px; font-weight: 700; letter-spacing: 2px; }
 
     /* ── Stat bar ────────────────────────────────────────────────────── */
     .stat-bar { display: flex; gap: 24px; padding: 12px 20px; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
     .stat-item { font-size: 11px; letter-spacing: 1px; }
-    .stat-item b { color: var(--accent); font-weight: normal; }
+    .stat-item b { color: var(--text); font-weight: normal; }
 
     /* ── Buttons ─────────────────────────────────────────────────────── */
     .btn {
@@ -227,30 +227,35 @@
       font-weight: 600;
       text-transform: uppercase;
       background: transparent;
-      border: 1px solid var(--accent);
-      color: var(--accent);
+      border: 1px solid var(--border);
+      color: var(--text);
       padding: 6px 16px;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
     }
-    .btn:hover  { background: rgba(255,71,0,0.15); }
-    .btn:active { background: rgba(255,71,0,0.3); }
-    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn:hover  { border-color: var(--accent); color: var(--accent); background: rgba(255,71,0,0.08); }
+    .btn:active { background: rgba(255,71,0,0.2); }
+    .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .btn.btn-primary {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .btn.btn-primary:hover { background: rgba(255,71,0,0.15); }
 
     /* ── Connection dot ──────────────────────────────────────────────── */
     .dot { width: 8px; height: 8px; display: inline-block; border-radius: 50% !important; margin-right: 6px; vertical-align: middle; }
     .dot-green { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
-    .dot-red   { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 1s infinite; }
+    .dot-red   { background: #666; box-shadow: none; animation: pulse 1s infinite; }
 
     /* ── Hangar badge ────────────────────────────────────────────────── */
     .badge-ok   { color: #00cc66; }
-    .badge-fail { color: var(--accent); }
+    .badge-fail { color: var(--dim); }
     .badge-na   { color: var(--dim); }
   </style>
 </head>
 <body>
   <div id="root">
-    <div id="boot-msg" style="color:#ff4700;font-family:monospace;padding:40px;font-size:14px;">
+    <div id="boot-msg" style="color:var(--text);font-family:monospace;padding:40px;font-size:14px;">
       CREST // Loading scripts...<br/>
       <span style="color:#555;font-size:11px;">If this persists, open the browser console (F12) and look for errors.</span>
     </div>
@@ -341,7 +346,7 @@
       return (
         <div className="error-banner">
           <span>CREST OFFLINE</span> — Start server with:{' '}
-          <code style={{ color:'var(--accent)' }}>python server.py</code>
+          <code style={{ color:'var(--text)', opacity:0.7 }}>python server.py</code>
         </div>
       );
     }
@@ -519,7 +524,7 @@
             <div className="kpi-value">{loading && !scanData ? '—' : `${profitable} / ${results.length}`}</div>
             <div className="kpi-sub">
               <span>PROFITABLE</span>
-              <button className="btn" onClick={onRefresh} disabled={refreshing} style={{ padding:'4px 12px', fontSize:11 }}>
+              <button className="btn btn-primary" onClick={onRefresh} disabled={refreshing} style={{ padding:'4px 12px', fontSize:11 }}>
                 {refreshing ? '⟳' : '⟳ SCAN'}
               </button>
             </div>
@@ -572,7 +577,7 @@
                           onClick={() => setSelectedIdx(p => p === i ? null : i)}
                         >
                           <td style={{ color:'var(--dim)', fontSize:11 }}>#{i + 1}</td>
-                          <td style={{ color: isSel ? 'var(--accent)' : 'var(--text)', fontFamily:'var(--head)', fontSize:14, letterSpacing:1 }}>
+                          <td style={{ color: isSel ? 'var(--text)' : 'var(--text)', fontFamily:'var(--head)', fontSize:14, letterSpacing:1 }}>
                             {r.name}
                           </td>
                           <td>{fmtISK(r.gross_revenue)}</td>
@@ -685,7 +690,7 @@
                     <div style={{ background:'#111', height:18, width:80, animation:'pulse 1.5s infinite' }} />
                   ) : (
                     <>
-                      <div style={{ fontSize:16, color:'var(--accent)' }}>{m ? fmtISK(m.sell) : '—'} ISK</div>
+                      <div style={{ fontSize:16, color:'var(--text)' }}>{m ? fmtISK(m.sell) : '—'} ISK</div>
                       <div style={{ fontSize:10, color:'var(--dim)', marginTop:2, letterSpacing:1 }}>
                         BUY {m ? fmtISK(m.buy) : '—'}
                       </div>
