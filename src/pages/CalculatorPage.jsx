@@ -44,7 +44,7 @@ const CALC_COLS = [
   { key: 'isk_per_m3',       label: 'ISK/M³',   get: r => r.isk_per_m3 || 0,                         align: 'right' },
 ];
 
-export default function CalculatorPage() {
+export default function CalculatorPage({ refreshKey = 0 }) {
   const [bpFilters,   setBpFilters]   = useState(new Set(BP_FILTERS));
   const [typeFilters, setTypeFilters] = useState(new Set(TYPE_FILTERS));
   const [techFilters, setTechFilters] = useState(new Set(TECH_FILTERS));
@@ -64,7 +64,7 @@ export default function CalculatorPage() {
   const [selectedIdx,  setSelectedIdx]  = useState(null);
   const [showEsiBps,   setShowEsiBps]   = useState(false);
   const [checkedIds,   setCheckedIds]   = useState(new Set());
-  const [calcKey,      setCalcKey]      = useState(0);
+  const [retryKey,     setRetryKey]     = useState(0);
 
   function toggleCheck(id, e) {
     e.stopPropagation();
@@ -80,7 +80,7 @@ export default function CalculatorPage() {
     return `${API}/api/calculator?${params}`;
   }
 
-  const { data: calcData, loading, error } = useApi(buildUrl(), [calcKey]);
+  const { data: calcData, loading, error } = useApi(buildUrl(), [refreshKey, retryKey]);
   const progress = useCalcProgress(system, facility, loading && !calcData);
   const { data: skillsData } = useApi(`${API}/api/skills`, []);
   const { data: esiBpData  } = useApi(`${API}/api/blueprints/esi`, []);
@@ -98,11 +98,6 @@ export default function CalculatorPage() {
     }
     return map;
   }, [esiBpData]);
-
-  function handleApply() {
-    setCalcKey(k => k + 1);
-    setSelectedIdx(null);
-  }
 
   function handleSort(key) {
     if (sortKey === key) setSortDir(d => d * -1);
@@ -206,12 +201,6 @@ export default function CalculatorPage() {
               <span className="filter-label">VOL</span>
               <input className="calc-input" type="number" value={minVolume}
                 onChange={e => setMinVolume(e.target.value)} placeholder="0" style={{ width: 80 }} />
-            </div>
-            <div className="filter-group" style={{ justifyContent: 'flex-end', borderRight: 'none', marginLeft: 'auto' }}>
-              <span className="filter-label" style={{ visibility: 'hidden' }}>–</span>
-              <button className="btn btn-primary" onClick={handleApply} style={{ padding: '3px 14px', fontSize: 11 }}>
-                ⟳ RECALC
-              </button>
             </div>
             <div className="filter-group" style={{ justifyContent: 'flex-end', borderRight: 'none' }}>
               <span className="filter-label" style={{ visibility: 'hidden' }}>–</span>
@@ -361,7 +350,7 @@ export default function CalculatorPage() {
           <div style={{ padding: '32px 20px', color: 'var(--accent)', textAlign: 'center', letterSpacing: 2, fontSize: 11 }}>
             COULD NOT REACH SERVER — Is <code style={{ color: 'var(--text)' }}>python server.py</code> running?
             <div style={{ marginTop: 12 }}>
-              <button className="btn" onClick={handleApply} style={{ fontSize: 11 }}>⟳ RETRY</button>
+              <button className="btn" onClick={() => setRetryKey(k => k + 1)} style={{ fontSize: 11 }}>⟳ RETRY</button>
             </div>
           </div>
         )}

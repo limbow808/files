@@ -10,7 +10,7 @@ const AUTO_REFRESH_MS = 5 * 60 * 1000;
 export default function App() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab]   = useState('OVERVIEW');
+  const [activeTab, setActiveTab]   = useState('CREST');
   const timerRef = useRef(null);
 
   const { data: scanData,     loading: scanLoading, error: scanError, refetch } =
@@ -38,14 +38,14 @@ export default function App() {
     <div className="app-shell">
       <Header online={online} activeTab={activeTab} onTabChange={setActiveTab} onRefresh={handleRefresh} refreshing={refreshing || scanLoading} />
       <div className="app-content">
-        {activeTab === 'OVERVIEW' && (
+        {activeTab === 'CREST' && (
           <OverviewPage
             plexData={plexData}
             walletHistory={walletHistory}
             plexLoading={plexLoading}
           />
         )}
-        {activeTab === 'CALCULATOR' && <CalculatorPage />}
+        {activeTab === 'CALCULATOR' && <CalculatorPage refreshKey={refreshKey} />}
       </div>
     </div>
   );

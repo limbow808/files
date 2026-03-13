@@ -6,7 +6,7 @@ export default function Header({ online, activeTab, onTabChange, onRefresh, refr
     <div id="crest-header">
       {/* Nav tabs — left, stretch full height */}
       <div className="nav-bar">
-        {['OVERVIEW', 'CALCULATOR'].map(tab => (
+        {['CREST', 'CALCULATOR'].map(tab => (
           <button
             key={tab}
             className={`nav-tab${activeTab === tab ? ' active' : ''}`}
@@ -14,10 +14,13 @@ export default function Header({ online, activeTab, onTabChange, onRefresh, refr
           >{tab}</button>
         ))}
       </div>
-      {/* Logo — absolutely centered */}
-      <div className="logo-text header-logo-center">CREST</div>
-      {/* Right controls: SCAN → ONLINE → clock */}
+      {/* Right controls: ONLINE → clock → SCAN */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ fontSize: 10, letterSpacing: 1 }}>
+          <span className={`dot ${online ? 'dot-green' : 'dot-red'}`} />
+          {online ? 'ONLINE' : 'OFFLINE'}
+        </div>
+        <div className="clock-text" style={{ color: 'var(--text)' }}>{clock}</div>
         <button
           className="btn btn-primary"
           onClick={onRefresh}
@@ -26,11 +29,6 @@ export default function Header({ online, activeTab, onTabChange, onRefresh, refr
         >
           {refreshing ? 'SCANNING…' : 'SCAN'}
         </button>
-        <div style={{ fontSize: 10, letterSpacing: 1 }}>
-          <span className={`dot ${online ? 'dot-green' : 'dot-red'}`} />
-          {online ? 'ONLINE' : 'OFFLINE'}
-        </div>
-        <div className="clock-text" style={{ color: 'var(--text)' }}>{clock}</div>
       </div>
     </div>
   );

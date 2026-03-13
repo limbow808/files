@@ -388,10 +388,12 @@ tr.row-selected td { color: #000; }
   flex-shrink: 0;
   cursor: pointer;
   user-select: none;
-  transition: color 0.12s;
+  transition: color 0.12s, background 0.12s;
+  padding: 1px 6px;  /* always present — prevents layout shift on active */
 }
-.filter-label:hover { color: var(--text); }
-.filter-label.all-active { color: #000; background: var(--accent); padding: 1px 6px; }
+.filter-label:hover { border-color: var(--accent); color: #000; background: var(--accent); }
+.filter-label.all-active { color: #000; background: var(--text); }
+.filter-label.all-active:hover { border-color: var(--accent); color: #000; background: var(--accent); }
 .filter-options { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip {
   font-family: var(--mono);
@@ -406,7 +408,8 @@ tr.row-selected td { color: #000; }
   white-space: nowrap;
 }
 .chip:hover { border-color: var(--accent); color: #000; background: var(--accent); }
-.chip.active { border-color: var(--accent); color: #000; background: var(--accent); }
+.chip.active { border-color: var(--text); color: #000; background: var(--text); }
+.chip.active:hover { border-color: var(--accent); color: #000; background: var(--accent); }
 
 .calc-input {
   font-family: var(--mono);
