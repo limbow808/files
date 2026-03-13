@@ -13,7 +13,7 @@ Endpoints:
     GET /api/minerals - Return Jita mineral prices
 """
 
-from flask import Flask, jsonify, send_file
+from flask import Flask, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 import time
 import json
@@ -79,9 +79,18 @@ def _mineral_prices(prices: dict) -> dict:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
 @app.route("/", methods=["GET"])
 def dashboard():
-    return send_file(os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.html"))
+    dist = os.path.join(_HERE, "dist", "index.html")
+    if os.path.exists(dist):
+        return send_file(dist)
+    return send_file(os.path.join(_HERE, "dashboard.html"))
+
+@app.route("/assets/<path:filename>")
+def serve_assets(filename):
+    return send_from_directory(os.path.join(_HERE, "dist", "assets"), filename)
 
 
 @app.route("/api/scan", methods=["GET"])
@@ -196,22 +205,58 @@ def api_wallet_history():
 
 @app.route("/api/minerals", methods=["GET"])
 def api_minerals():
-    """Return current Jita prices for all 8 minerals."""
+    """Return current Jita prices for all 8 minerals + common base ores with ISK/m3."""
+    # Base ores: type_id → { name, volume_m3 }  (volume per unit from SDE)
+    ORES = {
+        1230:  {"name": "Veldspar",    "m3": 0.1},
+        1228:  {"name": "Scordite",    "m3": 0.15},
+        1224:  {"name": "Pyroxeres",   "m3": 0.3},
+        18:    {"name": "Kernite",     "m3": 1.2},
+        1226:  {"name": "Omber",       "m3": 0.6},
+        20:    {"name": "Jaspet",      "m3": 2.0},
+        21:    {"name": "Hemorphite",  "m3": 3.0},
+        1227:  {"name": "Hedbergite",  "m3": 3.0},
+        22:    {"name": "Gneiss",      "m3": 5.0},
+        1229:  {"name": "Dark Ochre",  "m3": 8.0},
+        17470: {"name": "Bistot",      "m3": 16.0},
+        17463: {"name": "Crokite",     "m3": 16.0},
+        17464: {"name": "Spodumain",   "m3": 16.0},
+        17459: {"name": "Arkonor",     "m3": 16.0},
+        17425: {"name": "Mercoxit",    "m3": 40.0},
+    }
     try:
         from pricer import get_prices_bulk
-        prices = get_prices_bulk(list(MINERALS.values()))
+        mineral_ids = list(MINERALS.values())
+        ore_ids     = list(ORES.keys())
+        prices = get_prices_bulk(mineral_ids + ore_ids)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-    data = {}
+    minerals_out = {}
     for name, tid in MINERALS.items():
         entry = prices.get(tid, {})
-        data[name] = {
+        minerals_out[name] = {
             "type_id": tid,
             "sell":    entry.get("sell", 0),
             "buy":     entry.get("buy", 0),
         }
-    return jsonify(data)
+
+    ores_out = {}
+    for tid, meta in ORES.items():
+        entry  = prices.get(tid, {})
+        sell   = entry.get("sell", 0)
+        buy    = entry.get("buy", 0)
+        m3     = meta["m3"]
+        ores_out[meta["name"]] = {
+            "type_id":    tid,
+            "sell":       sell,
+            "buy":        buy,
+            "isk_per_m3": round(sell / m3, 2) if sell and m3 else 0,
+            "buy_per_m3": round(buy  / m3, 2) if buy  and m3 else 0,
+            "m3":         m3,
+        }
+
+    return jsonify({"minerals": minerals_out, "ores": ores_out})
 
 
 # Maps SDE invCategories.categoryName → frontend TYPE_FILTERS chip labels
@@ -685,6 +730,186 @@ def api_assets():
 
     except Exception as e:
         return jsonify({"error": str(e), "assets": {}, "names": {}}), 200
+
+
+# ── Industry Jobs ──────────────────────────────────────────────────────────────
+@app.route("/api/industry/jobs", methods=["GET"])
+def api_industry_jobs():
+    """
+    Return active manufacturing jobs for all authenticated characters,
+    sorted by time remaining (soonest first).
+    Each job: { job_id, activity, product_name, product_type_id, runs,
+                start_date, end_date, seconds_remaining, character_name }
+    """
+    try:
+        from auth import get_auth_header
+        from assets import CHARACTER_ID
+        import requests as req
+
+        headers = get_auth_header()
+
+        # Fetch jobs — include_completed=false to get only active jobs
+        resp = req.get(
+            f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/industry/jobs/",
+            headers=headers,
+            params={"include_completed": False},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        jobs = resp.json()
+
+        if not jobs:
+            return jsonify({"jobs": []})
+
+        # Only manufacturing (activity_id=1) and reactions (activity_id=11)
+        ACTIVITY_NAMES = {
+            1: "Manufacturing",
+            3: "TE Research",
+            4: "ME Research",
+            5: "Copying",
+            8: "Invention",
+            11: "Reaction",
+        }
+
+        # Collect all product type_ids for name resolution
+        product_ids = list({j.get("product_type_id") for j in jobs if j.get("product_type_id")})
+
+        # Resolve names
+        names = {}
+        if product_ids:
+            try:
+                nr = req.post(
+                    "https://esi.evetech.net/latest/universe/names/",
+                    json=product_ids[:1000],
+                    timeout=10,
+                )
+                if nr.ok:
+                    for item in nr.json():
+                        names[item["id"]] = item["name"]
+            except Exception:
+                pass
+
+        now_ts = int(time.time())
+        result = []
+        for j in jobs:
+            # Parse end_date ISO string to unix timestamp
+            end_str = j.get("end_date", "")
+            try:
+                from datetime import datetime, timezone
+                end_ts = int(datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp())
+            except Exception:
+                end_ts = now_ts
+
+            secs_left = max(0, end_ts - now_ts)
+            pid = j.get("product_type_id")
+            result.append({
+                "job_id":            j.get("job_id"),
+                "activity":          ACTIVITY_NAMES.get(j.get("activity_id", 0), f"Activity {j.get('activity_id')}"),
+                "activity_id":       j.get("activity_id", 0),
+                "product_type_id":   pid,
+                "product_name":      names.get(pid, f"Type {pid}"),
+                "runs":              j.get("runs", 1),
+                "start_date":        j.get("start_date", ""),
+                "end_date":          end_str,
+                "end_ts":            end_ts,
+                "seconds_remaining": secs_left,
+                "status":            j.get("status", ""),
+                "installer_id":      j.get("installer_id"),
+            })
+
+        # Sort by soonest completing first
+        result.sort(key=lambda x: x["seconds_remaining"])
+        return jsonify({"jobs": result, "count": len(result)})
+
+    except Exception as e:
+        return jsonify({"error": str(e), "jobs": []}), 200
+
+
+# ── Character Market Orders ────────────────────────────────────────────────────
+@app.route("/api/orders", methods=["GET"])
+def api_orders():
+    """
+    Return active sell and buy orders for the character.
+    Response: { sell: [...], buy: [...] }
+    Each order: { order_id, type_id, type_name, price, volume_remain,
+                  volume_total, range, is_buy_order, issued, duration,
+                  escrow, region_name }
+    """
+    try:
+        from auth import get_auth_header
+        from assets import CHARACTER_ID
+        import requests as req
+
+        headers = get_auth_header()
+
+        resp = req.get(
+            f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/orders/",
+            headers=headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        orders = resp.json()
+
+        if not orders:
+            return jsonify({"sell": [], "buy": []})
+
+        # Resolve type names
+        type_ids = list({o["type_id"] for o in orders})
+        names = {}
+        try:
+            nr = req.post(
+                "https://esi.evetech.net/latest/universe/names/",
+                json=type_ids[:1000],
+                timeout=10,
+            )
+            if nr.ok:
+                for item in nr.json():
+                    names[item["id"]] = item["name"]
+        except Exception:
+            pass
+
+        # Resolve region names
+        region_ids = list({o.get("region_id") for o in orders if o.get("region_id")})
+        region_names = {}
+        if region_ids:
+            try:
+                rr = req.post(
+                    "https://esi.evetech.net/latest/universe/names/",
+                    json=region_ids[:100],
+                    timeout=10,
+                )
+                if rr.ok:
+                    for item in rr.json():
+                        region_names[item["id"]] = item["name"]
+            except Exception:
+                pass
+
+        sell, buy = [], []
+        for o in orders:
+            enriched = {
+                "order_id":      o.get("order_id"),
+                "type_id":       o.get("type_id"),
+                "type_name":     names.get(o["type_id"], f"Type {o['type_id']}"),
+                "price":         o.get("price", 0),
+                "volume_remain": o.get("volume_remain", 0),
+                "volume_total":  o.get("volume_total", 0),
+                "range":         o.get("range", ""),
+                "is_buy_order":  o.get("is_buy_order", False),
+                "issued":        o.get("issued", ""),
+                "duration":      o.get("duration", 0),
+                "escrow":        o.get("escrow", 0),
+                "region_name":   region_names.get(o.get("region_id"), ""),
+            }
+            (buy if o.get("is_buy_order") else sell).append(enriched)
+
+        # Sell: sort by ISK value descending; Buy: sort by escrow descending
+        sell.sort(key=lambda x: x["price"] * x["volume_remain"], reverse=True)
+        buy.sort(key=lambda x: x["escrow"], reverse=True)
+
+        return jsonify({"sell": sell, "buy": buy})
+
+    except Exception as e:
+        return jsonify({"error": str(e), "sell": [], "buy": []}), 200
 
 
 if __name__ == "__main__":
