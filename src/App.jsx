@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import Header from './components/Header';
 import OverviewPage from './pages/OverviewPage';
 import CalculatorPage from './pages/CalculatorPage';
+import CharactersPage from './pages/CharactersPage';
 import { useApi } from './hooks/useApi';
 
 export const API = '';
@@ -13,7 +14,7 @@ export default function App() {
   const [activeTab, setActiveTab]   = useState('CREST');
   const timerRef = useRef(null);
 
-  const { data: scanData,     loading: scanLoading, error: scanError, refetch } =
+  const { loading: scanLoading, error: scanError, refetch } =
     useApi(`${API}/api/scan`,           [refreshKey]);
   const { data: plexData,     loading: plexLoading } =
     useApi(`${API}/api/plex`,           [refreshKey]);
@@ -46,6 +47,7 @@ export default function App() {
           />
         )}
         {activeTab === 'CALCULATOR' && <CalculatorPage refreshKey={refreshKey} />}
+        {activeTab === 'CHARACTERS' && <CharactersPage />}
       </div>
     </div>
   );

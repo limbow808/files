@@ -7,52 +7,79 @@ const ORE_ORDER     = ['Veldspar','Scordite','Pyroxeres','Kernite','Omber','Jasp
                        'Hemorphite','Hedbergite','Gneiss','Dark Ochre','Bistot','Crokite',
                        'Spodumain','Arkonor','Mercoxit'];
 
+const TREND_ICON  = { up: '▲', down: '▼', flat: '→' };
+const TREND_COLOR = { up: '#00cc66', down: '#cc3333', flat: '#444' };
+
+const ORE_COLS = [
+  { key: 'name',       label: 'ORE',    align: 'left'  },
+  { key: 'sell',       label: 'SELL',   align: 'right' },
+  { key: 'isk_per_m3', label: 'ISK/M³', align: 'right' },
+  { key: 'buy_per_m3', label: 'BUY/M³', align: 'right' },
+];
+
 export default function MineralsSection() {
   const { data, loading } = useApi('/api/minerals');
-  const [tab, setTab] = useState('minerals');
+  const [tab, setTab]         = useState('minerals');
+  const [sortCol, setSortCol] = useState('name');
+  const [sortDir, setSortDir] = useState(1);   // 1 = asc, -1 = desc
+
   const minerals = data?.minerals || {};
   const ores     = data?.ores     || {};
 
+  function handleSort(col) {
+    if (sortCol === col) setSortDir(d => -d);
+    else { setSortCol(col); setSortDir(1); }
+  }
+
+  const sortedOres = ORE_ORDER
+    .map(name => ({ name, ...ores[name] }))
+    .sort((a, b) => {
+      const av = sortCol === 'name' ? a.name : (a[sortCol] || 0);
+      const bv = sortCol === 'name' ? b.name : (b[sortCol] || 0);
+      return typeof av === 'string'
+        ? av.localeCompare(bv) * sortDir
+        : (av - bv) * sortDir;
+    });
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* Tab strip — both buttons flush left, side by side */}
+      {/* Tab strip — both buttons equal width, filling the header */}
       <div className="panel-hdr" style={{ padding: 0, flexShrink: 0 }}>
         {['minerals','ores'].map(t => (
-          <button key={t} onClick={() => setTab(t)} className={`tab-btn${tab === t ? ' active' : ''}`}>
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={`tab-btn${tab === t ? ' active' : ''}`}
+            style={{ flex: 1 }}
+          >
             {t === 'minerals' ? '◈ Minerals' : '◈ Base Ores'}
           </button>
         ))}
       </div>
 
       {tab === 'minerals' ? (
-        /* Fill entire remaining height with an 8-cell grid (4×2), rows auto-stretch */
-        <div style={{
-          flex: 1, minHeight: 0,
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gridTemplateRows: 'repeat(2, 1fr)',
-          gap: 1,
-          background: 'var(--border)',
-          padding: 1,
-        }}>
-          {MINERAL_ORDER.map(name => {
+        /* Compact two-column list: name on left, sell price right, buy dim below */
+        <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          {MINERAL_ORDER.map((name, i) => {
             const m = minerals[name];
             return (
               <div key={name} style={{
-                background: '#050505',
-                display: 'flex', flexDirection: 'column', justifyContent: 'center',
-                padding: '0 12px',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '5px 12px',
+                borderBottom: '1px solid #0d0d0d',
+                background: i % 2 === 0 ? '#030303' : '#050505',
               }}>
-                <div style={{ fontFamily: 'var(--head)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>
-                  {name.toUpperCase()}
+                <span style={{ fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 1, color: 'var(--text)' }}>
+                  {name}
+                </span>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)' }}>
+                    {loading && !data ? '—' : (m ? fmtISK(m.sell) : '—')}
+                  </div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
+                    ▼ {loading && !data ? '—' : (m ? fmtISK(m.buy) : '—')}
+                  </div>
                 </div>
-                {loading && !data
-                  ? <div style={{ background: '#111', height: 14, width: 60, animation: 'pulse 1.5s infinite' }} />
-                  : <>
-                      <div style={{ fontSize: 13, color: 'var(--text)', fontFamily: 'var(--mono)' }}>{m ? fmtISK(m.sell) : '—'}</div>
-                      <div style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1, marginTop: 2 }}>▼ {m ? fmtISK(m.buy) : '—'}</div>
-                    </>
-                }
               </div>
             );
           })}
@@ -62,27 +89,61 @@ export default function MineralsSection() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
-                {['ORE','SELL','ISK/M³','BUY/M³'].map(h => (
-                  <th key={h} style={{ padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 2,
-                    borderBottom: '1px solid var(--border)', textAlign: h === 'ORE' ? 'left' : 'right',
-                    position: 'sticky', top: 0, background: '#000', zIndex: 1 }}>{h}</th>
-                ))}
+                {ORE_COLS.map(({ key, label, align }) => {
+                  const active = sortCol === key;
+                  return (
+                    <th
+                      key={key}
+                      onClick={() => handleSort(key)}
+                      style={{
+                        padding: '5px 8px', fontSize: 9, letterSpacing: 2,
+                        borderBottom: '1px solid var(--border)',
+                        textAlign: align,
+                        position: 'sticky', top: 0, background: '#000', zIndex: 1,
+                        cursor: 'pointer', userSelect: 'none',
+                        color: active ? 'var(--text)' : 'var(--dim)',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {label}
+                      {active
+                        ? <span style={{ marginLeft: 4 }}>{sortDir === 1 ? '▲' : '▼'}</span>
+                        : <span style={{ marginLeft: 4, opacity: 0.3 }}>▲</span>
+                      }
+                    </th>
+                  );
+                })}
+                {/* Trend column header */}
+                <th style={{
+                  padding: '5px 6px', fontSize: 9, letterSpacing: 2, color: 'var(--dim)',
+                  borderBottom: '1px solid var(--border)', textAlign: 'center',
+                  position: 'sticky', top: 0, background: '#000', zIndex: 1,
+                }}>TREND</th>
               </tr>
             </thead>
             <tbody>
-              {ORE_ORDER.map(name => {
-                const o = ores[name];
+              {sortedOres.map((o, i) => {
+                const trend = o.trend || 'flat';
                 return (
-                  <tr key={name} style={{ borderBottom: '1px solid #0d0d0d' }}>
-                    <td style={{ padding: '4px 8px', fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 1 }}>{name}</td>
+                  <tr key={o.name} style={{
+                    borderBottom: '1px solid #0d0d0d',
+                    background: i % 2 === 0 ? '#030303' : '#050505',
+                  }}>
+                    <td style={{ padding: '4px 8px', fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 1 }}>
+                      {o.name}
+                    </td>
                     <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10 }}>
-                      {loading && !data ? '—' : (o ? fmtISK(o.sell) : '—')}
+                      {loading && !data ? '—' : (o.sell != null ? fmtISK(o.sell) : '—')}
                     </td>
                     <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--accent)' }}>
-                      {loading && !data ? '—' : (o ? fmtISK(o.isk_per_m3) : '—')}
+                      {loading && !data ? '—' : (o.isk_per_m3 != null ? fmtISK(o.isk_per_m3) : '—')}
                     </td>
                     <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
-                      {loading && !data ? '—' : (o ? fmtISK(o.buy_per_m3) : '—')}
+                      {loading && !data ? '—' : (o.buy_per_m3 != null ? fmtISK(o.buy_per_m3) : '—')}
+                    </td>
+                    <td style={{ padding: '4px 6px', textAlign: 'center', fontSize: 11, color: TREND_COLOR[trend] }}
+                        title={o.trend_pct != null ? `${o.trend_pct > 0 ? '+' : ''}${o.trend_pct}%` : ''}>
+                      {TREND_ICON[trend]}
                     </td>
                   </tr>
                 );

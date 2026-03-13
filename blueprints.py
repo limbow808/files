@@ -127,6 +127,7 @@ def load_blueprints(
         bp_id = row["blueprint_id"]
         results.append({
             "name":         row["output_name"],
+            "blueprint_id": bp_id,
             "output_id":    row["output_id"],
             "output_qty":   row["output_qty"],
             "me_level":     row["me_level"],

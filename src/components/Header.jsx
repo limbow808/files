@@ -6,7 +6,7 @@ export default function Header({ online, activeTab, onTabChange, onRefresh, refr
     <div id="crest-header">
       {/* Nav tabs — left, stretch full height */}
       <div className="nav-bar">
-        {['CREST', 'CALCULATOR'].map(tab => (
+        {['CREST', 'CALCULATOR', 'CHARACTERS'].map(tab => (
           <button
             key={tab}
             className={`nav-tab${activeTab === tab ? ' active' : ''}`}

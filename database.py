@@ -62,24 +62,61 @@ def get_history(days: int = 7) -> List[Dict[str, Any]]:
 def _ensure_wallet_table(conn) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS wallet_snapshots (
-            ts      INTEGER NOT NULL,
-            balance REAL    NOT NULL
+            ts         INTEGER NOT NULL,
+            balance    REAL    NOT NULL,
+            plex_count INTEGER DEFAULT 0
         )
     """)
+    # Migrate existing tables that lack plex_count
+    try:
+        conn.execute("ALTER TABLE wallet_snapshots ADD COLUMN plex_count INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
 
 
-def record_wallet_snapshot(balance: float) -> None:
-    """Record current wallet balance. Skips if last snapshot was < 5 minutes ago."""
+def record_wallet_snapshot(balance: float, min_interval: int = 300) -> None:
+    """Record current wallet balance. Skips if last snapshot was < min_interval seconds ago.
+
+    For on-demand (API request) calls, min_interval defaults to 5 minutes (300s).
+    For background periodic calls, pass min_interval=7200 (2h) or 0 to force-write.
+    """
     init_db()
     conn = _get_conn()
     _ensure_wallet_table(conn)
     cur = conn.cursor()
     cur.execute("SELECT ts FROM wallet_snapshots ORDER BY ts DESC LIMIT 1")
     row = cur.fetchone()
-    if not row or (int(time.time()) - row["ts"]) >= 300:
+    if not row or (int(time.time()) - row["ts"]) >= min_interval:
         cur.execute(
-            "INSERT INTO wallet_snapshots (ts, balance) VALUES (?, ?)",
+            "INSERT INTO wallet_snapshots (ts, balance, plex_count) VALUES (?, ?, 0)",
             (int(time.time()), balance)
+        )
+        cur.execute(
+            "DELETE FROM wallet_snapshots WHERE ts NOT IN "
+            "(SELECT ts FROM wallet_snapshots ORDER BY ts DESC LIMIT 500)"
+        )
+    conn.commit()
+    conn.close()
+
+
+def record_wealth_snapshot(balance: float) -> None:
+    """Record a periodic wealth snapshot (throttled to once per 2 hours).
+
+    Called by the background thread in server.py every 2 hours.
+    Does nothing if a snapshot already exists within the last 2 hours.
+    """
+    init_db()
+    conn = _get_conn()
+    _ensure_wallet_table(conn)
+    cur = conn.cursor()
+    cur.execute("SELECT ts FROM wallet_snapshots ORDER BY ts DESC LIMIT 1")
+    row = cur.fetchone()
+    now = int(time.time())
+    if not row or (now - row["ts"]) >= 7200:
+        cur.execute(
+            "INSERT INTO wallet_snapshots (ts, balance, plex_count) VALUES (?, ?, 0)",
+            (now, balance)
         )
         cur.execute(
             "DELETE FROM wallet_snapshots WHERE ts NOT IN "
@@ -97,12 +134,12 @@ def get_wallet_history(days: int = 30) -> List[Dict[str, Any]]:
     cutoff = int(time.time()) - days * 86400
     cur = conn.cursor()
     cur.execute(
-        "SELECT ts, balance FROM wallet_snapshots WHERE ts >= ? ORDER BY ts ASC",
+        "SELECT ts, balance, plex_count FROM wallet_snapshots WHERE ts >= ? ORDER BY ts ASC",
         (cutoff,)
     )
     rows = cur.fetchall()
     conn.close()
-    return [{"ts": r["ts"], "balance": r["balance"]} for r in rows]
+    return [{"ts": r["ts"], "balance": r["balance"], "plex_count": r["plex_count"] or 0} for r in rows]
 
 
 # ─── SDE / crest.db seeding helper ───────────────────────────────────────────

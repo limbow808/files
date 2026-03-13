@@ -23,7 +23,7 @@ import requests
 
 from blueprints import load_blueprints, MINERALS
 from calculator import calculate_all
-from database import save_scan, record_wallet_snapshot, get_wallet_history
+from database import save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history
 
 app = Flask(__name__)
 CORS(app)  # Allow React dev server (localhost:3000 / file://) to call the API
@@ -97,10 +97,21 @@ def _unsubscribe_progress(cache_key: str, q: _queue.Queue):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _get_wallet() -> float:
-    """Fetch character wallet balance from ESI."""
+    """Fetch combined wallet balance across ALL authenticated characters."""
     try:
-        from assets import get_wallet_balance
-        return float(get_wallet_balance())
+        import requests as _req
+        from characters import get_all_auth_headers, load_characters
+        ESI_BASE = "https://esi.evetech.net/latest"
+        auth_headers = get_all_auth_headers()
+        total = 0.0
+        for cid, headers in auth_headers:
+            try:
+                r = _req.get(f"{ESI_BASE}/characters/{cid}/wallet/", headers=headers, timeout=8)
+                if r.ok:
+                    total += float(r.json())
+            except Exception:
+                pass
+        return total
     except Exception:
         return 0.0
 
@@ -142,6 +153,57 @@ def dashboard():
 @app.route("/assets/<path:filename>")
 def serve_assets(filename):
     return send_from_directory(os.path.join(_HERE, "dist", "assets"), filename)
+
+
+# ── Character management endpoints ────────────────────────────────────────────
+
+@app.route("/api/characters", methods=["GET"])
+def api_characters_list():
+    """Return list of all connected characters with live wallet + job data."""
+    try:
+        from characters import list_characters
+        return jsonify({"characters": list_characters()})
+    except Exception as e:
+        return jsonify({"error": str(e), "characters": []}), 200
+
+@app.route("/api/characters/<character_id>", methods=["DELETE"])
+def api_characters_remove(character_id):
+    """Remove a character from the store."""
+    try:
+        from characters import remove_character
+        removed = remove_character(character_id)
+        return jsonify({"ok": removed})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/characters/<character_id>/stats", methods=["GET"])
+def api_character_stats(character_id):
+    """Fetch live wallet + active job count for a single character."""
+    try:
+        from characters import get_character_stats
+        return jsonify(get_character_stats(character_id))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
+
+@app.route("/api/characters/add", methods=["POST"])
+def api_characters_add():
+    """Start the OAuth flow — opens browser, returns a state token to poll."""
+    try:
+        from characters import begin_add_character
+        state = begin_add_character()
+        return jsonify({"state": state})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/characters/poll/<state>", methods=["GET"])
+def api_characters_poll(state):
+    """Poll a pending OAuth flow for completion."""
+    try:
+        from characters import poll_add_character
+        result = poll_add_character(state, timeout=0.5)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 200
 
 
 @app.route("/api/scan", methods=["GET"])
@@ -222,6 +284,10 @@ def api_plex():
             pass
     plex_price = _get_plex_price({})
 
+    # NOTE: PLEX in the Account Vault is not exposed by esi-assets.read_assets.v1.
+    # All character asset pages were scanned — PLEX simply does not appear there.
+    # We return plex_count=null so the UI knows to hide the field rather than show 0.
+
     accounts         = PLEX_CONFIG["accounts"]
     plex_per_account = PLEX_CONFIG["plex_per_account"]
     monthly_target   = accounts * plex_per_account * plex_price
@@ -240,6 +306,8 @@ def api_plex():
         "plex_per_account":plex_per_account,
         "monthly_target":  monthly_target,
         "current_balance": balance,
+        "plex_count":      None,
+        "plex_value":      None,
         "days_remaining":  days_remaining,
     })
 
@@ -254,9 +322,12 @@ def api_wallet_history():
         return jsonify({"error": str(e)}), 500
 
 
+_ore_price_prev: dict = {}   # name → sell price from previous fetch (in-memory trend cache)
+
 @app.route("/api/minerals", methods=["GET"])
 def api_minerals():
     """Return current Jita prices for all 8 minerals + common base ores with ISK/m3."""
+    global _ore_price_prev
     # Base ores: type_id → { name, volume_m3 }  (volume per unit from SDE)
     ORES = {
         1230:  {"name": "Veldspar",    "m3": 0.1},
@@ -298,14 +369,28 @@ def api_minerals():
         sell   = entry.get("sell", 0)
         buy    = entry.get("buy", 0)
         m3     = meta["m3"]
-        ores_out[meta["name"]] = {
+        name   = meta["name"]
+        prev   = _ore_price_prev.get(name, sell)
+        diff_pct = ((sell - prev) / prev * 100) if prev else 0
+        if diff_pct > 0.5:
+            trend = "up"
+        elif diff_pct < -0.5:
+            trend = "down"
+        else:
+            trend = "flat"
+        ores_out[name] = {
             "type_id":    tid,
             "sell":       sell,
             "buy":        buy,
             "isk_per_m3": round(sell / m3, 2) if sell and m3 else 0,
             "buy_per_m3": round(buy  / m3, 2) if buy  and m3 else 0,
             "m3":         m3,
+            "trend":      trend,
+            "trend_pct":  round(diff_pct, 2),
         }
+
+    # Update previous-price cache for next fetch comparison
+    _ore_price_prev = {name: ores_out[name]["sell"] for name in ores_out}
 
     return jsonify({"minerals": minerals_out, "ores": ores_out})
 
@@ -383,6 +468,50 @@ def api_calculator():
         # ── Gather all type IDs needed ────────────────────────────────────────
         _all_blueprints = load_blueprints()
         total_bps    = len(_all_blueprints)
+
+        # ── Merge ESI ME/TE levels so researched BPs use actual levels ────────
+        # ESI blueprint type_id is the BLUEPRINT item (e.g. "Raven Blueprint"),
+        # crest.db blueprint_id matches this — build a lookup by blueprint_id.
+        esi_me_te: dict = {}   # blueprint_id → {me_level, te_level, bp_type}
+        try:
+            from characters import get_all_auth_headers, load_characters as _lc
+            _char_records = _lc()
+            _auth_headers = get_all_auth_headers()
+            for _cid, _headers in _auth_headers:
+                try:
+                    _r = requests.get(
+                        f"https://esi.evetech.net/latest/characters/{_cid}/blueprints/",
+                        headers=_headers, params={"include_completed": False}, timeout=15
+                    )
+                    if not _r.ok:
+                        continue
+                    for _bp in _r.json():
+                        _tid = _bp["type_id"]        # blueprint type_id (the BP item itself)
+                        _me  = _bp.get("material_efficiency", 0)
+                        _te  = _bp.get("time_efficiency", 0)
+                        _runs = _bp.get("runs", -1)
+                        _bpt = "BPO" if _runs == -1 else "BPC"
+                        # Keep highest ME/TE if character has duplicates
+                        existing = esi_me_te.get(_tid)
+                        if not existing or _me > existing["me_level"]:
+                            esi_me_te[_tid] = {
+                                "me_level": _me,
+                                "te_level": _te,
+                                "bp_type":  _bpt,
+                            }
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Apply ESI ME/TE to blueprints: blueprint_id in crest.db = ESI type_id of the BP
+        for bp in _all_blueprints:
+            _esi = esi_me_te.get(bp.get("blueprint_id"))
+            if _esi:
+                bp["me_level"] = _esi["me_level"]
+                bp["te_level"] = _esi["te_level"]
+                bp["bp_type"]  = _esi["bp_type"]
+
         all_type_ids = set()
         output_ids   = set()
         for bp in _all_blueprints:
@@ -437,7 +566,7 @@ def api_calculator():
             result["tech"]           = bp.get("tech", "I")
             result["size"]           = bp.get("size", "U")
             result["bp_type"]        = bp.get("bp_type", "BPO")
-            result["duration"]       = bp.get("duration", 0)
+            result["duration"]       = result.get("time_seconds") or bp.get("time_seconds", 0)
             result["volume"]         = bp.get("volume", 0)
             result["required_skills"] = bp.get("required_skills", [])
 
@@ -705,30 +834,39 @@ def api_skills():
 @app.route("/api/blueprints/esi", methods=["GET"])
 def api_blueprints_esi():
     """
-    Return character blueprints from ESI (personal + optionally corp).
-    Returns list of { type_id, type_name, me_level, te_level, runs, location_id, bp_type }
+    Return character blueprints from ESI for ALL authenticated characters.
+    Returns list of { type_id, type_name, me_level, te_level, runs, location_id, bp_type, character_id, character_name }
     """
     try:
-        from auth import get_auth_header
-        from assets import CHARACTER_ID
+        from characters import get_all_auth_headers, load_characters
         import requests as req
 
-        headers = get_auth_header()
+        char_records = load_characters()
+        auth_headers = get_all_auth_headers()
 
-        # Fetch character blueprints
-        resp = req.get(
-            f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/blueprints/",
-            headers=headers,
-            timeout=15
-        )
-        resp.raise_for_status()
-        bps = resp.json()
+        all_bps = []
+        for cid, headers in auth_headers:
+            char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            try:
+                resp = req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
+                    headers=headers,
+                    timeout=15
+                )
+                if not resp.ok:
+                    continue
+                for bp in resp.json():
+                    bp["_character_id"]   = cid
+                    bp["_character_name"] = char_name
+                    all_bps.append(bp)
+            except Exception as e:
+                print(f"  [esi-bps] Failed for {char_name}: {e}")
 
-        if not bps:
+        if not all_bps:
             return jsonify({"blueprints": []})
 
         # Resolve type names
-        type_ids = list({bp["type_id"] for bp in bps})
+        type_ids = list({bp["type_id"] for bp in all_bps})
         names_resp = req.post(
             "https://esi.evetech.net/latest/universe/names/",
             json=type_ids[:1000],
@@ -740,16 +878,18 @@ def api_blueprints_esi():
                 names[item["id"]] = item["name"]
 
         result = []
-        for bp in bps:
+        for bp in all_bps:
             result.append({
-                "type_id":      bp["type_id"],
-                "name":         names.get(bp["type_id"], f"Type {bp['type_id']}"),
-                "me_level":     bp.get("material_efficiency", 0),
-                "te_level":     bp.get("time_efficiency", 0),
-                "runs":         bp.get("runs", -1),   # -1 = BPO (infinite)
-                "bp_type":      "BPO" if bp.get("runs", -1) == -1 else "BPC",
-                "location_id":  bp.get("location_id"),
-                "quantity":     bp.get("quantity", 1),
+                "type_id":        bp["type_id"],
+                "name":           names.get(bp["type_id"], f"Type {bp['type_id']}"),
+                "me_level":       bp.get("material_efficiency", 0),
+                "te_level":       bp.get("time_efficiency", 0),
+                "runs":           bp.get("runs", -1),   # -1 = BPO (infinite)
+                "bp_type":        "BPO" if bp.get("runs", -1) == -1 else "BPC",
+                "location_id":    bp.get("location_id"),
+                "quantity":       bp.get("quantity", 1),
+                "character_id":   bp["_character_id"],
+                "character_name": bp["_character_name"],
             })
 
         result.sort(key=lambda x: x["name"])
@@ -854,32 +994,15 @@ def api_assets():
 @app.route("/api/industry/jobs", methods=["GET"])
 def api_industry_jobs():
     """
-    Return active manufacturing jobs for all authenticated characters,
+    Return active industry jobs for ALL authenticated characters combined,
     sorted by time remaining (soonest first).
-    Each job: { job_id, activity, product_name, product_type_id, runs,
-                start_date, end_date, seconds_remaining, character_name }
+    Each job includes character_name and character_id for attribution.
     """
     try:
-        from auth import get_auth_header
-        from assets import CHARACTER_ID
+        from characters import get_all_auth_headers, load_characters
         import requests as req
+        from datetime import datetime, timezone
 
-        headers = get_auth_header()
-
-        # Fetch jobs — include_completed=false to get only active jobs
-        resp = req.get(
-            f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/industry/jobs/",
-            headers=headers,
-            params={"include_completed": False},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        jobs = resp.json()
-
-        if not jobs:
-            return jsonify({"jobs": []})
-
-        # Only manufacturing (activity_id=1) and reactions (activity_id=11)
         ACTIVITY_NAMES = {
             1: "Manufacturing",
             3: "TE Research",
@@ -889,10 +1012,37 @@ def api_industry_jobs():
             11: "Reaction",
         }
 
-        # Collect all product type_ids for name resolution
-        product_ids = list({j.get("product_type_id") for j in jobs if j.get("product_type_id")})
+        # Load character records for name lookup
+        char_records = load_characters()  # cid → record
 
-        # Resolve names
+        # Fetch jobs from every character in parallel (sequential for simplicity)
+        auth_headers = get_all_auth_headers()  # list of (cid, header_dict)
+
+        all_jobs = []
+        for cid, headers in auth_headers:
+            char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            try:
+                resp = req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/industry/jobs/",
+                    headers=headers,
+                    params={"include_completed": False},
+                    timeout=15,
+                )
+                if not resp.ok:
+                    continue
+                for j in resp.json():
+                    j["_character_id"]   = cid
+                    j["_character_name"] = char_name
+                    all_jobs.append(j)
+            except Exception as e:
+                print(f"  [jobs] Failed for {char_name}: {e}")
+
+        if not all_jobs:
+            return jsonify({"jobs": []})
+
+        # Collect all product type_ids for name resolution
+        product_ids = list({j.get("product_type_id") for j in all_jobs if j.get("product_type_id")})
+
         names = {}
         if product_ids:
             try:
@@ -909,15 +1059,20 @@ def api_industry_jobs():
 
         now_ts = int(time.time())
         result = []
-        for j in jobs:
-            # Parse end_date ISO string to unix timestamp
-            end_str = j.get("end_date", "")
+        for j in all_jobs:
+            end_str   = j.get("end_date", "")
+            start_str = j.get("start_date", "")
             try:
-                from datetime import datetime, timezone
                 end_ts = int(datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp())
             except Exception:
                 end_ts = now_ts
 
+            try:
+                start_ts = int(datetime.fromisoformat(start_str.replace("Z", "+00:00")).timestamp())
+            except Exception:
+                start_ts = end_ts - 86400
+
+            total_secs = max(1, end_ts - start_ts)
             secs_left = max(0, end_ts - now_ts)
             pid = j.get("product_type_id")
             result.append({
@@ -927,12 +1082,15 @@ def api_industry_jobs():
                 "product_type_id":   pid,
                 "product_name":      names.get(pid, f"Type {pid}"),
                 "runs":              j.get("runs", 1),
-                "start_date":        j.get("start_date", ""),
+                "start_date":        start_str,
                 "end_date":          end_str,
                 "end_ts":            end_ts,
+                "total_secs":        total_secs,
                 "seconds_remaining": secs_left,
                 "status":            j.get("status", ""),
                 "installer_id":      j.get("installer_id"),
+                "character_id":      j["_character_id"],
+                "character_name":    j["_character_name"],
             })
 
         # Sort by soonest completing first
@@ -947,32 +1105,40 @@ def api_industry_jobs():
 @app.route("/api/orders", methods=["GET"])
 def api_orders():
     """
-    Return active sell and buy orders for the character.
+    Return active sell and buy orders for ALL characters combined.
     Response: { sell: [...], buy: [...] }
-    Each order: { order_id, type_id, type_name, price, volume_remain,
-                  volume_total, range, is_buy_order, issued, duration,
-                  escrow, region_name }
+    Each order includes character_name and character_id for attribution.
     """
     try:
-        from auth import get_auth_header
-        from assets import CHARACTER_ID
+        from characters import get_all_auth_headers, load_characters
         import requests as req
 
-        headers = get_auth_header()
+        char_records = load_characters()
+        auth_headers = get_all_auth_headers()
 
-        resp = req.get(
-            f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/orders/",
-            headers=headers,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        orders = resp.json()
+        all_orders = []
+        for cid, headers in auth_headers:
+            char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            try:
+                resp = req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/orders/",
+                    headers=headers,
+                    timeout=15,
+                )
+                if not resp.ok:
+                    continue
+                for o in resp.json():
+                    o["_character_id"]   = cid
+                    o["_character_name"] = char_name
+                    all_orders.append(o)
+            except Exception as e:
+                print(f"  [orders] Failed for {char_name}: {e}")
 
-        if not orders:
+        if not all_orders:
             return jsonify({"sell": [], "buy": []})
 
         # Resolve type names
-        type_ids = list({o["type_id"] for o in orders})
+        type_ids = list({o["type_id"] for o in all_orders})
         names = {}
         try:
             nr = req.post(
@@ -987,7 +1153,7 @@ def api_orders():
             pass
 
         # Resolve region names
-        region_ids = list({o.get("region_id") for o in orders if o.get("region_id")})
+        region_ids = list({o.get("region_id") for o in all_orders if o.get("region_id")})
         region_names = {}
         if region_ids:
             try:
@@ -1003,24 +1169,25 @@ def api_orders():
                 pass
 
         sell, buy = [], []
-        for o in orders:
+        for o in all_orders:
             enriched = {
-                "order_id":      o.get("order_id"),
-                "type_id":       o.get("type_id"),
-                "type_name":     names.get(o["type_id"], f"Type {o['type_id']}"),
-                "price":         o.get("price", 0),
-                "volume_remain": o.get("volume_remain", 0),
-                "volume_total":  o.get("volume_total", 0),
-                "range":         o.get("range", ""),
-                "is_buy_order":  o.get("is_buy_order", False),
-                "issued":        o.get("issued", ""),
-                "duration":      o.get("duration", 0),
-                "escrow":        o.get("escrow", 0),
-                "region_name":   region_names.get(o.get("region_id"), ""),
+                "order_id":       o.get("order_id"),
+                "type_id":        o.get("type_id"),
+                "type_name":      names.get(o["type_id"], f"Type {o['type_id']}"),
+                "price":          o.get("price", 0),
+                "volume_remain":  o.get("volume_remain", 0),
+                "volume_total":   o.get("volume_total", 0),
+                "range":          o.get("range", ""),
+                "is_buy_order":   o.get("is_buy_order", False),
+                "issued":         o.get("issued", ""),
+                "duration":       o.get("duration", 0),
+                "escrow":         o.get("escrow", 0),
+                "region_name":    region_names.get(o.get("region_id"), ""),
+                "character_id":   o["_character_id"],
+                "character_name": o["_character_name"],
             }
             (buy if o.get("is_buy_order") else sell).append(enriched)
 
-        # Sell: sort by ISK value descending; Buy: sort by escrow descending
         sell.sort(key=lambda x: x["price"] * x["volume_remain"], reverse=True)
         buy.sort(key=lambda x: x["escrow"], reverse=True)
 
@@ -1045,6 +1212,23 @@ if __name__ == "__main__":
             print(f"  [prewarm] Failed: {e}")
 
     threading.Thread(target=_prewarm, daemon=True).start()
+
+    # Periodic wealth snapshot — records wallet balance every 2 hours
+    def _wealth_snapshot_loop():
+        import time as _time
+        # Wait 60s before first run so auth tokens can be ready
+        _time.sleep(60)
+        while True:
+            try:
+                balance = _get_wallet()
+                if balance and balance > 0:
+                    record_wealth_snapshot(balance)
+                    print(f"  [snapshot] Wealth recorded: {balance:,.0f} ISK")
+            except Exception as e:
+                print(f"  [snapshot] Failed: {e}")
+            _time.sleep(7200)  # sleep 2 hours between snapshots
+
+    threading.Thread(target=_wealth_snapshot_loop, daemon=True).start()
 
     print()
     print("  ╔══════════════════════════════════════════════════╗")

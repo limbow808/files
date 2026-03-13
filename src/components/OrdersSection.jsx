@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { fmtISK } from '../utils/fmt';
+import CharTag from './CharTag';
+import { charColor } from '../utils/charColors';
 
-function OrderTable({ orders, isBuy }) {
+function OrderTable({ orders, isBuy, multiChar }) {
   if (!orders.length) {
     return (
       <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 2, textAlign: 'center' }}>
@@ -28,6 +30,7 @@ function OrderTable({ orders, isBuy }) {
           const filled  = ((o.volume_total - o.volume_remain) / o.volume_total * 100).toFixed(0);
           const total   = o.price * o.volume_remain;
           const fillColor = filled >= 75 ? '#00cc66' : filled >= 25 ? 'var(--text)' : 'var(--dim)';
+          const cColor  = o.character_id ? charColor(o.character_id) : 'var(--dim)';
           return (
             <tr key={o.order_id} style={{ borderBottom: '1px solid #0d0d0d' }}>
               <td style={{ padding: '7px 12px', textAlign: 'left' }}>
@@ -35,6 +38,11 @@ function OrderTable({ orders, isBuy }) {
                 <div style={{ height: 2, background: '#111', marginTop: 3, width: 80 }}>
                   <div style={{ height: '100%', width: `${filled}%`, background: isBuy ? '#4da6ff' : 'var(--accent)' }} />
                 </div>
+                {multiChar && o.character_name && (
+                  <div style={{ marginTop: 4 }}>
+                    <CharTag name={o.character_name} color={cColor} />
+                  </div>
+                )}
               </td>
               <td style={{ padding: '7px 10px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12 }}>
                 {fmtISK(o.price)}
@@ -68,6 +76,11 @@ export default function OrdersSection() {
 
   const sell = data?.sell || [];
   const buy  = data?.buy  || [];
+
+  // Detect multi-character
+  const allOrders = [...sell, ...buy];
+  const uniqueChars = new Set(allOrders.map(o => o.character_id).filter(Boolean));
+  const multiChar = uniqueChars.size > 1;
 
   const sellTotal = sell.reduce((s, o) => s + o.price * o.volume_remain, 0);
   const buyEscrow = buy.reduce((s,  o) => s + (o.escrow || 0), 0);
@@ -106,7 +119,7 @@ export default function OrdersSection() {
             LOADING…
           </div>
         ) : (
-          <OrderTable orders={tab === 'sell' ? sell : buy} isBuy={tab === 'buy'} />
+          <OrderTable orders={tab === 'sell' ? sell : buy} isBuy={tab === 'buy'} multiChar={multiChar} />
         )}
       </div>
     </div>

@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useApi } from '../hooks/useApi';
+import CharTag from './CharTag';
+import { charColor, seedCharColors } from '../utils/charColors';
 
 const ACTIVITY_COLORS = {
   'Manufacturing': 'var(--accent)',
@@ -9,6 +11,9 @@ const ACTIVITY_COLORS = {
   'Copying':       '#ffcc44',
   'Invention':     '#44ffaa',
 };
+
+const MFG_ACTIVITIES      = new Set(['Manufacturing', 'Reaction']);
+const RESEARCH_ACTIVITIES = new Set(['TE Research', 'ME Research', 'Copying', 'Invention']);
 
 function fmtCountdown(secs) {
   if (secs <= 0) return 'COMPLETE';
@@ -31,9 +36,73 @@ function ProgressBar({ secs, totalSecs }) {
   );
 }
 
+function JobTable({ jobs, now, multiChar, showRuns }) {
+  if (jobs.length === 0) {
+    return (
+      <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 2, textAlign: 'center' }}>
+        NO ACTIVE JOBS
+      </div>
+    );
+  }
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <thead>
+        <tr>
+          <th style={{ textAlign: 'left',  padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>ITEM</th>
+          {showRuns && (
+            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>RUNS</th>
+          )}
+          <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>TYPE</th>
+          {multiChar && (
+            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>CHAR</th>
+          )}
+          <th style={{ textAlign: 'right', padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>REMAINING</th>
+        </tr>
+      </thead>
+      <tbody>
+        {jobs.map(j => {
+          const secsLeft = Math.max(0, j.end_ts - now);
+          const isReady  = secsLeft <= 0;
+          const urgent   = secsLeft > 0 && secsLeft < 3600;
+          const aColor   = ACTIVITY_COLORS[j.activity] || 'var(--text)';
+          const cColor   = j.character_id ? charColor(j.character_id) : 'var(--dim)';
+          return (
+            <tr key={j.job_id} style={{ borderBottom: '1px solid #0d0d0d' }}>
+              <td style={{ padding: '8px 12px', textAlign: 'left' }}>
+                <div style={{ fontFamily: 'var(--head)', fontSize: 13, letterSpacing: 1, color: isReady ? '#00cc66' : 'var(--text)' }}>
+                  {j.product_name}
+                </div>
+                <ProgressBar secs={secsLeft} totalSecs={j.total_secs || 86400} />
+              </td>
+              {showRuns && (
+                <td style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11, color: 'var(--dim)' }}>×{j.runs}</td>
+              )}
+              <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                <span style={{ fontSize: 10, color: aColor, letterSpacing: 1, border: `1px solid ${aColor}`, padding: '1px 5px', opacity: 0.8 }}>
+                  {j.activity.toUpperCase()}
+                </span>
+              </td>
+              {multiChar && (
+                <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                  <CharTag name={j.character_name} color={cColor} />
+                </td>
+              )}
+              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12,
+                           color: isReady ? '#00cc66' : urgent ? 'var(--accent)' : 'var(--text)' }}>
+                {fmtCountdown(secsLeft)}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 export default function ManufacturingJobs() {
   const { data, loading, error } = useApi('/api/industry/jobs');
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [now, setNow]   = useState(() => Math.floor(Date.now() / 1000));
+  const [tab, setTab]   = useState('MFG');   // 'MFG' | 'RESEARCH'
 
   // Live countdown tick
   useEffect(() => {
@@ -43,19 +112,53 @@ export default function ManufacturingJobs() {
 
   const jobs = data?.jobs || [];
 
-  // Calculate total duration per job for progress bar (end_ts - start implied from data)
-  // We only have end_ts, so derive total from end_ts - "start" approximation via runs
-  // Store end_ts from API — compare to now for countdown
+  // Seed character colors in arrival order so they're consistent
+  useEffect(() => {
+    const unique = [];
+    const seen = new Set();
+    jobs.forEach(j => {
+      if (j.character_id && !seen.has(j.character_id)) {
+        seen.add(j.character_id);
+        unique.push({ character_id: j.character_id });
+      }
+    });
+    if (unique.length) seedCharColors(unique);
+  }, [jobs]);
 
-  const activeJobs   = jobs.filter(j => j.seconds_remaining > 0);
-  const completeJobs = jobs.filter(j => j.seconds_remaining <= 0);
+  const mfgJobs      = jobs.filter(j => MFG_ACTIVITIES.has(j.activity));
+  const researchJobs = jobs.filter(j => RESEARCH_ACTIVITIES.has(j.activity));
+  const visibleJobs  = tab === 'MFG' ? mfgJobs : researchJobs;
+
+  // Detect multi-character for visible set
+  const uniqueChars = new Set(visibleJobs.map(j => j.character_id).filter(Boolean));
+  const multiChar   = uniqueChars.size > 1;
+
+  const activeCount   = visibleJobs.filter(j => (j.end_ts - now) > 0).length;
+  const completeCount = visibleJobs.filter(j => (j.end_ts - now) <= 0).length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div className="panel-hdr">
-        <span className="panel-title">⚙ Manufacturing Jobs</span>
+        {/* Tab switcher */}
+        <div style={{ display: 'flex', gap: 0 }}>
+          {[['MFG', `⚙ MFG (${mfgJobs.length})`], ['RESEARCH', `🔬 RESEARCH (${researchJobs.length})`]].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className="chip"
+              style={{
+                marginRight: 4,
+                opacity: tab === key ? 1 : 0.45,
+                borderColor: tab === key ? 'var(--accent)' : 'var(--border)',
+                color: tab === key ? 'var(--accent)' : 'var(--dim)',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
-          {loading ? 'LOADING…' : `${activeJobs.length} ACTIVE · ${completeJobs.length} READY`}
+          {loading ? 'LOADING…' : `${activeCount} ACTIVE · ${completeCount} READY`}
         </span>
       </div>
 
@@ -70,51 +173,13 @@ export default function ManufacturingJobs() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
             LOADING…
           </div>
-        ) : jobs.length === 0 ? (
-          <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 2, textAlign: 'center' }}>
-            NO ACTIVE JOBS
-          </div>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: 'left',  padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>ITEM</th>
-                <th style={{ textAlign: 'center',padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>RUNS</th>
-                <th style={{ textAlign: 'center',padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>TYPE</th>
-                <th style={{ textAlign: 'right', padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>REMAINING</th>
-              </tr>
-            </thead>
-            <tbody>
-              {jobs.map(j => {
-                const secsLeft = Math.max(0, j.end_ts - now);
-                const isReady  = secsLeft <= 0;
-                // Approximate total duration — end_ts stored in data, assume starts = end_ts - secsLeft (use a big placeholder)
-                // We'll just pulse bar to 100% when done
-                const urgent   = secsLeft > 0 && secsLeft < 3600;
-                const aColor   = ACTIVITY_COLORS[j.activity] || 'var(--text)';
-                return (
-                  <tr key={j.job_id} style={{ borderBottom: '1px solid #0d0d0d' }}>
-                    <td style={{ padding: '8px 12px', textAlign: 'left' }}>
-                      <div style={{ fontFamily: 'var(--head)', fontSize: 13, letterSpacing: 1, color: isReady ? '#00cc66' : 'var(--text)' }}>
-                        {j.product_name}
-                      </div>
-                      <ProgressBar secs={secsLeft} totalSecs={3600 * 24} />
-                    </td>
-                    <td style={{ padding: '8px 10px', textAlign: 'center', fontSize: 11, color: 'var(--dim)' }}>×{j.runs}</td>
-                    <td style={{ padding: '8px 10px', textAlign: 'center' }}>
-                      <span style={{ fontSize: 10, color: aColor, letterSpacing: 1, border: `1px solid ${aColor}`, padding: '1px 5px', opacity: 0.8 }}>
-                        {j.activity.toUpperCase()}
-                      </span>
-                    </td>
-                    <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12,
-                                 color: isReady ? '#00cc66' : urgent ? 'var(--accent)' : 'var(--text)' }}>
-                      {fmtCountdown(secsLeft)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <JobTable
+            jobs={visibleJobs}
+            now={now}
+            multiChar={multiChar}
+            showRuns={tab === 'MFG'}
+          />
         )}
       </div>
     </div>
