@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useApi } from '../hooks/useApi';
 import CharTag from './CharTag';
 import { charColor, seedCharColors } from '../utils/charColors';
+import { fmtISK } from '../utils/fmt';
 
 const ACTIVITY_COLORS = {
   'Manufacturing': 'var(--accent)',
@@ -36,7 +37,7 @@ function ProgressBar({ secs, totalSecs }) {
   );
 }
 
-function JobTable({ jobs, now, multiChar, showRuns }) {
+function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
   if (jobs.length === 0) {
     return (
       <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 2, textAlign: 'center' }}>
@@ -51,6 +52,9 @@ function JobTable({ jobs, now, multiChar, showRuns }) {
           <th style={{ textAlign: 'left',  padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>ITEM</th>
           {showRuns && (
             <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>RUNS</th>
+          )}
+          {showSell && (
+            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>EST. SELL</th>
           )}
           <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>TYPE</th>
           {multiChar && (
@@ -76,6 +80,12 @@ function JobTable({ jobs, now, multiChar, showRuns }) {
               </td>
               {showRuns && (
                 <td style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11, color: 'var(--dim)' }}>×{j.runs}</td>
+              )}
+              {showSell && (
+                <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11,
+                             color: j.sell_total != null ? 'var(--accent)' : 'var(--dim)' }}>
+                  {j.sell_total != null ? fmtISK(j.sell_total) : '—'}
+                </td>
               )}
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>
                 <span style={{ fontSize: 10, color: aColor, letterSpacing: 1, border: `1px solid ${aColor}`, padding: '1px 5px', opacity: 0.8 }}>
@@ -138,14 +148,15 @@ export default function ManufacturingJobs() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* Header: tab-btn switcher (same style as Minerals/Orders) + status right */}
-      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 16 }}>
-        <div style={{ display: 'flex' }}>
-          {[['MFG', `⚙ MFG (${mfgJobs.length})`], ['RESEARCH', `🔬 RESEARCH (${researchJobs.length})`]].map(([key, label]) => (
+      {/* Header: chip switcher + status right */}
+      <div className="panel-hdr" style={{ gap: 8, paddingRight: 16 }}>
+        <span style={{ fontFamily: 'var(--head)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', flexShrink: 0 }}>◈ INDUSTRY</span>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {[['MFG', `MFG (${mfgJobs.length})`], ['RESEARCH', `RESEARCH (${researchJobs.length})`]].map(([key, label]) => (
             <button
               key={key}
               onClick={() => setTab(key)}
-              className={`tab-btn${tab === key ? ' active' : ''}`}
+              className={`chip${tab === key ? ' active' : ''}`}
             >
               {label}
             </button>
@@ -179,6 +190,7 @@ export default function ManufacturingJobs() {
             now={now}
             multiChar={multiChar}
             showRuns={tab === 'MFG'}
+            showSell={tab === 'MFG'}
           />
         )}
       </div>

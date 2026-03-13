@@ -1090,6 +1090,20 @@ def api_industry_jobs():
             except Exception:
                 pass
 
+        # Fetch Jita sell prices for all product types (best sell order = estimated proceeds)
+        mfg_activity_ids = {1, 11}  # Manufacturing, Reaction
+        mfg_product_ids = list({
+            j.get("product_type_id") for j in all_jobs
+            if j.get("activity_id") in mfg_activity_ids and j.get("product_type_id")
+        })
+        market_prices = {}
+        if mfg_product_ids:
+            try:
+                from pricer import get_prices_bulk
+                market_prices = get_prices_bulk(mfg_product_ids)
+            except Exception:
+                pass
+
         now_ts = int(time.time())
         result = []
         for j in all_jobs:
@@ -1108,13 +1122,16 @@ def api_industry_jobs():
             total_secs = max(1, end_ts - start_ts)
             secs_left = max(0, end_ts - now_ts)
             pid = j.get("product_type_id")
+            runs = j.get("runs", 1)
+            p = market_prices.get(pid) if pid else None
+            sell_price = p["sell"] if p and p.get("sell") else None
             result.append({
                 "job_id":            j.get("job_id"),
                 "activity":          ACTIVITY_NAMES.get(j.get("activity_id", 0), f"Activity {j.get('activity_id')}"),
                 "activity_id":       j.get("activity_id", 0),
                 "product_type_id":   pid,
                 "product_name":      names.get(pid, f"Type {pid}"),
-                "runs":              j.get("runs", 1),
+                "runs":              runs,
                 "start_date":        start_str,
                 "end_date":          end_str,
                 "end_ts":            end_ts,
@@ -1124,6 +1141,8 @@ def api_industry_jobs():
                 "installer_id":      j.get("installer_id"),
                 "character_id":      j["_character_id"],
                 "character_name":    j["_character_name"],
+                "sell_price":        sell_price,
+                "sell_total":        round(sell_price * runs, 2) if sell_price is not None else None,
             })
 
         # Sort by soonest completing first
