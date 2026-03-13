@@ -128,7 +128,7 @@ export default function ShoppingList({ checkedItems, overrides }) {
               )}
             </>
           )}
-          <span style={{ fontSize: 11, color: 'var(--dim)' }}>{collapsed ? '▲' : '▼'}</span>
+          <span style={{ fontSize: 11, color: 'var(--dim)' }}>{collapsed ? '▼' : '▲'}</span>
         </div>
       </div>
 

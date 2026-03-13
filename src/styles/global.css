@@ -299,8 +299,12 @@ tr.row-selected td { color: #000; }
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: max-height 0.2s ease, min-height 0.2s ease;
 }
-.calc-bottom-collapsed { max-height: 38px; }
+.calc-bottom-collapsed {
+  max-height: 36px;
+  min-height: 0;
+}
 
 /* ── Shopping list ───────────────────────────────────────────────── */
 .shopping-hdr {
@@ -313,6 +317,9 @@ tr.row-selected td { color: #000; }
   flex-shrink: 0;
   cursor: pointer;
   user-select: none;
+}
+.calc-bottom-collapsed .shopping-hdr {
+  border-bottom: none;
 }
 .shopping-body {
   display: flex;
