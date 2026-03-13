@@ -73,7 +73,7 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
           return (
             <tr key={j.job_id} style={{ borderBottom: '1px solid #0d0d0d' }}>
               <td style={{ padding: '8px 12px', textAlign: 'left' }}>
-                <div style={{ fontFamily: 'var(--head)', fontSize: 13, letterSpacing: 1, color: isReady ? '#00cc66' : 'var(--text)' }}>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: isReady ? '#00cc66' : 'var(--text)' }}>
                   {j.product_name}
                 </div>
                 <ProgressBar secs={secsLeft} totalSecs={j.total_secs || 86400} />
@@ -148,11 +148,10 @@ export default function ManufacturingJobs() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* Header: chip switcher + status right */}
-      <div className="panel-hdr" style={{ gap: 8, paddingRight: 16 }}>
-        <span style={{ fontFamily: 'var(--head)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', flexShrink: 0 }}>◈ INDUSTRY</span>
+      {/* Header: chips on the left, status counter on the right */}
+      <div className="panel-hdr">
         <div style={{ display: 'flex', gap: 4 }}>
-          {[['MFG', `MFG (${mfgJobs.length})`], ['RESEARCH', `RESEARCH (${researchJobs.length})`]].map(([key, label]) => (
+          {[['MFG', `MANUFACTURING (${mfgJobs.length})`], ['RESEARCH', `RESEARCH (${researchJobs.length})`]].map(([key, label]) => (
             <button
               key={key}
               onClick={() => setTab(key)}
@@ -163,7 +162,7 @@ export default function ManufacturingJobs() {
           ))}
         </div>
         <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
-          {loading ? 'LOADING…' : `${activeCount} ACTIVE · ${completeCount} READY`}
+          {loading ? '' : `${activeCount} ACTIVE · ${completeCount} READY`}
         </span>
       </div>
 
@@ -175,15 +174,10 @@ export default function ManufacturingJobs() {
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {loading && !data ? (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <tbody>
-              {Array.from({ length: 5 }).map((_, i) => (
-                <tr key={i} className="skeleton-row">
-                  {[1,2,3,4].map(j => <td key={j}>&nbsp;</td>)}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="loading-state">
+            <span className="loading-label">FETCHING JOBS</span>
+            <span className="loading-sub">ESI · INDUSTRY</span>
+          </div>
         ) : (
           <JobTable
             jobs={visibleJobs}

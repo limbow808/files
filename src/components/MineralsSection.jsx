@@ -67,8 +67,13 @@ export default function MineralsSection() {
       {tab === 'minerals' ? (
         /* Compact two-column list: name on left, sell price right, buy dim below */
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-          {(loading && !data ? MINERAL_ORDER : MINERAL_ORDER).map((name, i) => {
-            const m = data ? minerals[name] : null;
+          {loading && !data ? (
+            <div className="loading-state">
+              <span className="loading-label">FETCHING PRICES</span>
+              <span className="loading-sub">ESI · MINERALS</span>
+            </div>
+          ) : MINERAL_ORDER.map((name, i) => {
+            const m = minerals[name];
             return (
               <div key={name} style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -76,25 +81,16 @@ export default function MineralsSection() {
                 borderBottom: '1px solid #0d0d0d',
                 background: i % 2 === 0 ? '#030303' : '#050505',
               }}>
-                <span style={{ fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 1, color: 'var(--text)' }}>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 1, color: 'var(--text)' }}>
                   {name}
                 </span>
                 <div style={{ textAlign: 'right' }}>
-                  {loading && !data ? (
-                    <>
-                      <div><span className="skeleton-line" style={{ width: 52 }} /></div>
-                      <div style={{ marginTop: 3 }}><span className="skeleton-line" style={{ width: 38 }} /></div>
-                    </>
-                  ) : (
-                    <>
-                      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)' }}>
-                        {m ? fmtISK(m.sell) : '—'}
-                      </div>
-                      <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
-                        ▼ {m ? fmtISK(m.buy) : '—'}
-                      </div>
-                    </>
-                  )}
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)' }}>
+                    {m ? fmtISK(m.sell) : '—'}
+                  </div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
+                    ▼ {m ? fmtISK(m.buy) : '—'}
+                  </div>
                 </div>
               </div>
             );
@@ -102,6 +98,12 @@ export default function MineralsSection() {
         </div>
       ) : (
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          {loading && !data ? (
+            <div className="loading-state">
+              <span className="loading-label">FETCHING PRICES</span>
+              <span className="loading-sub">ESI · BASE ORES</span>
+            </div>
+          ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr>
@@ -138,41 +140,35 @@ export default function MineralsSection() {
               </tr>
             </thead>
             <tbody>
-              {loading && !data
-                ? ORE_ORDER.map((name, i) => (
-                    <tr key={name} className="skeleton-row" style={{ background: i % 2 === 0 ? '#030303' : '#050505' }}>
-                      {[1,2,3,4,5].map(j => <td key={j}>&nbsp;</td>)}
-                    </tr>
-                  ))
-                : sortedOres.map((o, i) => {
-                  const trend = o.trend || 'flat';
-                  return (
-                    <tr key={o.name} style={{
-                      borderBottom: '1px solid #0d0d0d',
-                      background: i % 2 === 0 ? '#030303' : '#050505',
-                    }}>
-                      <td style={{ padding: '4px 8px', fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 1 }}>
-                        {o.name}
-                      </td>
-                      <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10 }}>
-                        {o.sell != null ? fmtISK(o.sell) : '—'}
-                      </td>
-                      <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--accent)' }}>
-                        {o.isk_per_m3 != null ? fmtISK(o.isk_per_m3) : '—'}
-                      </td>
-                      <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
-                        {o.buy_per_m3 != null ? fmtISK(o.buy_per_m3) : '—'}
-                      </td>
-                      <td style={{ padding: '4px 6px', textAlign: 'center', fontSize: 11, color: TREND_COLOR[trend] }}
-                          title={o.trend_pct != null ? `${o.trend_pct > 0 ? '+' : ''}${o.trend_pct}%` : ''}>
-                        {TREND_ICON[trend]}
-                      </td>
-                    </tr>
-                  );
-                })
-              }
+              {sortedOres.map((o, i) => {
+                const trend = o.trend || 'flat';
+                return (
+                  <tr key={o.name} style={{
+                    borderBottom: '1px solid #0d0d0d',
+                    background: i % 2 === 0 ? '#030303' : '#050505',
+                  }}>
+                    <td style={{ padding: '4px 8px', fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 1 }}>
+                      {o.name}
+                    </td>
+                    <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10 }}>
+                      {o.sell != null ? fmtISK(o.sell) : '—'}
+                    </td>
+                    <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--accent)' }}>
+                      {o.isk_per_m3 != null ? fmtISK(o.isk_per_m3) : '—'}
+                    </td>
+                    <td style={{ padding: '4px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
+                      {o.buy_per_m3 != null ? fmtISK(o.buy_per_m3) : '—'}
+                    </td>
+                    <td style={{ padding: '4px 6px', textAlign: 'center', fontSize: 11, color: TREND_COLOR[trend] }}
+                        title={o.trend_pct != null ? `${o.trend_pct > 0 ? '+' : ''}${o.trend_pct}%` : ''}>
+                      {TREND_ICON[trend]}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
+          )}
         </div>
       )}
     </div>

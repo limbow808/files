@@ -34,7 +34,7 @@ function OrderTable({ orders, isBuy, multiChar }) {
           return (
             <tr key={o.order_id} style={{ borderBottom: '1px solid #0d0d0d' }}>
               <td style={{ padding: '7px 12px', textAlign: 'left' }}>
-                <div style={{ fontFamily: 'var(--head)', fontSize: 13, letterSpacing: 1 }}>{o.type_name}</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1 }}>{o.type_name}</div>
                 <div style={{ height: 2, background: '#111', marginTop: 3, width: 80 }}>
                   <div style={{ height: '100%', width: `${filled}%`, background: isBuy ? '#4da6ff' : 'var(--accent)' }} />
                 </div>
@@ -115,15 +115,10 @@ export default function OrdersSection() {
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {loading && !data ? (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <tbody>
-              {Array.from({ length: 6 }).map((_, i) => (
-                <tr key={i} className="skeleton-row">
-                  {[1,2,3,4,5].map(j => <td key={j}>&nbsp;</td>)}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="loading-state">
+            <span className="loading-label">FETCHING ORDERS</span>
+            <span className="loading-sub">ESI · MARKET</span>
+          </div>
         ) : (
           <OrderTable orders={tab === 'sell' ? sell : buy} isBuy={tab === 'buy'} multiChar={multiChar} />
         )}

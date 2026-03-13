@@ -8,7 +8,6 @@
   --border:  #333333;
   --dim:     #555544;
   --mono:    'Share Tech Mono', monospace;
-  --head:    'Barlow Condensed', sans-serif;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -45,7 +44,7 @@ html, body, #root {
   z-index: 100;
   min-height: 32px;
 }
-.logo-text  { font-family: var(--head); font-size: 14px; font-weight: 700; color: var(--text); letter-spacing: 3px; }
+.logo-text  { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); letter-spacing: 3px; }
 .header-logo-center {
   position: absolute;
   left: 50%;
@@ -65,12 +64,12 @@ html, body, #root {
   border-bottom: 1px solid var(--border);
   background: #030303;
 }
-.panel-title { font-family: var(--head); font-size: 11px; letter-spacing: 3px; color: var(--text); text-transform: uppercase; opacity: 0.6; }
+.panel-title { font-family: var(--mono); font-size: 11px; letter-spacing: 3px; color: var(--text); text-transform: uppercase; opacity: 0.6; }
 
 /* ── Table ──────────────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; }
 th {
-  font-family: var(--head);
+  font-family: var(--mono);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 2px;
@@ -111,7 +110,7 @@ tr.row-selected td { color: #000; }
   margin: 0 16px 16px;
   padding: 20px 24px;
 }
-.detail-title { font-family: var(--head); font-size: 16px; letter-spacing: 3px; color: var(--text); margin-bottom: 16px; }
+.detail-title { font-family: var(--mono); font-size: 16px; letter-spacing: 3px; color: var(--text); margin-bottom: 16px; }
 .detail-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; }
 .cost-row     { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #111; }
 .cost-label   { color: var(--dim); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
@@ -121,15 +120,56 @@ tr.row-selected td { color: #000; }
 .cost-total .cost-val   { color: var(--text); font-size: 15px; }
 
 /* Missing materials */
-.missing-title { font-family: var(--head); font-size: 13px; letter-spacing: 2px; color: var(--text); margin: 20px 0 10px; opacity: 0.7; }
+.missing-title { font-family: var(--mono); font-size: 13px; letter-spacing: 2px; color: var(--text); margin: 20px 0 10px; opacity: 0.7; }
 .missing-table th { color: var(--dim); font-size: 10px; }
 .missing-table td { color: var(--text); }
 
-/* ── Skeleton pulse ──────────────────────────────────────────────── */
+/* ── Loading state ───────────────────────────────────────────────── */
+@keyframes ellipsis {
+  0%   { content: ''; }
+  25%  { content: '.'; }
+  50%  { content: '..'; }
+  75%  { content: '...'; }
+  100% { content: ''; }
+}
+@keyframes fade-cycle { 0%,100% { opacity: 0.35 } 50% { opacity: 0.9 } }
+
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 6px;
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  user-select: none;
+}
+.loading-state .loading-label {
+  animation: fade-cycle 1.6s ease-in-out infinite;
+}
+.loading-state .loading-label::after {
+  content: '';
+  display: inline-block;
+  animation: ellipsis 1.6s steps(1) infinite;
+}
+.loading-state .loading-sub {
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: var(--dim);
+  opacity: 0.55;
+  animation: fade-cycle 1.6s ease-in-out infinite;
+  animation-delay: 0.4s;
+}
+
+/* ── Skeleton pulse (kept for CalculatorPage) ────────────────────── */
 @keyframes pulse { 0%,100% { opacity: 0.3 } 50% { opacity: 0.7 } }
 .skeleton-row td { animation: pulse 1.5s ease-in-out infinite; background: #111; height: 36px; }
 
-/* Inline shimmer blocks used in list-style panels (Minerals, Orders) */
+/* Inline shimmer blocks used in Minerals panel */
 .skeleton-line {
   display: inline-block;
   height: 10px;
@@ -150,11 +190,11 @@ tr.row-selected td { color: #000; }
   font-size: 12px;
   letter-spacing: 1px;
 }
-.error-banner span { color: var(--text); font-family: var(--head); font-size: 14px; font-weight: 700; letter-spacing: 2px; }
+.error-banner span { color: var(--text); font-family: var(--mono); font-size: 14px; font-weight: 700; letter-spacing: 2px; }
 
 /* ── Buttons ─────────────────────────────────────────────────────── */
 .btn {
-  font-family: var(--head);
+  font-family: var(--mono);
   font-size: 12px;
   letter-spacing: 2px;
   font-weight: 600;
@@ -189,7 +229,7 @@ tr.row-selected td { color: #000; }
   background: transparent;
 }
 .nav-tab {
-  font-family: var(--head);
+  font-family: var(--mono);
   font-size: 11px;
   letter-spacing: 2px;
   text-transform: uppercase;
@@ -208,7 +248,7 @@ tr.row-selected td { color: #000; }
 
 /* ── Panel tab buttons (Sell/Buy, Minerals/Ores, etc.) ───────────── */
 .tab-btn {
-  font-family: var(--head);
+  font-family: var(--mono);
   font-size: 11px;
   letter-spacing: 2px;
   text-transform: uppercase;
@@ -297,7 +337,7 @@ tr.row-selected td { color: #000; }
   cursor: default;
 }
 .shopping-item-row:hover { background: rgba(255,71,0,0.04); }
-.shopping-item-name { flex: 1; color: var(--text); font-family: var(--head); letter-spacing: 1px; font-size: 12px; }
+.shopping-item-name { flex: 1; color: var(--text); font-family: var(--mono); letter-spacing: 1px; font-size: 12px; }
 .shopping-item-runs { color: var(--dim); font-size: 10px; white-space: nowrap; }
 .shopping-mats {
   flex: 1;
@@ -365,7 +405,7 @@ tr.row-selected td { color: #000; }
 }
 .filter-group:last-child { border-right: none; margin-right: 0; padding-right: 0; }
 .filter-label {
-  font-family: var(--head);
+  font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 2px;
   color: var(--dim);
@@ -490,7 +530,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   gap: 24px;
 }
 .calc-detail-section-title {
-  font-family: var(--head);
+  font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 2px;
   color: var(--dim);
@@ -563,7 +603,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   transition: background 0.1s;
 }
 .esi-bp-card:hover { background: rgba(255,71,0,0.05); }
-.esi-bp-name { font-family: var(--head); font-size: 13px; letter-spacing: 1px; color: var(--text); }
+.esi-bp-name { font-family: var(--mono); font-size: 13px; letter-spacing: 1px; color: var(--text); }
 .esi-bp-meta { font-size: 10px; color: var(--dim); letter-spacing: 1px; margin-top: 3px; }
 .esi-bp-type-bpo { color: #00cc66; }
 .esi-bp-type-bpc { color: var(--accent); }

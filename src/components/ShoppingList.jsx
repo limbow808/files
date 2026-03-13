@@ -100,7 +100,7 @@ export default function ShoppingList({ checkedItems, overrides }) {
       {/* Header / toggle */}
       <div className="shopping-hdr" onClick={() => setCollapsed(v => !v)}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 3, color: 'var(--text)' }}>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 3, color: 'var(--text)' }}>
             ◈ SHOPPING LIST
           </span>
           {checkedItems.length > 0 ? (
@@ -176,7 +176,7 @@ export default function ShoppingList({ checkedItems, overrides }) {
                     return (
                       <tr key={i} style={{ opacity: m.missing_bp ? 0.7 : 1 }}>
                         <td style={{
-                          textAlign: 'left', fontFamily: 'var(--head)', fontSize: 12, letterSpacing: 1,
+                          textAlign: 'left', fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 1,
                           color: m.missing_bp ? 'var(--accent)' : 'var(--text)',
                         }}>
                           {m.missing_bp && <span style={{ marginRight: 6, color: 'var(--accent)' }}>⚠</span>}

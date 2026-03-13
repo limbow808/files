@@ -40,8 +40,8 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
 
       {/* Wallet balance */}
       <div style={{ marginBottom: 10, flexShrink: 0 }}>
-        <div style={{ fontFamily: 'var(--head)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>WALLET</div>
-        <div style={{ fontFamily: 'var(--head)', fontSize: 26, fontWeight: 700, color: 'var(--accent)', lineHeight: 1 }}>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>WALLET</div>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 26, fontWeight: 700, color: 'var(--accent)', lineHeight: 1 }}>
           {loading && !plexData ? '—' : `${fmtISK(balance)} ISK`}
         </div>
       </div>
@@ -70,7 +70,7 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, background: 'var(--border)', flexShrink: 0 }}>
         {stats.map(([label, val]) => (
           <div key={label} style={{ background: '#050505', padding: '8px 10px' }}>
-            <div style={{ fontFamily: 'var(--head)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>{label}</div>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>{label}</div>
             <div style={{ fontSize: 12, color: 'var(--text)' }}>{loading && !plexData ? '—' : val}</div>
           </div>
         ))}

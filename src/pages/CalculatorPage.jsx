@@ -311,7 +311,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                           onClick={e => toggleCheck(r.output_id, e)}
                         />
                       </td>
-                      <td style={{ fontFamily: 'var(--head)', fontSize: 13, letterSpacing: 1, textAlign: 'left' }}>{r.name}</td>
+                      <td style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, textAlign: 'left' }}>{r.name}</td>
                       <td style={{ color: 'var(--dim)' }}>{r.tech || '—'}</td>
                       <td style={{ color: 'var(--dim)', fontSize: 10 }}>{r.category || '—'}</td>
                       <td>{r.me_level ?? '—'}</td>

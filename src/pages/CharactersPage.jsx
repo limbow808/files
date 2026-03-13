@@ -10,7 +10,7 @@ function PortraitPlaceholder({ name }) {
       width: 64, height: 64, background: '#0d0d0d',
       border: '1px solid var(--border)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      fontFamily: 'var(--head)', fontSize: 18, letterSpacing: 2, color: 'var(--dim)',
+      fontFamily: 'var(--mono)', fontSize: 18, letterSpacing: 2, color: 'var(--dim)',
       flexShrink: 0,
     }}>{initials}</div>
   );
@@ -47,7 +47,7 @@ function CharacterCard({ char, charStats, onRemove, color }) {
 
       {/* Info */}
       <div style={{ flex: 1, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={{ fontFamily: 'var(--head)', fontSize: 14, letterSpacing: 2, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 14, letterSpacing: 2, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0, display: 'inline-block' }} />
           {char.character_name}
         </div>
@@ -176,7 +176,7 @@ export default function CharactersPage() {
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
-          <div style={{ fontFamily: 'var(--head)', fontSize: 18, letterSpacing: 4, color: 'var(--text)' }}>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 18, letterSpacing: 4, color: 'var(--text)' }}>
             CHARACTERS
           </div>
           <div style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 2, marginTop: 2 }}>
@@ -218,7 +218,7 @@ export default function CharactersPage() {
               borderRight: i < 2 ? '1px solid var(--border)' : 'none',
             }}>
               <div style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 2 }}>{label}</div>
-              <div style={{ fontSize: 14, fontFamily: 'var(--head)', color: 'var(--text)', marginTop: 4, letterSpacing: 1 }}>
+              <div style={{ fontSize: 14, fontFamily: 'var(--mono)', color: 'var(--text)', marginTop: 4, letterSpacing: 1 }}>
                 {val}
               </div>
             </div>

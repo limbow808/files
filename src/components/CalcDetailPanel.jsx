@@ -40,16 +40,16 @@ export default function CalcDetailPanel({ item, charSkills }) {
 
           {/* Header strip */}
           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
-            <div style={{ fontFamily: 'var(--head)', fontSize: 15, letterSpacing: 2, color: 'var(--text)' }}>
+            <div style={{ fontFamily: 'var(--mono)', fontSize: 15, letterSpacing: 2, color: 'var(--text)' }}>
               {item.name}
             </div>
             <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
-              <span style={{ fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)' }}>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)' }}>
                 {item.tech && `TECH ${item.tech}`}
                 {item.category && ` · ${item.category.toUpperCase()}`}
                 {item.size && item.size !== 'U' ? ` · ${item.size}` : ''}
               </span>
-              <span style={{ fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)' }}>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)' }}>
                 ME{item.me_level} · TE{item.te_level} · {fmtDuration(item.duration)}
               </span>
               <span style={{ fontFamily: 'var(--mono)', fontSize: 13, color: tierColor, fontWeight: 700 }}>
@@ -137,11 +137,11 @@ export default function CalcDetailPanel({ item, charSkills }) {
                 </div>
               ))}
               <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <span style={{ fontFamily: 'var(--head)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)', textTransform: 'uppercase' }}>Revenue</span>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)', textTransform: 'uppercase' }}>Revenue</span>
                 <span style={{ color: 'var(--text)', fontSize: 13 }}>{fmtISK(item.gross_revenue)} ISK</span>
               </div>
               <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <span style={{ fontFamily: 'var(--head)', fontSize: 13, letterSpacing: 2, color: 'var(--text)', textTransform: 'uppercase' }}>Net Profit</span>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 2, color: 'var(--text)', textTransform: 'uppercase' }}>Net Profit</span>
                 <span style={{ color: tierColor, fontSize: 16, fontWeight: 700 }}>
                   {fmtISK(item.net_profit)} ISK
                   <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 6 }}>({item.margin_pct?.toFixed(1)}%)</span>
