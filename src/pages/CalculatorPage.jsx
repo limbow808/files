@@ -311,7 +311,18 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                           onClick={e => toggleCheck(r.output_id, e)}
                         />
                       </td>
-                      <td style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, textAlign: 'left' }} title={r.name}>{r.name}</td>
+                      <td style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 1, textAlign: 'left' }} title={r.name}>
+                        <div className="item-cell">
+                          <img
+                            className="item-icon"
+                            src={`https://images.evetech.net/types/${r.output_id}/icon?size=32`}
+                            alt=""
+                            onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'block'; }}
+                          />
+                          <span className="item-icon-placeholder" style={{ display: 'none' }} />
+                          <span className="item-name">{r.name}</span>
+                        </div>
+                      </td>
                       <td style={{ color: 'var(--dim)' }}>{r.tech || '—'}</td>
                       <td style={{ color: 'var(--dim)', fontSize: 10 }}>{r.category || '—'}</td>
                       <td>{r.me_level ?? '—'}</td>
