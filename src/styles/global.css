@@ -480,6 +480,14 @@ select.calc-input { appearance: none; -webkit-appearance: none; cursor: pointer;
 .calc-table th, .calc-table td { text-align: right; }
 .calc-table th:first-child, .calc-table td:first-child { text-align: left; }
 .calc-table th:nth-child(2), .calc-table td:nth-child(2) { text-align: left; }
+/* ITEM column: fixed width so it doesn't crowd out the rest of the columns */
+.calc-table td:nth-child(2) {
+  max-width: 200px;
+  min-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 /* Sticky header — stays pinned while calc-body scrolls */
 .calc-table thead th {
   position: sticky;
