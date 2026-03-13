@@ -115,9 +115,15 @@ export default function OrdersSection() {
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {loading && !data ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
-            LOADING…
-          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <tbody>
+              {Array.from({ length: 6 }).map((_, i) => (
+                <tr key={i} className="skeleton-row">
+                  {[1,2,3,4,5].map(j => <td key={j}>&nbsp;</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         ) : (
           <OrderTable orders={tab === 'sell' ? sell : buy} isBuy={tab === 'buy'} multiChar={multiChar} />
         )}

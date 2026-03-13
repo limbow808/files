@@ -25,9 +25,10 @@ export default function Header({ online, activeTab, onTabChange, onRefresh, refr
           className="btn btn-primary"
           onClick={onRefresh}
           disabled={refreshing}
-          style={{ padding: '0 14px', fontSize: 10, letterSpacing: 2, alignSelf: 'stretch', border: 'none', borderLeft: '1px solid var(--border)' }}
+          title="Re-fetch Jita market prices and refresh all panels"
+          style={{ padding: '0 18px', fontSize: 10, letterSpacing: 2, alignSelf: 'stretch', border: 'none', borderLeft: '1px solid var(--border)' }}
         >
-          {refreshing ? 'SCANNING…' : 'SCAN'}
+          {refreshing ? '⟳ SCANNING…' : '⟳ SCAN'}
         </button>
       </div>
     </div>

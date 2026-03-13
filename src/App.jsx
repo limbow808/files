@@ -16,7 +16,7 @@ export default function App() {
 
   const { loading: scanLoading, error: scanError, refetch } =
     useApi(`${API}/api/scan`,           [refreshKey]);
-  const { data: plexData,     loading: plexLoading } =
+  const { data: plexData, loading: plexLoading, error: plexError } =
     useApi(`${API}/api/plex`,           [refreshKey]);
   const { data: walletRaw } =
     useApi(`${API}/api/wallet/history`, [refreshKey]);
@@ -44,6 +44,7 @@ export default function App() {
             plexData={plexData}
             walletHistory={walletHistory}
             plexLoading={plexLoading}
+            plexError={plexError}
           />
         )}
         {activeTab === 'CALCULATOR' && <CalculatorPage refreshKey={refreshKey} />}

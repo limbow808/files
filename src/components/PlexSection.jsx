@@ -1,7 +1,7 @@
 import { fmtISK } from '../utils/fmt';
 import WalletSparkline from './WalletSparkline';
 
-export default function PlexSection({ plexData, walletHistory, loading }) {
+export default function PlexSection({ plexData, walletHistory, loading, error }) {
   const balance   = plexData?.current_balance  ?? 0;
   const target    = plexData?.monthly_target   ?? 0;
   const daysLeft  = plexData?.days_remaining   ?? 0;
@@ -30,6 +30,13 @@ export default function PlexSection({ plexData, walletHistory, loading }) {
           {daysLeft} DAYS LEFT
         </span>
       </div>
+
+      {/* ESI error banner */}
+      {error && !plexData && (
+        <div style={{ padding: '8px 0 4px', fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
+          ⚠ ESI UNAVAILABLE
+        </div>
+      )}
 
       {/* Wallet balance */}
       <div style={{ marginBottom: 10, flexShrink: 0 }}>

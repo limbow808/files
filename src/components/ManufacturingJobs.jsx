@@ -138,20 +138,14 @@ export default function ManufacturingJobs() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      <div className="panel-hdr">
-        {/* Tab switcher */}
-        <div style={{ display: 'flex', gap: 0 }}>
+      {/* Header: tab-btn switcher (same style as Minerals/Orders) + status right */}
+      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 16 }}>
+        <div style={{ display: 'flex' }}>
           {[['MFG', `⚙ MFG (${mfgJobs.length})`], ['RESEARCH', `🔬 RESEARCH (${researchJobs.length})`]].map(([key, label]) => (
             <button
               key={key}
               onClick={() => setTab(key)}
-              className="chip"
-              style={{
-                marginRight: 4,
-                opacity: tab === key ? 1 : 0.45,
-                borderColor: tab === key ? 'var(--accent)' : 'var(--border)',
-                color: tab === key ? 'var(--accent)' : 'var(--dim)',
-              }}
+              className={`tab-btn${tab === key ? ' active' : ''}`}
             >
               {label}
             </button>
@@ -170,9 +164,15 @@ export default function ManufacturingJobs() {
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {loading && !data ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
-            LOADING…
-          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <tbody>
+              {Array.from({ length: 5 }).map((_, i) => (
+                <tr key={i} className="skeleton-row">
+                  {[1,2,3,4].map(j => <td key={j}>&nbsp;</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         ) : (
           <JobTable
             jobs={visibleJobs}

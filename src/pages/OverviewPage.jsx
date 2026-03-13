@@ -8,7 +8,7 @@ const D = 1; // divider thickness px
 // ── Main page ──────────────────────────────────────────────────────────────────
 // Top row:    ManufacturingJobs (full width)
 // Bottom row: PlexSection (flex 2) | MineralsSection (fixed 240px) | OrdersSection (flex 3)
-export default function OverviewPage({ plexData, walletHistory, plexLoading }) {
+export default function OverviewPage({ plexData, walletHistory, plexLoading, plexError }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
 
@@ -25,7 +25,7 @@ export default function OverviewPage({ plexData, walletHistory, plexLoading }) {
 
         {/* PLEX Tracker — wider so the graph has horizontal room */}
         <div style={{ flex: '0 0 320px', minWidth: 0, overflow: 'hidden' }}>
-          <PlexSection plexData={plexData} walletHistory={walletHistory} loading={plexLoading} />
+          <PlexSection plexData={plexData} walletHistory={walletHistory} loading={plexLoading} error={plexError} />
         </div>
 
         <div style={{ width: D, flexShrink: 0, background: 'var(--border)' }} />

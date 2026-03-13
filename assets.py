@@ -1,5 +1,5 @@
 """
-assets.py - Fetch EVE Character Assets, Wallet, and Jobs
+assets.py - EVE Character Assets, Wallet, and Jobs
 =======================================================
 Uses ESI OAuth2 token to retrieve:
 - Wallet balance
@@ -12,8 +12,23 @@ import auth
 
 ESI_BASE = "https://esi.evetech.net/latest"
 
-# Replace with your character ID after authentication
-CHARACTER_ID = "2123568748"
+
+def _primary_character_id() -> str:
+    """Return the first character ID from characters.json, falling back to the
+    legacy hardcoded ID so CLI tools (main.py, scanner.py) never break."""
+    try:
+        from characters import load_characters
+        chars = load_characters()
+        if chars:
+            return next(iter(chars))
+    except Exception:
+        pass
+    return "2123568748"
+
+
+# Module-level convenience — resolves at import time; use _primary_character_id()
+# when you need the current value after characters may have been added.
+CHARACTER_ID = _primary_character_id()
 
 
 def get_auth_header():

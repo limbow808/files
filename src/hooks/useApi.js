@@ -1,5 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 
+/**
+ * Minimal fetch hook.
+ *
+ * @param {string} url   - The endpoint to fetch.
+ * @param {Array}  deps  - Re-fetch triggers. Pass `[refreshKey]` to re-fetch when
+ *                         refreshKey changes. A new array literal is created each render
+ *                         but useEffect compares element values shallowly, so this only
+ *                         fires when an element actually changes — not on every render.
+ */
 export function useApi(url, deps = []) {
   const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);

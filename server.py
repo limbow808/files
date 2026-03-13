@@ -322,12 +322,44 @@ def api_wallet_history():
         return jsonify({"error": str(e)}), 500
 
 
-_ore_price_prev: dict = {}   # name → sell price from previous fetch (in-memory trend cache)
+# ─── Ore price trend helpers — persisted in market_cache.db market_meta ──────
+import sqlite3 as _sqlite3
+
+def _load_ore_price_prev() -> dict:
+    """Load the previously saved ore sell prices from market_meta (survives restarts)."""
+    try:
+        conn = _sqlite3.connect(os.path.join(_HERE, "market_cache.db"))
+        conn.row_factory = _sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM market_meta WHERE key='ore_price_prev'")
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            import json as _json
+            return _json.loads(row["value"])
+    except Exception:
+        pass
+    return {}
+
+
+def _save_ore_price_prev(prices: dict) -> None:
+    """Persist ore sell prices into market_meta for trend comparison on next fetch."""
+    try:
+        import json as _json
+        conn = _sqlite3.connect(os.path.join(_HERE, "market_cache.db"))
+        conn.execute(
+            "INSERT OR REPLACE INTO market_meta (key, value) VALUES ('ore_price_prev', ?)",
+            (_json.dumps(prices),)
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 
 @app.route("/api/minerals", methods=["GET"])
 def api_minerals():
     """Return current Jita prices for all 8 minerals + common base ores with ISK/m3."""
-    global _ore_price_prev
     # Base ores: type_id → { name, volume_m3 }  (volume per unit from SDE)
     ORES = {
         1230:  {"name": "Veldspar",    "m3": 0.1},
@@ -364,13 +396,14 @@ def api_minerals():
         }
 
     ores_out = {}
+    ore_prev = _load_ore_price_prev()
     for tid, meta in ORES.items():
         entry  = prices.get(tid, {})
         sell   = entry.get("sell", 0)
         buy    = entry.get("buy", 0)
         m3     = meta["m3"]
         name   = meta["name"]
-        prev   = _ore_price_prev.get(name, sell)
+        prev   = ore_prev.get(name, sell)
         diff_pct = ((sell - prev) / prev * 100) if prev else 0
         if diff_pct > 0.5:
             trend = "up"
@@ -389,8 +422,8 @@ def api_minerals():
             "trend_pct":  round(diff_pct, 2),
         }
 
-    # Update previous-price cache for next fetch comparison
-    _ore_price_prev = {name: ores_out[name]["sell"] for name in ores_out}
+    # Persist current prices for next fetch comparison (survives server restarts)
+    _save_ore_price_prev({name: ores_out[name]["sell"] for name in ores_out})
 
     return jsonify({"minerals": minerals_out, "ores": ores_out})
 
