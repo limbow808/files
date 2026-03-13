@@ -39,16 +39,22 @@ export default function App() {
     <div className="app-shell">
       <Header online={online} activeTab={activeTab} onTabChange={setActiveTab} onRefresh={handleRefresh} refreshing={refreshing || scanLoading} />
       <div className="app-content">
-        {activeTab === 'CREST' && (
+        {/* All pages stay mounted so their data/state survives tab switches.
+            Inactive pages are hidden with display:none — zero re-fetches. */}
+        <div style={{ display: activeTab === 'CREST' ? 'contents' : 'none' }}>
           <OverviewPage
             plexData={plexData}
             walletHistory={walletHistory}
             plexLoading={plexLoading}
             plexError={plexError}
           />
-        )}
-        {activeTab === 'CALCULATOR' && <CalculatorPage refreshKey={refreshKey} />}
-        {activeTab === 'CHARACTERS' && <CharactersPage />}
+        </div>
+        <div style={{ display: activeTab === 'CALCULATOR' ? 'contents' : 'none' }}>
+          <CalculatorPage refreshKey={refreshKey} />
+        </div>
+        <div style={{ display: activeTab === 'CHARACTERS' ? 'contents' : 'none' }}>
+          <CharactersPage />
+        </div>
       </div>
     </div>
   );
