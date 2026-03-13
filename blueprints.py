@@ -27,6 +27,31 @@ MINERALS = {
 CREST_DB = os.path.join(os.path.dirname(__file__), "crest.db")
 
 
+# ─── Categories excluded from profit calculations ─────────────────────────────
+# These categories contain SDE entries that technically have blueprints but
+# are NOT player-obtainable BPOs (legacy POS structures, event/gift ships, etc.)
+EXCLUDED_CATEGORIES = {
+    "Starbase",             # Legacy POS Control Towers — removed from EVE years ago
+    "Special Edition Assets",  # Gift/event ships (Praxis, Gnosis, etc.) — not craftable
+    "Asteroid",             # Ore compression blueprints
+    "Orbitals",             # PI-only planetary structures
+}
+
+# ─── Item groups excluded from profit calculations ────────────────────────────
+# More granular than category — groups within otherwise valid categories that
+# represent faction/pirate items only available as loot drops (not BPO/BPC).
+EXCLUDED_ITEM_GROUPS = {
+    "Control Tower",              # Legacy POS towers
+    "Control Tower Medium",
+    "Control Tower Small",
+    "POS Module",
+    "Sovereignty Blockade Unit",
+    "Infrastructure Hub",
+    "Station Improvement Platform",
+    "Station Modification Platform",
+}
+
+
 def load_blueprints(
     category:   "str | list | None" = None,
     tech_level: "int | list | None" = None,
@@ -80,6 +105,14 @@ def load_blueprints(
     _add_filter("b.category",   category)
     _add_filter("b.tech_level", tech_level)
     _add_filter("b.size_class", size_class)
+
+    # Always exclude known non-craftable categories and item groups
+    excl_cats = list(EXCLUDED_CATEGORIES)
+    excl_groups = list(EXCLUDED_ITEM_GROUPS)
+    conditions.append(f"b.category NOT IN ({','.join('?' * len(excl_cats))})")
+    params.extend(excl_cats)
+    conditions.append(f"b.item_group NOT IN ({','.join('?' * len(excl_groups))})")
+    params.extend(excl_groups)
 
     where_sql = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     limit_sql = f"LIMIT {int(limit)}" if limit else ""

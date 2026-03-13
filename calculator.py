@@ -37,6 +37,17 @@ CONFIG = {
     # E-UNI structures may offer 1% ME bonus = 0.01
     "structure_me_bonus": 0.01,    # UPDATE based on E-UNI structure
     "job_cost_structure_discount": 0.04,   # E-UNI Engingeering Complex
+
+    # ── Sanity filter thresholds ─────────────────────────────────────────────
+    # Items where total raw material cost is below this are skipped.
+    # Catches gift ships / LP-store items whose SDE blueprint has trivial mats.
+    "min_material_cost":   10_000,   # ISK
+
+    # Items where (sell revenue / material cost) exceeds this are skipped.
+    # Real manufacturing has tight margins; faction/officer items show up here
+    # because their SDE mats are wrong / they're not player-craftable BPOs.
+    # 5.0 = materials must be ≥20% of sale price. Increase cautiously.
+    "max_rev_mat_ratio":   5.0,
 }
 
 
@@ -68,6 +79,10 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
     me_level   = blueprint["me_level"]
     te_level   = blueprint.get("te_level", 0)
     base_time  = blueprint.get("time_seconds", 0)
+
+    # Skip blueprints with no materials — not real player-obtainable BPOs
+    if not blueprint.get("materials"):
+        return None
 
     # Check we have the output price
     if output_id not in prices:
@@ -105,6 +120,19 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
             "unit_price": unit_price,
             "line_cost":  line_cost
         })
+
+    # ── Sanity checks — filter out SDE blueprints that aren't real player BPOs ─
+    # 1. Material cost must be meaningful (gift ships / LP items have ~0 material cost)
+    if material_cost < cfg.get("min_material_cost", 10_000):
+        return None
+
+    # 2. Revenue-to-material-cost ratio must be reasonable.
+    #    Real manufacturing items have margins driven by labour/tax/SCI, not 10-1000x free profit.
+    #    Faction/officer items technically have blueprints in SDE but are loot drops, not crafted.
+    #    Threshold of 5x: materials must cover at least ~20% of the sale price.
+    rev_mat_ratio = gross_revenue / material_cost if material_cost > 0 else 9999
+    if rev_mat_ratio > cfg.get("max_rev_mat_ratio", 5.0):
+        return None
 
     # ── Job installation cost (System Cost Index) ─────────────────────────────
     # SCI is applied to the estimated job cost (sum of material values at sell price)
