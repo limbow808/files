@@ -37,6 +37,51 @@ function ProgressBar({ secs, totalSecs }) {
   );
 }
 
+const PROFIT_POS  = '#4cff91';
+const PROFIT_NEG  = '#ff3b3b';
+const PROFIT_NONE = '#4a4a40';
+
+function profitColor(profit) {
+  if (profit == null) return PROFIT_NONE;
+  return profit >= 0 ? PROFIT_POS : PROFIT_NEG;
+}
+
+function SummaryBar({ jobs }) {
+  const jobCount   = jobs.length;
+  const totalRuns  = jobs.reduce((s, j) => s + (j.runs || 0), 0);
+  const revenue    = jobs.reduce((s, j) => s + (j.sell_total  ?? 0), 0);
+  const profitSum  = jobs.every(j => j.profit != null)
+    ? jobs.reduce((s, j) => s + (j.profit ?? 0), 0)
+    : null;
+  const jobsWithMargin = jobs.filter(j => j.margin_pct != null);
+  const avgMargin  = jobsWithMargin.length
+    ? jobsWithMargin.reduce((s, j) => s + j.margin_pct, 0) / jobsWithMargin.length
+    : null;
+
+  const stat = (label, value, color = 'var(--text)') => (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, minWidth: 80 }}>
+      <span style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2 }}>{label}</span>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color, letterSpacing: 1 }}>{value}</span>
+    </div>
+  );
+
+  return (
+    <div style={{
+      display: 'flex', justifyContent: 'space-around', alignItems: 'center',
+      padding: '7px 12px',
+      borderTop: '1px solid var(--border)',
+      background: '#0c0c0a',
+      flexShrink: 0,
+    }}>
+      {stat('JOBS',        jobCount)}
+      {stat('TOTAL RUNS',  totalRuns)}
+      {stat('EST. REVENUE', revenue  > 0 ? fmtISK(revenue)  : '—', 'var(--accent)')}
+      {stat('EST. PROFIT',  profitSum != null ? fmtISK(profitSum) : '—', profitColor(profitSum))}
+      {stat('AVG MARGIN',   avgMargin != null ? `${avgMargin.toFixed(1)}%` : '—', profitColor(avgMargin))}
+    </div>
+  );
+}
+
 function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
   if (jobs.length === 0) {
     return (
@@ -56,6 +101,9 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
           {showSell && (
             <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>EST. SELL</th>
           )}
+          {showSell && (
+            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>PROFIT</th>
+          )}
           <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>TYPE</th>
           {multiChar && (
             <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>CHAR</th>
@@ -70,6 +118,7 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
           const urgent   = secsLeft > 0 && secsLeft < 3600;
           const aColor   = ACTIVITY_COLORS[j.activity] || 'var(--text)';
           const cColor   = j.character_id ? charColor(j.character_id) : 'var(--dim)';
+          const pColor   = profitColor(j.profit);
           return (
             <tr key={j.job_id} style={{ borderBottom: '1px solid #0d0d0d' }}>
               <td style={{ padding: '8px 12px', textAlign: 'left' }}>
@@ -85,6 +134,20 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
                 <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11,
                              color: j.sell_total != null ? 'var(--accent)' : 'var(--dim)' }}>
                   {j.sell_total != null ? fmtISK(j.sell_total) : '—'}
+                </td>
+              )}
+              {showSell && (
+                <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'var(--mono)' }}>
+                  {j.profit != null ? (
+                    <>
+                      <div style={{ fontSize: 11, color: pColor }}>{fmtISK(j.profit)}</div>
+                      <div style={{ fontSize: 9, color: pColor, opacity: 0.65, marginTop: 1 }}>
+                        {j.margin_pct != null ? `${j.margin_pct.toFixed(1)}%` : ''}
+                      </div>
+                    </>
+                  ) : (
+                    <span style={{ color: PROFIT_NONE }}>—</span>
+                  )}
                 </td>
               )}
               <td style={{ padding: '8px 10px', textAlign: 'right' }}>
@@ -188,6 +251,10 @@ export default function ManufacturingJobs() {
           />
         )}
       </div>
+
+      {tab === 'MFG' && !loading && visibleJobs.length > 0 && (
+        <SummaryBar jobs={visibleJobs} />
+      )}
     </div>
   );
 }

@@ -1054,6 +1054,20 @@ def api_assets():
         return jsonify({"error": str(e), "assets": {}, "names": {}}), 200
 
 
+def _build_profit(pid: int, runs: int, sell_price, mat_cost_per_unit: dict) -> dict:
+    """Compute material_cost, profit, margin_pct for one job."""
+    cpu = mat_cost_per_unit.get(pid)
+    mat_cost = round(cpu * runs, 2) if cpu is not None else None
+    sell_total = round(sell_price * runs, 2) if sell_price is not None else None
+    if mat_cost is not None and sell_total is not None:
+        profit = round(sell_total - mat_cost, 2)
+        margin_pct = round(profit / sell_total * 100, 1) if sell_total > 0 else None
+    else:
+        profit = None
+        margin_pct = None
+    return {"material_cost": mat_cost, "profit": profit, "margin_pct": margin_pct}
+
+
 # ── Industry Jobs ──────────────────────────────────────────────────────────────
 @app.route("/api/industry/jobs", methods=["GET"])
 def api_industry_jobs():
@@ -1135,6 +1149,78 @@ def api_industry_jobs():
             except Exception:
                 pass
 
+        # Look up material costs for MFG products from crest.db
+        # material_cost_per_unit[output_id] = ISK cost for 1 run at ME0 (approximate)
+        material_cost_per_unit: dict[int, float] = {}
+        if mfg_product_ids:
+            try:
+                import sqlite3 as _sqlite3
+                _cdb = _sqlite3.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+                _cdb.row_factory = _sqlite3.Row
+                for pid in mfg_product_ids:
+                    bp_row = _cdb.execute(
+                        "SELECT blueprint_id FROM blueprints WHERE output_id = ? LIMIT 1", (pid,)
+                    ).fetchone()
+                    if not bp_row:
+                        continue
+                    mats = _cdb.execute(
+                        "SELECT material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id = ?",
+                        (bp_row["blueprint_id"],)
+                    ).fetchall()
+                    cost = 0.0
+                    for mat in mats:
+                        mp = market_prices.get(mat["material_type_id"])
+                        if mp and mp.get("sell"):
+                            cost += mp["sell"] * mat["base_quantity"]
+                        else:
+                            cost = None
+                            break
+                    if cost is not None:
+                        material_cost_per_unit[pid] = cost
+                # Also fetch material prices for any mat type_ids not in market_prices
+                # (handles components that weren't in the initial price fetch)
+                missing_mat_ids = set()
+                for pid in mfg_product_ids:
+                    bp_row = _cdb.execute(
+                        "SELECT blueprint_id FROM blueprints WHERE output_id = ? LIMIT 1", (pid,)
+                    ).fetchone()
+                    if bp_row:
+                        for mat in _cdb.execute(
+                            "SELECT material_type_id FROM blueprint_materials WHERE blueprint_id = ?",
+                            (bp_row["blueprint_id"],)
+                        ).fetchall():
+                            if mat["material_type_id"] not in market_prices:
+                                missing_mat_ids.add(mat["material_type_id"])
+                if missing_mat_ids:
+                    from pricer import get_prices_bulk as _gpb
+                    extra = _gpb(list(missing_mat_ids))
+                    market_prices.update(extra)
+                    # Re-compute costs with full price data
+                    material_cost_per_unit.clear()
+                    for pid in mfg_product_ids:
+                        bp_row = _cdb.execute(
+                            "SELECT blueprint_id FROM blueprints WHERE output_id = ? LIMIT 1", (pid,)
+                        ).fetchone()
+                        if not bp_row:
+                            continue
+                        mats = _cdb.execute(
+                            "SELECT material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id = ?",
+                            (bp_row["blueprint_id"],)
+                        ).fetchall()
+                        cost = 0.0
+                        for mat in mats:
+                            mp = market_prices.get(mat["material_type_id"])
+                            if mp and mp.get("sell"):
+                                cost += mp["sell"] * mat["base_quantity"]
+                            else:
+                                cost = None
+                                break
+                        if cost is not None:
+                            material_cost_per_unit[pid] = cost
+                _cdb.close()
+            except Exception as _e:
+                print(f"  [jobs] material cost lookup failed: {_e}")
+
         now_ts = int(time.time())
         result = []
         for j in all_jobs:
@@ -1174,6 +1260,7 @@ def api_industry_jobs():
                 "character_name":    j["_character_name"],
                 "sell_price":        sell_price,
                 "sell_total":        round(sell_price * runs, 2) if sell_price is not None else None,
+                **_build_profit(pid, runs, sell_price, material_cost_per_unit),
             })
 
         # Sort by soonest completing first
