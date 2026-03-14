@@ -73,16 +73,17 @@ function SummaryBar({ jobs }) {
     : null;
 
   const stat = (label, value, color = 'var(--text)') => (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, minWidth: 80 }}>
-      <span style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2 }}>{label}</span>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color, letterSpacing: 1 }}>{value}</span>
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color, letterSpacing: 1, lineHeight: 1 }}>{value}</span>
+      <span style={{ fontSize: 8, color: 'var(--dim)', letterSpacing: 1.5, lineHeight: 1 }}>{label}</span>
     </div>
   );
 
   return (
     <div style={{
-      display: 'flex', justifyContent: 'space-around', alignItems: 'center',
-      padding: '7px 12px',
+      display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 20,
+      height: 26.5,
+      padding: '0 14px',
       borderTop: '1px solid var(--border)',
       background: '#0c0c0a',
       flexShrink: 0,
@@ -105,7 +106,7 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
     );
   }
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+    <table className="jobs-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
       <thead>
         <tr>
           <th style={{ textAlign: 'left',  padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>ITEM</th>
@@ -134,24 +135,24 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
           const cColor   = j.character_id ? charColor(j.character_id) : 'var(--dim)';
           const pColor   = profitColor(j.profit);
           return (
-            <tr key={j.job_id} style={{ borderBottom: '1px solid #0d0d0d' }}>
-              <td style={{ padding: '8px 12px', textAlign: 'left' }}>
+            <tr key={j.job_id}>
+              <td style={{ padding: '6px 12px', textAlign: 'left' }}>
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: isReady ? '#00cc66' : 'var(--text)' }}>
                   {j.product_name}
                 </div>
                 <ProgressBar secs={secsLeft} totalSecs={j.total_secs || 86400} />
               </td>
               {showRuns && (
-                <td style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11, color: 'var(--dim)' }}>×{j.runs}</td>
+                <td style={{ padding: '6px 10px', textAlign: 'right', fontSize: 11, color: 'var(--dim)' }}>×{j.runs}</td>
               )}
               {showSell && (
-                <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11,
+                <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11,
                              color: j.sell_total != null ? 'var(--accent)' : 'var(--dim)' }}>
                   {j.sell_total != null ? fmtISK(j.sell_total) : '—'}
                 </td>
               )}
               {showSell && (
-                <td style={{ padding: '8px 10px', textAlign: 'right', fontFamily: 'var(--mono)' }}>
+                <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)' }}>
                   {j.profit != null ? (
                     <>
                       <div style={{ fontSize: 11, color: pColor }}>{fmtISK(j.profit)}</div>
@@ -164,17 +165,17 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
                   )}
                 </td>
               )}
-              <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+              <td style={{ padding: '6px 10px', textAlign: 'right' }}>
                 <span style={{ fontSize: 10, color: aColor, letterSpacing: 1, border: `1px solid ${aColor}`, padding: '1px 5px', opacity: 0.8 }}>
                   {j.activity.toUpperCase()}
                 </span>
               </td>
               {multiChar && (
-                <td style={{ padding: '8px 10px', textAlign: 'right' }}>
+                <td style={{ padding: '6px 10px', textAlign: 'right' }}>
                   <CharTag name={j.character_name} color={cColor} />
                 </td>
               )}
-              <td style={{ padding: '8px 12px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12,
+              <td style={{ padding: '6px 12px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12,
                            color: isReady ? '#00cc66' : urgent ? 'var(--accent)' : 'var(--text)' }}>
                 {fmtCountdown(secsLeft)}
               </td>

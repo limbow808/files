@@ -13,7 +13,7 @@ export default function OverviewPage({ plexData, walletHistory, plexLoading, ple
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
 
       {/* Row 1 — Manufacturing Jobs, full width */}
-      <div style={{ flex: '0 0 52%', minHeight: 0, overflow: 'hidden' }}>
+      <div style={{ flex: '0 0 52%', minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         <ManufacturingJobs />
       </div>
 
