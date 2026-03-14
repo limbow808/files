@@ -56,6 +56,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
   const [sellLoc,   setSellLoc]   = useState('jita');
   const [minVolume, setMinVolume] = useState('');
   const [search,    setSearch]    = useState('');
+  const [sysSci,    setSysSci]    = useState(null); // { sci, notFound, loading }
 
   const [sortKey, setSortKey] = useState('net_profit');
   const [sortDir, setSortDir] = useState(-1);
@@ -187,8 +188,15 @@ export default function CalculatorPage({ refreshKey = 0 }) {
           {/* Row 1: inputs */}
           <div className="calc-filters-inputs">
             <div className="filter-group">
-              <span className="filter-label">SYS</span>
-              <SystemInput value={system} onChange={setSystem} />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                <span className="filter-label">SYS</span>
+                {sysSci?.sci != null && !sysSci?.notFound && (
+                  <span style={{ fontFamily: 'var(--mono)', fontSize: 8, letterSpacing: 1, color: 'var(--accent)' }}>
+                    TAX {(sysSci.sci * 100).toFixed(1)}%
+                  </span>
+                )}
+              </div>
+              <SystemInput value={system} onChange={setSystem} onSciChange={setSysSci} />
             </div>
             <div className="filter-group">
               <span className="filter-label">FAC</span>

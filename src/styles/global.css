@@ -680,7 +680,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .skill-level-pip.filled { background: var(--accent); border-color: var(--accent); }
 .skill-level-pip.needed { border-color: #ffcc44; box-shadow: 0 0 3px #ffcc4466; }
 
-/* ── System autocomplete ──────────────────────────────────────────── */
+/* ── System autocomplete (legacy — kept for safety) ──────────────── */
 .autocomplete-wrap { position: relative; }
 .autocomplete-dropdown {
   position: absolute;
@@ -705,6 +705,77 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 }
 .autocomplete-item:hover { background: rgba(255,71,0,0.08); }
 .autocomplete-item .sys-sci { color: var(--dim); font-size: 10px; }
+
+/* ── System input (new) ───────────────────────────────────────────── */
+.sys-input-wrap { position: relative; display: flex; flex-direction: column; }
+.sys-input-row  { position: relative; display: flex; align-items: center; }
+
+.sys-input { flex: 1; min-width: 0; padding-right: 20px !important; }
+.sys-input.sys-loading { opacity: 0.6; }
+
+.sys-chevron {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font-size: 10px;
+  padding: 0 2px;
+  cursor: pointer;
+  line-height: 1;
+  z-index: 1;
+}
+.sys-chevron:hover { color: var(--accent); }
+
+.sys-badge {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 1px;
+  padding: 0;
+  white-space: nowrap;
+  line-height: 1;
+}
+.sys-badge-error   { color: #e05252; }
+.sys-badge-loading { color: var(--dim); }
+
+.sys-dropdown {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  min-width: 340px;
+  background: #0a0a08;
+  border: 1px solid #222220;
+  z-index: 300;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+}
+.sys-drop-row {
+  display: grid;
+  grid-template-columns: 10px 90px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid #111110;
+  font-size: 11px;
+}
+.sys-drop-row:last-child { border-bottom: none; }
+.sys-drop-row:hover      { background: #111110; }
+.sys-drop-active         { background: rgba(255,71,0,0.06); }
+
+.sys-dot {
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+  flex-shrink: 0;
+}
+.sys-dot-placeholder { width: 5px; display: inline-block; }
+
+.sys-drop-name   { font-family: var(--mono); color: var(--text); font-size: 11px; }
+.sys-drop-region { font-family: var(--mono); color: var(--dim); font-size: 10px; letter-spacing: 0.5px; }
+.sys-drop-sci    { font-family: var(--mono); font-size: 10px; white-space: nowrap; }
+
 
 /* ── Sort arrow ──────────────────────────────────────────────────── */
 .sort-arrow { margin-left: 3px; font-size: 9px; color: var(--accent); }

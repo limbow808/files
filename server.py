@@ -726,14 +726,95 @@ def api_calculator_progress():
 
 
 # ── System Cost Index lookup ───────────────────────────────────────────────────
-_SCI_CACHE: dict = {}
+_SCI_CACHE: dict = {}        # system_id_str → cost_index float
+_SCI_NAME_CACHE: dict = {}   # lowercase_name → system_id_str
 _SCI_CACHE_TS: float = 0
 _SCI_TTL = 3600  # 1 hour
 
+# Well-known systems we always want names for (avoids bulk name fetch on cold start)
+_KNOWN_SYSTEMS = {
+    "30000142": "Jita",
+    "30000160": "Korsiki",
+    "30000144": "Perimeter",
+    "30002187": "Amarr",
+    "30002659": "Dodixie",
+    "30002510": "Rens",
+    "30002053": "Hek",
+    "30000049": "Camal",
+    "30000148": "Maurasi",
+    "30000163": "Uedama",
+    "30000206": "Sivala",
+    "30002704": "Bourynes",
+    "30002646": "Adahum",
+}
+
+def _refresh_sci_cache():
+    """Fetch ESI industry/systems and rebuild both caches."""
+    global _SCI_CACHE, _SCI_NAME_CACHE, _SCI_CACHE_TS
+    try:
+        resp = requests.get(
+            "https://esi.evetech.net/latest/industry/systems/",
+            timeout=15
+        )
+        if not resp.ok:
+            return
+        data = resp.json()
+        new_sci: dict = {}
+        for entry in data:
+            sid = str(entry.get("solar_system_id", ""))
+            for cost in entry.get("cost_indices", []):
+                if cost.get("activity") == "manufacturing":
+                    new_sci[sid] = cost.get("cost_index", 0.0)
+                    break
+        _SCI_CACHE = new_sci
+
+        # Build name → id map from known systems + bulk ESI names for all IDs
+        name_map: dict = {}
+        # Seed with hardcoded known names first (instant, no API call)
+        for sid, name in _KNOWN_SYSTEMS.items():
+            name_map[name.lower()] = sid
+
+        # Fetch names for all system IDs in batches of 1000
+        all_ids = [int(sid) for sid in new_sci.keys() if sid.isdigit()]
+        batch_size = 1000
+        for i in range(0, min(len(all_ids), 5000), batch_size):  # cap at 5k to stay fast
+            batch = all_ids[i:i + batch_size]
+            try:
+                nr = requests.post(
+                    "https://esi.evetech.net/latest/universe/names/",
+                    json=batch,
+                    timeout=10
+                )
+                if nr.ok:
+                    for item in nr.json():
+                        if item.get("category") == "solar_system":
+                            name_map[item["name"].lower()] = str(item["id"])
+            except Exception:
+                pass
+
+        _SCI_NAME_CACHE = name_map
+        _SCI_CACHE_TS = time.time()
+        print(f"  SCI cache refreshed: {len(_SCI_CACHE)} systems, {len(_SCI_NAME_CACHE)} names")
+    except Exception as e:
+        print(f"  SCI cache refresh failed: {e}")
+
+
+def _ensure_sci_cache():
+    """Refresh the SCI cache if stale or empty."""
+    if not _SCI_CACHE or (time.time() - _SCI_CACHE_TS) > _SCI_TTL:
+        _refresh_sci_cache()
+
+
+def _name_to_system_id(name: str) -> str | None:
+    """Resolve a system name (case-insensitive) to its system_id string."""
+    _ensure_sci_cache()
+    return _SCI_NAME_CACHE.get(name.strip().lower())
+
+
 def _resolve_sci(system_name_or_id: str) -> float:
     """
-    Look up the manufacturing SCI for a solar system via ESI.
-    Falls back to the CONFIG default if ESI is unavailable or system not found.
+    Look up the manufacturing SCI for a solar system.
+    Falls back to the CONFIG default if not found.
     """
     from calculator import CONFIG as CALC_CONFIG
     default_sci = CALC_CONFIG["system_cost_index"]
@@ -741,41 +822,16 @@ def _resolve_sci(system_name_or_id: str) -> float:
     if not system_name_or_id:
         return default_sci
 
-    global _SCI_CACHE, _SCI_CACHE_TS
-    try:
-        # Refresh industry systems cache if stale
-        if not _SCI_CACHE or (time.time() - _SCI_CACHE_TS) > _SCI_TTL:
-            resp = requests.get(
-                "https://esi.evetech.net/latest/industry/systems/",
-                timeout=10
-            )
-            if resp.ok:
-                data = resp.json()
-                _SCI_CACHE = {}
-                for entry in data:
-                    sid = str(entry.get("solar_system_id", ""))
-                    for cost in entry.get("cost_indices", []):
-                        if cost.get("activity") == "manufacturing":
-                            _SCI_CACHE[sid] = cost.get("cost_index", default_sci)
-                            break
-                _SCI_CACHE_TS = time.time()
+    _ensure_sci_cache()
 
-        # Try lookup by ID first
-        if system_name_or_id.isdigit():
-            return _SCI_CACHE.get(system_name_or_id, default_sci)
+    # Lookup by numeric ID
+    if system_name_or_id.isdigit():
+        return _SCI_CACHE.get(system_name_or_id, default_sci)
 
-        # Try name → ID via ESI search
-        search_resp = requests.get(
-            "https://esi.evetech.net/latest/search/",
-            params={"categories": "solar_system", "search": system_name_or_id, "strict": False},
-            timeout=5
-        )
-        if search_resp.ok:
-            ids = search_resp.json().get("solar_system", [])
-            if ids:
-                return _SCI_CACHE.get(str(ids[0]), default_sci)
-    except Exception:
-        pass
+    # Lookup by name
+    sid = _name_to_system_id(system_name_or_id)
+    if sid:
+        return _SCI_CACHE.get(sid, default_sci)
 
     return default_sci
 
@@ -807,42 +863,98 @@ def api_systems_search():
         return jsonify([])
 
     try:
-        # Refresh SCI cache if needed
-        _resolve_sci("")  # warm the cache
+        _ensure_sci_cache()
 
-        search_resp = requests.get(
-            "https://esi.evetech.net/latest/search/",
-            params={"categories": "solar_system", "search": q, "strict": False},
-            timeout=5
-        )
-        if not search_resp.ok:
-            return jsonify([])
-
-        ids = search_resp.json().get("solar_system", [])[:10]
-        if not ids:
-            return jsonify([])
-
-        # Resolve names
-        names_resp = requests.post(
-            "https://esi.evetech.net/latest/universe/names/",
-            json=ids,
-            timeout=5
-        )
-        names = {}
-        if names_resp.ok:
-            for item in names_resp.json():
-                names[str(item["id"])] = item["name"]
+        # Search the local name cache for prefix matches (case-insensitive)
+        q_lower = q.lower()
+        matches = [
+            (name, sid)
+            for name, sid in _SCI_NAME_CACHE.items()
+            if q_lower in name
+        ]
+        # Sort: exact-start matches first, then alphabetically, cap at 10
+        matches.sort(key=lambda x: (not x[0].startswith(q_lower), x[0]))
+        matches = matches[:10]
 
         results = []
-        for sid in ids:
-            name = names.get(str(sid), str(sid))
-            sci  = _SCI_CACHE.get(str(sid), None)
-            results.append({"id": sid, "name": name, "sci": sci})
-        results.sort(key=lambda x: x["name"])
+        for name, sid in matches:
+            # Capitalise the stored lowercase name back using the known map if possible
+            display = _KNOWN_SYSTEMS.get(sid, name.title())
+            sci = _SCI_CACHE.get(sid)
+            results.append({"id": int(sid), "name": display, "sci": sci})
         return jsonify(results)
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/sci", methods=["GET"])
+def api_sci():
+    """
+    GET /api/sci?system_name=Korsiki
+    Returns { system_name, system_id, cost_index, cached_at } for the given system.
+    Returns 404 { error: "System not found" } if the name doesn't match.
+    """
+    from flask import request as freq
+    system_name = freq.args.get("system_name", "").strip()
+    if not system_name:
+        return jsonify({"error": "system_name is required"}), 400
+
+    try:
+        _ensure_sci_cache()
+
+        sid = _name_to_system_id(system_name)
+        if not sid:
+            return jsonify({"error": "System not found"}), 404
+
+        sci = _SCI_CACHE.get(sid)
+        if sci is None:
+            return jsonify({"error": "System not found"}), 404
+
+        return jsonify({
+            "system_name": system_name,
+            "system_id":   int(sid),
+            "cost_index":  sci,
+            "cached_at":   _SCI_CACHE_TS,
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+_SCI_SUGGESTIONS = [
+    {"name": "Jita",      "system_id": 30000142, "region": "The Forge"},
+    {"name": "Korsiki",   "system_id": 30000160, "region": "The Forge"},
+    {"name": "Perimeter", "system_id": 30000144, "region": "The Forge"},
+    {"name": "Amarr",     "system_id": 30002187, "region": "Domain"},
+    {"name": "Dodixie",   "system_id": 30002659, "region": "Sinq Laison"},
+    {"name": "Rens",      "system_id": 30002510, "region": "Heimatar"},
+    {"name": "Hek",       "system_id": 30002053, "region": "Metropolis"},
+]
+
+@app.route("/api/sci/suggestions", methods=["GET"])
+def api_sci_suggestions():
+    """
+    GET /api/sci/suggestions
+    Returns the curated list of recommended manufacturing systems with live SCI values.
+    """
+    try:
+        _ensure_sci_cache()
+
+        results = []
+        for sys in _SCI_SUGGESTIONS:
+            sci = _SCI_CACHE.get(str(sys["system_id"]))
+            results.append({
+                "name":       sys["name"],
+                "system_id":  sys["system_id"],
+                "region":     sys["region"],
+                "cost_index": sci,
+            })
+        return jsonify(results)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 
 @app.route("/api/skills", methods=["GET"])
