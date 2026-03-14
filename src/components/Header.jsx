@@ -16,7 +16,7 @@ export default function Header({ online, activeTab, onTabChange, onRefresh, refr
       </div>
       {/* Right controls: ONLINE → clock → SCAN */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-        <div style={{ fontSize: 10, letterSpacing: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', fontSize: 10, letterSpacing: 1 }}>
           <span className={`dot ${online ? 'dot-green' : 'dot-red'}`} />
           {online ? 'ONLINE' : 'OFFLINE'}
         </div>
