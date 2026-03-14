@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { fmtISK, fmtVol } from '../utils/fmt';
 import { API } from '../App';
 
@@ -32,6 +32,12 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
   const [search,     setSearch]     = useState('');
   const [limit,      setLimit]      = useState(50);
 
+  // ── Market scan state ─────────────────────────────────────────────────────
+  const [scanState,   setScanState]   = useState('idle'); // idle | scanning | done | error
+  const [scanResults, setScanResults] = useState(null);   // null or { results, matched, pages_scanned, contracts_checked }
+  const [scanError,   setScanError]   = useState('');
+  const [scanView,    setScanView]    = useState(false);  // show scan results panel instead of main list
+
   // Filter to unowned items: no personal ESI BP
   const unownedItems = useMemo(() => {
     let list = calcResults.filter(r => {
@@ -56,15 +62,32 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
   }
 
   function contractsUrl(blueprintId, name) {
-    // Eve Workbench contract search — search by blueprint name in the selected region
-    const bpName = encodeURIComponent(name + ' Blueprint');
-    return `https://www.eveworkbench.com/trading/contracts?search=${bpName}&locationId=${region}`;
+    // Eve Workbench market sell page — works with type_id
+    return `https://www.eveworkbench.com/market/sell/${blueprintId}`;
   }
 
   function fuzzworkUrl(outputId) {
-    // Fuzzwork market data for the manufactured item (not the BP)
     return `https://market.fuzzwork.co.uk/type/${outputId}/`;
   }
+
+  const runScan = useCallback(async () => {
+    setScanState('scanning');
+    setScanError('');
+    setScanResults(null);
+    setScanView(true);
+    try {
+      const params = new URLSearchParams({ region_id: region, max_pages: 5 });
+      const resp = await fetch(`${API}/api/bpo_market_scan?${params}`);
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      if (data.not_ready) throw new Error(data.message || 'Calculator data not loaded yet.');
+      setScanResults(data);
+      setScanState('done');
+    } catch (err) {
+      setScanError(err.message);
+      setScanState('error');
+    }
+  }, [region]);
 
   const notReady = calcResults.length === 0;
 
@@ -72,8 +95,45 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
     <div className="bp-finder-panel">
       {/* Header */}
       <div className="bp-finder-header">
-        <span className="bp-finder-title">◈ BP FINDER</span>
-        <span className="bp-finder-sub">Profitable items with no owned blueprint — find them on contracts</span>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <span className="bp-finder-title">◈ BP FINDER</span>
+            <span className="bp-finder-sub" style={{ marginLeft: 12 }}>
+              Profitable items with no owned blueprint
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            {/* Toggle list / scan results */}
+            {scanResults && (
+              <button
+                className={`chip${scanView ? '' : ' active'}`}
+                onClick={() => setScanView(false)}
+                style={{ fontSize: 10 }}
+              >📋 LIST</button>
+            )}
+            {scanResults && (
+              <button
+                className={`chip${scanView ? ' active' : ''}`}
+                onClick={() => setScanView(true)}
+                style={{ fontSize: 10 }}
+              >⚡ SCAN RESULTS ({scanResults.matched})</button>
+            )}
+            {/* Scan button */}
+            <button
+              className="chip"
+              onClick={runScan}
+              disabled={scanState === 'scanning' || notReady}
+              title={notReady ? 'Load Calculator data first' : `Scan ESI contracts in ${REGION_OPTIONS.find(r => r.id === region)?.name}`}
+              style={{
+                background: scanState === 'scanning' ? 'rgba(255,71,0,0.15)' : undefined,
+                borderColor: scanState === 'scanning' ? 'var(--accent)' : undefined,
+                color:       scanState === 'scanning' ? 'var(--accent)' : undefined,
+              }}
+            >
+              {scanState === 'scanning' ? '⏳ SCANNING…' : '⚡ SCAN MARKET'}
+            </button>
+          </div>
+        </div>
 
         <div className="bp-finder-controls">
           {/* Sort */}
@@ -88,7 +148,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
             ))}
           </div>
 
-          {/* Region for links */}
+          {/* Region for scan + links */}
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 2 }}>REGION</span>
             <select
@@ -127,18 +187,121 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
       </div>
 
       {/* Table */}
+      {/* ── SCAN RESULTS panel ─────────────────────────────────────────────── */}
       <div className="bp-finder-body">
-        {notReady && (
+        {/* Scanning spinner */}
+        {scanView && scanState === 'scanning' && (
+          <div style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--accent)', fontSize: 11, letterSpacing: 2 }}>
+            ⏳ SCANNING ESI PUBLIC CONTRACTS… this may take 15–30 seconds
+          </div>
+        )}
+
+        {/* Scan error */}
+        {scanView && scanState === 'error' && (
+          <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--accent)', fontSize: 11, letterSpacing: 2 }}>
+            ⚠ {scanError}
+          </div>
+        )}
+
+        {/* Scan results table */}
+        {scanView && scanState === 'done' && scanResults && (
+          <>
+            {scanResults.results.length === 0 ? (
+              <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
+                NO BPO CONTRACTS FOUND — tried {scanResults.contracts_checked?.toLocaleString()} contracts across {scanResults.pages_scanned} pages
+              </div>
+            ) : (
+              <table className="bp-finder-table">
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: 'left' }}>ITEM</th>
+                    <th>ME</th>
+                    <th>TE</th>
+                    <th style={{ color: 'var(--accent)' }}>BPO PRICE</th>
+                    <th>MAT COST</th>
+                    <th>REVENUE</th>
+                    <th style={{ color: '#4cff91' }}>PROFIT/RUN</th>
+                    <th style={{ color: '#4cff91' }}>ROI</th>
+                    <th style={{ color: '#4cff91' }}>ISK/HR</th>
+                    <th style={{ textAlign: 'center' }}>LINKS</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scanResults.results.map(r => (
+                    <tr key={`${r.contract_id}-${r.blueprint_id}`} className="bp-finder-row">
+                      <td style={{ textAlign: 'left' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <img
+                            src={`https://images.evetech.net/types/${r.output_id}/icon?size=32`}
+                            alt=""
+                            style={{ width: 20, height: 20, flexShrink: 0 }}
+                            onError={e => { e.target.style.display = 'none'; }}
+                          />
+                          <span
+                            className="bp-finder-name"
+                            title="Click to copy blueprint name"
+                            onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
+                          >
+                            {r.name}
+                            {copiedId === r.output_id && <span className="copy-flash"> ✓</span>}
+                          </span>
+                        </div>
+                      </td>
+                      <td style={{ color: r.me >= 10 ? '#4cff91' : 'var(--text)' }}>
+                        {r.me}
+                      </td>
+                      <td style={{ color: r.te >= 20 ? '#4cff91' : 'var(--text)' }}>
+                        {r.te}
+                      </td>
+                      <td style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                        {fmtISK(r.price)}
+                      </td>
+                      <td style={{ color: 'var(--dim)' }}>{fmtISK(r.material_cost)}</td>
+                      <td>{fmtISK(r.gross_revenue)}</td>
+                      <td className="profit-val">{fmtISK(r.net_profit)}</td>
+                      <td className="profit-val">{(r.roi || 0).toFixed(1)}%</td>
+                      <td>{r.isk_per_hour ? fmtISK(r.isk_per_hour) : '—'}</td>
+                      <td>
+                        <div className="bp-finder-actions">
+                          <button
+                            className="bp-action-btn"
+                            title={`Copy "${r.name} Blueprint" to clipboard`}
+                            onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
+                          >{copiedId === r.output_id ? '✓' : '📋'}</button>
+                          <a
+                            className="bp-action-btn bp-action-link"
+                            href={contractsUrl(r.blueprint_id, r.name)}
+                            target="_blank" rel="noopener noreferrer"
+                            title="View blueprint on Eve Workbench market"
+                          >🔍</a>
+                          <a
+                            className="bp-action-btn bp-action-link"
+                            href={fuzzworkUrl(r.output_id)}
+                            target="_blank" rel="noopener noreferrer"
+                            title="View manufactured item on Fuzzwork"
+                          >📈</a>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </>
+        )}
+
+        {/* ── Normal list (shown when not in scan view) ───────────────────── */}
+        {!scanView && notReady && (
           <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
             WAITING FOR MARKET DATA — prices load automatically on the Calculator tab
           </div>
         )}
-        {!notReady && unownedItems.length === 0 && (
+        {!scanView && !notReady && unownedItems.length === 0 && (
           <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
             NO ITEMS — all profitable items already have blueprints
           </div>
         )}
-        {!notReady && unownedItems.length > 0 && (
+        {!scanView && !notReady && unownedItems.length > 0 && (
           <table className="bp-finder-table">
             <thead>
               <tr>
@@ -155,88 +318,83 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
               </tr>
             </thead>
             <tbody>
-              {unownedItems.map(r => {
-                return (
-                  <tr key={r.output_id} className="bp-finder-row">
-                    <td style={{ textAlign: 'left' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <img
-                          src={`https://images.evetech.net/types/${r.output_id}/icon?size=32`}
-                          alt=""
-                          style={{ width: 20, height: 20, flexShrink: 0 }}
-                          onError={e => { e.target.style.display = 'none'; }}
-                        />
-                        <span
-                          className="bp-finder-name"
-                          title="Click to copy blueprint name"
-                          onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
-                        >
-                          {r.name}
-                          {copiedId === r.output_id && (
-                            <span className="copy-flash"> ✓</span>
-                          )}
-                        </span>
-                      </div>
-                    </td>
-                    <td style={{ color: 'var(--dim)', fontSize: 10 }}>{r.category || '—'}</td>
-                    <td style={{ color: 'var(--dim)' }}>{r.tech || '—'}</td>
-                    <td style={{ color: 'var(--dim)' }}>{fmtVol(r.avg_daily_volume)}</td>
-                    <td style={{ color: 'var(--dim)' }}>{fmtISK(r.material_cost)}</td>
-                    <td>{fmtISK(r.gross_revenue)}</td>
-                    <td className="profit-val">{fmtISK(r.net_profit)}</td>
-                    <td className="profit-val">{(r.roi || 0).toFixed(1)}%</td>
-                    <td>{r.isk_per_hour ? fmtISK(r.isk_per_hour) : '—'}</td>
-                    <td>
-                      <div className="bp-finder-actions">
-                        {/* Copy blueprint name */}
-                        <button
-                          className="bp-action-btn"
-                          title={`Copy "${r.name} Blueprint" to clipboard`}
-                          onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
-                        >
-                          {copiedId === r.output_id ? '✓' : '📋'}
-                        </button>
-
-                        {/* Search contracts on Eve Workbench */}
-                        <a
-                          className="bp-action-btn bp-action-link"
-                          href={contractsUrl(r.blueprint_id, r.name)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title="Search blueprint contracts on Eve Workbench"
-                        >
-                          🔍
-                        </a>
-
-                        {/* View item market data on Fuzzwork */}
-                        <a
-                          className="bp-action-btn bp-action-link"
-                          href={fuzzworkUrl(r.output_id)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title="View market data on Fuzzwork"
-                        >
-                          📈
-                        </a>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+              {unownedItems.map(r => (
+                <tr key={r.output_id} className="bp-finder-row">
+                  <td style={{ textAlign: 'left' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <img
+                        src={`https://images.evetech.net/types/${r.output_id}/icon?size=32`}
+                        alt=""
+                        style={{ width: 20, height: 20, flexShrink: 0 }}
+                        onError={e => { e.target.style.display = 'none'; }}
+                      />
+                      <span
+                        className="bp-finder-name"
+                        title="Click to copy blueprint name"
+                        onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
+                      >
+                        {r.name}
+                        {copiedId === r.output_id && <span className="copy-flash"> ✓</span>}
+                      </span>
+                    </div>
+                  </td>
+                  <td style={{ color: 'var(--dim)', fontSize: 10 }}>{r.category || '—'}</td>
+                  <td style={{ color: 'var(--dim)' }}>{r.tech || '—'}</td>
+                  <td style={{ color: 'var(--dim)' }}>{fmtVol(r.avg_daily_volume)}</td>
+                  <td style={{ color: 'var(--dim)' }}>{fmtISK(r.material_cost)}</td>
+                  <td>{fmtISK(r.gross_revenue)}</td>
+                  <td className="profit-val">{fmtISK(r.net_profit)}</td>
+                  <td className="profit-val">{(r.roi || 0).toFixed(1)}%</td>
+                  <td>{r.isk_per_hour ? fmtISK(r.isk_per_hour) : '—'}</td>
+                  <td>
+                    <div className="bp-finder-actions">
+                      <button
+                        className="bp-action-btn"
+                        title={`Copy "${r.name} Blueprint" to clipboard`}
+                        onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
+                      >{copiedId === r.output_id ? '✓' : '📋'}</button>
+                      <a
+                        className="bp-action-btn bp-action-link"
+                        href={contractsUrl(r.blueprint_id, r.name)}
+                        target="_blank" rel="noopener noreferrer"
+                        title="View blueprint on Eve Workbench market"
+                      >🔍</a>
+                      <a
+                        className="bp-action-btn bp-action-link"
+                        href={fuzzworkUrl(r.output_id)}
+                        target="_blank" rel="noopener noreferrer"
+                        title="View manufactured item on Fuzzwork"
+                      >📈</a>
+                    </div>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         )}
       </div>
 
-      {/* Footer count */}
-      {!notReady && unownedItems.length > 0 && (
-        <div className="bp-finder-footer">
-          {unownedItems.length} ITEM{unownedItems.length !== 1 ? 'S' : ''} WITHOUT BLUEPRINT
-          <span style={{ marginLeft: 12, color: 'var(--dim)' }}>
-            click 📋 to copy name · 🔍 to search contracts on Eve Workbench · 📈 to view market on Fuzzwork
-          </span>
-        </div>
-      )}
+      {/* Footer */}
+      <div className="bp-finder-footer">
+        {scanView && scanState === 'done' && scanResults ? (
+          <>
+            {scanResults.matched} BPO{scanResults.matched !== 1 ? 'S' : ''} FOUND
+            <span style={{ color: 'var(--dim)', marginLeft: 8 }}>
+              · {scanResults.contracts_checked?.toLocaleString()} contracts checked across {scanResults.pages_scanned} pages
+            </span>
+            <span style={{ color: 'var(--dim)', marginLeft: 8 }}>
+              · ME/TE highlighted green at max (10/20)
+            </span>
+          </>
+        ) : !scanView && !notReady && unownedItems.length > 0 ? (
+          <>
+            {unownedItems.length} ITEM{unownedItems.length !== 1 ? 'S' : ''} WITHOUT BLUEPRINT
+            <span style={{ marginLeft: 12, color: 'var(--dim)' }}>
+              click 📋 to copy name · 🔍 Eve Workbench market · 📈 Fuzzwork · ⚡ to scan live contracts
+            </span>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }

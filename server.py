@@ -1001,6 +1001,221 @@ def api_blueprints_bp_finder():
         return jsonify({"error": str(e), "items": []}), 200
 
 
+@app.route("/api/bpo_market_scan", methods=["GET"])
+def api_bpo_market_scan():
+    """
+    Scan ESI public contracts in a region for BPOs that match profitable unowned items.
+
+    Query params:
+        region_id - ESI region ID (default: 10000002 = The Forge)
+        system    - calculator system (default: Korsiki)
+        facility  - calculator facility (default: large)
+        max_pages - max contract pages to fetch (default: 5, each page = 1000 contracts)
+
+    Response:
+        { results: [{name, blueprint_id, output_id, contract_id, price, me, te,
+                     net_profit, roi, isk_per_hour, issuer_id, location_id, expires}],
+          pages_scanned, contracts_checked, matched }
+    """
+    try:
+        import sqlite3 as _sq
+        from flask import request as _freq
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        region_id  = int(_freq.args.get("region_id", 10000002))
+        system     = _freq.args.get("system",   "Korsiki")
+        facility   = _freq.args.get("facility", "large")
+        max_pages  = min(int(_freq.args.get("max_pages", 5)), 20)
+
+        # ── 1. Get calc results from cache ─────────────────────────────────────
+        cache_key = _calc_cache_key(system, facility)
+        if not _calc_is_fresh(cache_key):
+            fresh_key = next(
+                (k for k, v in _calc_cache.items()
+                 if (time.time() - v.get("generated_at", 0)) < CALC_CACHE_TTL),
+                None
+            )
+            if fresh_key:
+                cache_key = fresh_key
+            else:
+                return jsonify({
+                    "results": [], "not_ready": True,
+                    "message": "Open the Calculator tab first to load market prices, then scan.",
+                })
+        calc_results = _calc_cache[cache_key]["results"]
+
+        # ── 2. Build lookup: blueprint_id → calc stats ────────────────────────
+        #    Also exclude BPs the user already owns (corp + personal)
+        cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+        bp_rows = cdb.execute(
+            "SELECT blueprint_id, output_id, output_name FROM blueprints"
+        ).fetchall()
+        cdb.close()
+
+        corp_output_ids = {r[1] for r in bp_rows}
+        bpid_to_info    = {r[0]: {"output_id": r[1], "output_name": r[2]} for r in bp_rows}
+
+        personal_output_ids = set()
+        try:
+            from characters import get_all_auth_headers
+            import requests as _ureq2
+            for cid, headers in get_all_auth_headers():
+                resp = _ureq2.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
+                    headers=headers, timeout=10
+                )
+                if resp.ok:
+                    for bp in resp.json():
+                        personal_output_ids.add(bp.get("type_id"))
+        except Exception:
+            pass
+
+        # Map: blueprint_id → calc row (for enriching matched contracts)
+        output_to_calc = {r.get("output_id"): r for r in calc_results}
+        # Build set of blueprint_ids we actually care about (unowned + has calc data)
+        wanted_bp_ids = set()
+        for bpid, info in bpid_to_info.items():
+            oid = info["output_id"]
+            if oid in corp_output_ids and oid not in personal_output_ids:
+                # they already own it — skip
+                pass
+            if oid in corp_output_ids:
+                continue
+            if oid in personal_output_ids:
+                continue
+            if oid in output_to_calc:
+                wanted_bp_ids.add(bpid)
+
+        if not wanted_bp_ids:
+            return jsonify({"results": [], "matched": 0, "pages_scanned": 0,
+                            "contracts_checked": 0,
+                            "message": "No unowned profitable blueprints to scan for."})
+
+        # ── 3. Fetch ESI public contracts (paginated, concurrent) ─────────────
+        import requests as _esi
+        ESI_BASE = "https://esi.evetech.net/latest"
+        session = _esi.Session()
+
+        def fetch_page(page):
+            try:
+                r = session.get(
+                    f"{ESI_BASE}/contracts/public/{region_id}/",
+                    params={"page": page},
+                    timeout=12,
+                )
+                if r.status_code == 404:   # page beyond X-Pages
+                    return []
+                r.raise_for_status()
+                return r.json()
+            except Exception:
+                return []
+
+        # First page to get total page count
+        first_resp = session.get(
+            f"{ESI_BASE}/contracts/public/{region_id}/",
+            params={"page": 1}, timeout=12
+        )
+        first_resp.raise_for_status()
+        total_pages = min(int(first_resp.headers.get("X-Pages", 1)), max_pages)
+        all_contracts = [c for c in first_resp.json() if c.get("type") == "item_exchange"]
+
+        # Fetch remaining pages concurrently
+        if total_pages > 1:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = {pool.submit(fetch_page, p): p for p in range(2, total_pages + 1)}
+                for fut in as_completed(futures):
+                    page_data = fut.result()
+                    all_contracts.extend(
+                        c for c in page_data if c.get("type") == "item_exchange"
+                    )
+
+        contracts_checked = len(all_contracts)
+
+        # ── 4. Fetch items for each contract and match blueprint_ids ──────────
+        matched_contracts = {}   # contract_id → {contract, type_id, me, te}
+
+        def fetch_items(contract):
+            cid = contract["contract_id"]
+            try:
+                r = session.get(
+                    f"{ESI_BASE}/contracts/public/items/{cid}/",
+                    timeout=10
+                )
+                if not r.ok:
+                    return None
+                items = r.json()
+                for item in items:
+                    tid = item.get("type_id")
+                    if tid in wanted_bp_ids and item.get("is_included", True):
+                        return {
+                            "contract":    contract,
+                            "type_id":     tid,
+                            "me":          item.get("material_efficiency", 0),
+                            "te":          item.get("time_efficiency", 0),
+                            "quantity":    item.get("quantity", 1),
+                        }
+            except Exception:
+                pass
+            return None
+
+        # Only fetch items for contracts that look like they could be BPOs
+        # (single item, small volume, title hints — best-effort pre-filter)
+        bp_candidate_contracts = [
+            c for c in all_contracts
+            if c.get("volume", 999) <= 10   # BPs are tiny (0.01 m3)
+        ]
+
+        results = []
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            futures = [pool.submit(fetch_items, c) for c in bp_candidate_contracts]
+            for fut in as_completed(futures):
+                match = fut.result()
+                if match is None:
+                    continue
+                contract  = match["contract"]
+                bpid      = match["type_id"]
+                info      = bpid_to_info.get(bpid, {})
+                oid       = info.get("output_id")
+                calc_row  = output_to_calc.get(oid, {})
+
+                results.append({
+                    "blueprint_id":  bpid,
+                    "output_id":     oid,
+                    "name":          calc_row.get("name", info.get("output_name", "?")),
+                    "me":            match["me"],
+                    "te":            match["te"],
+                    "contract_id":   contract["contract_id"],
+                    "price":         contract.get("price", 0),
+                    "location_id":   contract.get("start_location_id"),
+                    "issuer_id":     contract.get("issuer_id"),
+                    "expires":       contract.get("date_expired", ""),
+                    # Calc stats
+                    "net_profit":    calc_row.get("net_profit", 0),
+                    "roi":           calc_row.get("roi", 0),
+                    "isk_per_hour":  calc_row.get("isk_per_hour", 0),
+                    "material_cost": calc_row.get("material_cost", 0),
+                    "gross_revenue": calc_row.get("gross_revenue", 0),
+                    "category":      calc_row.get("category", ""),
+                    "tech":          calc_row.get("tech", ""),
+                })
+
+        # Sort by net_profit desc
+        results.sort(key=lambda x: x.get("net_profit", 0), reverse=True)
+
+        return jsonify({
+            "results":           results,
+            "matched":           len(results),
+            "pages_scanned":     total_pages,
+            "contracts_checked": contracts_checked,
+            "bp_candidates":     len(bp_candidate_contracts),
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e), "results": []}), 200
+
+
 @app.route("/api/ui/open_ingame", methods=["POST"])
 def api_ui_open_ingame():
     """
