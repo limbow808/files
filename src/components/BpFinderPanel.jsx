@@ -245,6 +245,9 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                             {r.name}
                             {copiedId === r.output_id && <span className="copy-flash"> ✓</span>}
                           </span>
+                          {r.already_owned && (
+                            <span style={{ fontSize: 9, color: '#4cff91', letterSpacing: 1, marginLeft: 4, opacity: 0.7 }}>✓OWN</span>
+                          )}
                         </div>
                       </td>
                       <td style={{ color: r.me >= 10 ? '#4cff91' : 'var(--text)' }}>

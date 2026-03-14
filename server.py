@@ -44,9 +44,9 @@ def _scan_is_fresh() -> bool:
     return (time.time() - ts) < SCAN_CACHE_TTL
 
 
-# ── Calculator cache (keyed by facility+system params, TTL 5 min) ─────────────
+# ── Calculator cache (keyed by facility+system params, TTL 30 min) ───────────
 _calc_cache: dict = {}
-CALC_CACHE_TTL = 300  # 5 minutes
+CALC_CACHE_TTL = 1800  # 30 minutes
 
 # ── Skill name cache (type_id → skill name, loaded once from Fuzzwork CSV) ───
 _skill_id_names: dict[int, str] = {}
@@ -1044,52 +1044,46 @@ def api_bpo_market_scan():
                 })
         calc_results = _calc_cache[cache_key]["results"]
 
-        # ── 2. Build lookup: blueprint_id → calc stats ────────────────────────
-        #    Also exclude BPs the user already owns (corp + personal)
-        cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
-        bp_rows = cdb.execute(
-            "SELECT blueprint_id, output_id, output_name FROM blueprints"
-        ).fetchall()
-        cdb.close()
+        # ── 2. Build wanted_bp_ids from calc results directly ─────────────────
+        #    Calc results already contain blueprint_id. We scan for ALL profitable
+        #    items (not just unowned) so the user sees what's available to buy.
+        #    Optionally load owned BP sets to flag duplicates in the response.
+        import requests as _esi
 
-        corp_output_ids = {r[1] for r in bp_rows}
-        bpid_to_info    = {r[0]: {"output_id": r[1], "output_name": r[2]} for r in bp_rows}
-
-        personal_output_ids = set()
+        # Personal ESI BPs (for flagging already-owned in results)
+        personal_bp_ids = set()
         try:
             from characters import get_all_auth_headers
             import requests as _ureq2
             for cid, headers in get_all_auth_headers():
-                resp = _ureq2.get(
+                resp_p = _ureq2.get(
                     f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
                     headers=headers, timeout=10
                 )
-                if resp.ok:
-                    for bp in resp.json():
-                        personal_output_ids.add(bp.get("type_id"))
+                if resp_p.ok:
+                    for bp in resp_p.json():
+                        personal_bp_ids.add(bp.get("type_id"))
         except Exception:
             pass
 
-        # Map: blueprint_id → calc row (for enriching matched contracts)
-        output_to_calc = {r.get("output_id"): r for r in calc_results}
-        # Build set of blueprint_ids we actually care about (unowned + has calc data)
-        wanted_bp_ids = set()
-        for bpid, info in bpid_to_info.items():
-            oid = info["output_id"]
-            if oid in corp_output_ids and oid not in personal_output_ids:
-                # they already own it — skip
-                pass
-            if oid in corp_output_ids:
-                continue
-            if oid in personal_output_ids:
-                continue
-            if oid in output_to_calc:
-                wanted_bp_ids.add(bpid)
+        # Corp BPs from crest.db
+        cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+        corp_bp_ids = {r[0] for r in cdb.execute("SELECT blueprint_id FROM blueprints").fetchall()}
+        cdb.close()
+
+        # Build: blueprint_id → calc row, for all profitable items
+        bpid_to_calc = {}
+        for r in calc_results:
+            bpid = r.get("blueprint_id")
+            if bpid:
+                bpid_to_calc[bpid] = r
+
+        wanted_bp_ids = set(bpid_to_calc.keys())
 
         if not wanted_bp_ids:
             return jsonify({"results": [], "matched": 0, "pages_scanned": 0,
                             "contracts_checked": 0,
-                            "message": "No unowned profitable blueprints to scan for."})
+                            "message": "No calc data found — open the Calculator tab first."})
 
         # ── 3. Fetch ESI public contracts (paginated, concurrent) ─────────────
         import requests as _esi
@@ -1174,14 +1168,13 @@ def api_bpo_market_scan():
                     continue
                 contract  = match["contract"]
                 bpid      = match["type_id"]
-                info      = bpid_to_info.get(bpid, {})
-                oid       = info.get("output_id")
-                calc_row  = output_to_calc.get(oid, {})
+                calc_row  = bpid_to_calc.get(bpid, {})
+                oid       = calc_row.get("output_id")
 
                 results.append({
                     "blueprint_id":  bpid,
                     "output_id":     oid,
-                    "name":          calc_row.get("name", info.get("output_name", "?")),
+                    "name":          calc_row.get("name", "?"),
                     "me":            match["me"],
                     "te":            match["te"],
                     "contract_id":   contract["contract_id"],
@@ -1189,6 +1182,7 @@ def api_bpo_market_scan():
                     "location_id":   contract.get("start_location_id"),
                     "issuer_id":     contract.get("issuer_id"),
                     "expires":       contract.get("date_expired", ""),
+                    "already_owned": bpid in corp_bp_ids or bpid in personal_bp_ids,
                     # Calc stats
                     "net_profit":    calc_row.get("net_profit", 0),
                     "roi":           calc_row.get("roi", 0),
@@ -1796,10 +1790,9 @@ if __name__ == "__main__":
         print("  [prewarm] Background scan starting...")
         try:
             with app.app_context():
-                from flask import Request
-                import werkzeug.test
                 client = app.test_client()
                 client.get("/api/scan")
+                client.get("/api/calculator?system=Korsiki&facility=large")
             print("  [prewarm] Cache ready.")
         except Exception as e:
             print(f"  [prewarm] Failed: {e}")
@@ -1828,4 +1821,4 @@ if __name__ == "__main__":
     print("  ║   CREST  ·  API Server  ·  http://localhost:5000  ║")
     print("  ╚══════════════════════════════════════════════════╝")
     print()
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
