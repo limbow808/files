@@ -898,8 +898,10 @@ def api_skills():
 @app.route("/api/blueprints/esi", methods=["GET"])
 def api_blueprints_esi():
     """
-    Return character blueprints from ESI for ALL authenticated characters.
-    Returns list of { type_id, type_name, me_level, te_level, runs, location_id, bp_type, character_id, character_name }
+    Return character AND corporation blueprints from ESI for ALL authenticated characters.
+    Returns list of { type_id, name, me_level, te_level, runs, location_id, bp_type,
+                       character_id, character_name, owner }
+    owner = 'personal' | 'corp'
     """
     try:
         from characters import get_all_auth_headers, load_characters
@@ -909,37 +911,76 @@ def api_blueprints_esi():
         auth_headers = get_all_auth_headers()
 
         all_bps = []
+        seen_corp_ids = set()   # avoid duplicate fetches when multiple chars share a corp
+
         for cid, headers in auth_headers:
             char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+
+            # ── Personal blueprints ──
             try:
                 resp = req.get(
                     f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
-                    headers=headers,
-                    timeout=15
+                    headers=headers, timeout=15
                 )
-                if not resp.ok:
-                    continue
-                for bp in resp.json():
-                    bp["_character_id"]   = cid
-                    bp["_character_name"] = char_name
-                    all_bps.append(bp)
+                if resp.ok:
+                    for bp in resp.json():
+                        bp["_character_id"]   = cid
+                        bp["_character_name"] = char_name
+                        bp["_owner"]          = "personal"
+                        all_bps.append(bp)
             except Exception as e:
-                print(f"  [esi-bps] Failed for {char_name}: {e}")
+                print(f"  [esi-bps] personal failed for {char_name}: {e}")
+
+            # ── Corp blueprints ──
+            try:
+                corp_resp = req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/",
+                    headers=headers, timeout=10
+                )
+                if corp_resp.ok:
+                    corp_id = corp_resp.json().get("corporation_id")
+                    if corp_id and corp_id not in seen_corp_ids:
+                        seen_corp_ids.add(corp_id)
+                        page = 1
+                        while True:
+                            cr = req.get(
+                                f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
+                                headers=headers,
+                                params={"page": page},
+                                timeout=15
+                            )
+                            if not cr.ok:
+                                break
+                            page_bps = cr.json()
+                            if not page_bps:
+                                break
+                            for bp in page_bps:
+                                bp["_character_id"]   = cid
+                                bp["_character_name"] = char_name
+                                bp["_owner"]          = "corp"
+                                bp["_corp_id"]        = corp_id
+                                all_bps.append(bp)
+                            if len(page_bps) < 1000:
+                                break
+                            page += 1
+            except Exception as e:
+                print(f"  [esi-bps] corp failed for {char_name}: {e}")
 
         if not all_bps:
             return jsonify({"blueprints": []})
 
         # Resolve type names
         type_ids = list({bp["type_id"] for bp in all_bps})
-        names_resp = req.post(
-            "https://esi.evetech.net/latest/universe/names/",
-            json=type_ids[:1000],
-            timeout=10
-        )
         names = {}
-        if names_resp.ok:
-            for item in names_resp.json():
-                names[item["id"]] = item["name"]
+        for i in range(0, len(type_ids), 1000):
+            chunk = type_ids[i:i+1000]
+            names_resp = req.post(
+                "https://esi.evetech.net/latest/universe/names/",
+                json=chunk, timeout=10
+            )
+            if names_resp.ok:
+                for item in names_resp.json():
+                    names[item["id"]] = item["name"]
 
         result = []
         for bp in all_bps:
@@ -948,12 +989,13 @@ def api_blueprints_esi():
                 "name":           names.get(bp["type_id"], f"Type {bp['type_id']}"),
                 "me_level":       bp.get("material_efficiency", 0),
                 "te_level":       bp.get("time_efficiency", 0),
-                "runs":           bp.get("runs", -1),   # -1 = BPO (infinite)
+                "runs":           bp.get("runs", -1),
                 "bp_type":        "BPO" if bp.get("runs", -1) == -1 else "BPC",
                 "location_id":    bp.get("location_id"),
                 "quantity":       bp.get("quantity", 1),
                 "character_id":   bp["_character_id"],
                 "character_name": bp["_character_name"],
+                "owner":          bp["_owner"],
             })
 
         result.sort(key=lambda x: x["name"])

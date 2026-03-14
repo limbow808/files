@@ -86,15 +86,16 @@ export default function CalculatorPage({ refreshKey = 0 }) {
   const { data: esiBpData  } = useApi(`${API}/api/blueprints/esi`, []);
   const charSkills = skillsData?.skills || null;
 
-  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC }
+  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC, hasCorp }
   // ESI names include " Blueprint" suffix — strip it to match calculator product names
   const esiBpMap = useMemo(() => {
     const map = {};
     for (const bp of (esiBpData?.blueprints || [])) {
       const key = bp.name.toLowerCase().replace(/\s+blueprint$/, '');
-      if (!map[key]) map[key] = { hasBPO: false, hasBPC: false };
-      if (bp.bp_type === 'BPO') map[key].hasBPO = true;
-      else                       map[key].hasBPC = true;
+      if (!map[key]) map[key] = { hasBPO: false, hasBPC: false, hasCorp: false };
+      if (bp.owner === 'corp')    map[key].hasCorp = true;
+      if (bp.bp_type === 'BPO')  map[key].hasBPO  = true;
+      else                        map[key].hasBPC  = true;
     }
     return map;
   }, [esiBpData]);
@@ -113,19 +114,19 @@ export default function CalculatorPage({ refreshKey = 0 }) {
     // BP ownership filter — classify each result against the ESI BP map
     const bpEntry  = esiBpMap[r.name?.toLowerCase()] ?? null;
     const isOwned  = !!bpEntry;
-    const hasBPO   = bpEntry?.hasBPO ?? false;
-    const hasBPC   = bpEntry?.hasBPC ?? false;
+    const hasBPO   = bpEntry?.hasBPO  ?? false;
+    const hasBPC   = bpEntry?.hasBPC  ?? false;
+    const hasCorp  = bpEntry?.hasCorp ?? false;
 
     // If ALL bp chips are active → show everything (no filtering)
     const allBpOn = BP_FILTERS.every(f => bpFilters.has(f));
     if (!allBpOn) {
       let passes = false;
-      if (bpFilters.has('Personal')  && isOwned)              passes = true;
-      if (bpFilters.has('Not Owned') && !isOwned)             passes = true;
-      if (bpFilters.has('BPOs')      && hasBPO)               passes = true;
-      if (bpFilters.has('BPCs')      && hasBPC)               passes = true;
-      // Corporate: no data yet → treat as pass-through when selected
-      if (bpFilters.has('Corporate'))                          passes = true;
+      if (bpFilters.has('Personal')  && isOwned && !hasCorp) passes = true;
+      if (bpFilters.has('Corporate') && hasCorp)             passes = true;
+      if (bpFilters.has('Not Owned') && !isOwned)            passes = true;
+      if (bpFilters.has('BPOs')      && hasBPO)              passes = true;
+      if (bpFilters.has('BPCs')      && hasBPC)              passes = true;
       if (!passes) return false;
     }
 
