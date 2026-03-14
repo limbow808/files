@@ -118,20 +118,23 @@ export default function CalculatorPage({ refreshKey = 0 }) {
 
     // BP ownership filter — classify each result against the ESI BP map
     const bpEntry  = esiBpMap[r.name?.toLowerCase()] ?? null;
-    const isOwned  = !!bpEntry;
+    const isOwned  = !!bpEntry;               // personally owned via ESI
     const hasBPO   = bpEntry?.hasBPO  ?? false;
     const hasBPC   = bpEntry?.hasBPC  ?? false;
-    const hasCorp  = corpBpIds.has(r.output_id);
+    const hasCorp  = corpBpIds.has(r.output_id);  // corp holds this BP
+
+    // "Not Owned" = no personal ESI BP (corp ownership is separate)
+    const notOwned = !isOwned;
 
     // If ALL bp chips are active → show everything (no filtering)
     const allBpOn = BP_FILTERS.every(f => bpFilters.has(f));
     if (!allBpOn) {
       let passes = false;
-      if (bpFilters.has('Personal')  && isOwned)  passes = true;
-      if (bpFilters.has('Corporate') && hasCorp)   passes = true;
-      if (bpFilters.has('Not Owned') && !isOwned && !hasCorp) passes = true;
-      if (bpFilters.has('BPOs')      && hasBPO)   passes = true;
-      if (bpFilters.has('BPCs')      && hasBPC)   passes = true;
+      if (bpFilters.has('Personal')  && isOwned)   passes = true;
+      if (bpFilters.has('Corporate') && hasCorp)    passes = true;
+      if (bpFilters.has('Not Owned') && notOwned)   passes = true;
+      if (bpFilters.has('BPOs')      && hasBPO)     passes = true;
+      if (bpFilters.has('BPCs')      && hasBPC)     passes = true;
       if (!passes) return false;
     }
 
@@ -263,7 +266,6 @@ export default function CalculatorPage({ refreshKey = 0 }) {
           <BpFinderPanel
             calcResults={calcData?.results || []}
             esiBpMap={esiBpMap}
-            corpBpIds={corpBpIds}
           />
         )}
 

@@ -26,7 +26,7 @@ const SORT_OPTS = [
  *   esiBpMap     - { lowercaseName: {hasBPO, hasBPC} } from parent
  *   corpBpIds    - Set<output_id> from crest.db
  */
-export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, corpBpIds = new Set() }) {
+export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
   const [sortKey,    setSortKey]    = useState('net_profit');
   const [region,     setRegion]     = useState(10000002);
   const [copiedId,   setCopiedId]   = useState(null);
@@ -35,13 +35,11 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, corpBpI
   const [search,     setSearch]     = useState('');
   const [limit,      setLimit]      = useState(50);
 
-  // Filter to unowned items: not in personal ESI BPs and not in corp library
+  // Filter to unowned items: no personal ESI BP
   const unownedItems = useMemo(() => {
     let list = calcResults.filter(r => {
       const bpEntry = esiBpMap[r.name?.toLowerCase()] ?? null;
-      const isOwned = !!bpEntry;
-      const hasCorp = corpBpIds.has(r.output_id);
-      return !isOwned && !hasCorp;
+      return !bpEntry;  // no personal ESI BP at all
     });
 
     if (search) {
