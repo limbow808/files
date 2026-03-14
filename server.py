@@ -895,6 +895,26 @@ def api_skills():
         return jsonify({"error": str(e), "skills": {}}), 200  # 200 so UI can still render
 
 
+@app.route("/api/blueprints/corp", methods=["GET"])
+def api_blueprints_corp():
+    """
+    Return the set of output_ids present in crest.db — these are the corp's blueprints.
+    Response: { output_ids: [int, ...], count: int }
+    """
+    try:
+        import sqlite3 as _sq
+        cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+        rows = cdb.execute("SELECT output_id, output_name FROM blueprints").fetchall()
+        cdb.close()
+        return jsonify({
+            "output_ids": [r[0] for r in rows],
+            "names":      {r[0]: r[1] for r in rows},
+            "count":      len(rows),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "output_ids": [], "names": {}}), 200
+
+
 @app.route("/api/blueprints/esi", methods=["GET"])
 def api_blueprints_esi():
     """

@@ -84,18 +84,21 @@ export default function CalculatorPage({ refreshKey = 0 }) {
   const progress = useCalcProgress(system, facility, loading && !calcData);
   const { data: skillsData } = useApi(`${API}/api/skills`, []);
   const { data: esiBpData  } = useApi(`${API}/api/blueprints/esi`, []);
+  const { data: corpBpData } = useApi(`${API}/api/blueprints/corp`, []);
   const charSkills = skillsData?.skills || null;
 
-  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC, hasCorp }
+  // Corp BP set: output_ids owned by the corp (from crest.db)
+  const corpBpIds = useMemo(() => new Set(corpBpData?.output_ids || []), [corpBpData]);
+
+  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC }
   // ESI names include " Blueprint" suffix — strip it to match calculator product names
   const esiBpMap = useMemo(() => {
     const map = {};
     for (const bp of (esiBpData?.blueprints || [])) {
       const key = bp.name.toLowerCase().replace(/\s+blueprint$/, '');
-      if (!map[key]) map[key] = { hasBPO: false, hasBPC: false, hasCorp: false };
-      if (bp.owner === 'corp')    map[key].hasCorp = true;
-      if (bp.bp_type === 'BPO')  map[key].hasBPO  = true;
-      else                        map[key].hasBPC  = true;
+      if (!map[key]) map[key] = { hasBPO: false, hasBPC: false };
+      if (bp.bp_type === 'BPO')  map[key].hasBPO = true;
+      else                        map[key].hasBPC = true;
     }
     return map;
   }, [esiBpData]);
@@ -116,17 +119,17 @@ export default function CalculatorPage({ refreshKey = 0 }) {
     const isOwned  = !!bpEntry;
     const hasBPO   = bpEntry?.hasBPO  ?? false;
     const hasBPC   = bpEntry?.hasBPC  ?? false;
-    const hasCorp  = bpEntry?.hasCorp ?? false;
+    const hasCorp  = corpBpIds.has(r.output_id);
 
     // If ALL bp chips are active → show everything (no filtering)
     const allBpOn = BP_FILTERS.every(f => bpFilters.has(f));
     if (!allBpOn) {
       let passes = false;
-      if (bpFilters.has('Personal')  && isOwned && !hasCorp) passes = true;
-      if (bpFilters.has('Corporate') && hasCorp)             passes = true;
-      if (bpFilters.has('Not Owned') && !isOwned)            passes = true;
-      if (bpFilters.has('BPOs')      && hasBPO)              passes = true;
-      if (bpFilters.has('BPCs')      && hasBPC)              passes = true;
+      if (bpFilters.has('Personal')  && isOwned)  passes = true;
+      if (bpFilters.has('Corporate') && hasCorp)   passes = true;
+      if (bpFilters.has('Not Owned') && !isOwned && !hasCorp) passes = true;
+      if (bpFilters.has('BPOs')      && hasBPO)   passes = true;
+      if (bpFilters.has('BPCs')      && hasBPC)   passes = true;
       if (!passes) return false;
     }
 
@@ -321,7 +324,15 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                             onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'block'; }}
                           />
                           <span className="item-icon-placeholder" style={{ display: 'none' }} />
-                          <span className="item-name">{r.name}</span>
+                          <span
+                            className="item-name"
+                            title="Click to copy name"
+                            onClick={e => {
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(r.name);
+                            }}
+                            style={{ cursor: 'copy' }}
+                          >{r.name}</span>
                         </div>
                       </td>
                       <td style={{ color: 'var(--dim)' }}>{r.tech || '—'}</td>
