@@ -250,9 +250,9 @@ tr.row-selected td { color: #000; }
 .tab-btn {
   font-family: var(--mono);
   font-size: 11px;
-  letter-spacing: 2px;
+  letter-spacing: 1.5px;
   text-transform: uppercase;
-  padding: 9px 18px;
+  padding: 5px 14px;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
