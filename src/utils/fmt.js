@@ -33,6 +33,10 @@ export function toggleSet(set, val) {
   return next;
 }
 
+const TIER_NAMES  = ['tier-bad', 'tier-poor', 'tier-ok', 'tier-good', 'tier-great', 'tier-elite'];
+const TIER_COLORS = ['#cc2200',  '#cc5500',   '#ccaa00', '#44bb55',   '#3399cc',    '#aa55ff'];
+
+// Static fallbacks (fixed thresholds)
 export function roiTier(roi) {
   if (roi >= 35) return 'tier-elite';
   if (roi >= 20) return 'tier-great';
@@ -49,4 +53,48 @@ export function roiColor(roi) {
   if (roi >= 5)  return '#ccaa00';
   if (roi >= 0)  return '#cc5500';
   return '#cc2200';
+}
+
+/**
+ * Build a dynamic ROI scale from the actual dataset.
+ * Divides the observed ROI range into 6 equal bands (percentile-like)
+ * so the colour spectrum always spreads across the full data range.
+ *
+ * Returns { tier(roi) → string, color(roi) → hex, cuts → number[] }
+ */
+export function makeRoiScale(roiValues) {
+  const vals = roiValues.filter(v => v != null && isFinite(v));
+  if (vals.length < 2) {
+    return { tier: roiTier, color: roiColor, cuts: null };
+  }
+
+  // Use percentile breakpoints so the scale spreads across real data
+  const sorted = [...vals].sort((a, b) => a - b);
+  const n = sorted.length;
+  // 5 cut-points at the 0th, 17th, 33rd, 50th, 67th, 83rd, 100th percentiles
+  // → 6 bands
+  const pct = [0, 1/6, 2/6, 3/6, 4/6, 5/6];
+  const cuts = pct.map(p => {
+    const idx = Math.floor(p * (n - 1));
+    return sorted[idx];
+  });
+
+  function tier(roi) {
+    // Find the highest band whose cut-point is ≤ roi
+    let band = 0;
+    for (let i = 1; i < cuts.length; i++) {
+      if (roi >= cuts[i]) band = i;
+    }
+    return TIER_NAMES[band];
+  }
+
+  function color(roi) {
+    let band = 0;
+    for (let i = 1; i < cuts.length; i++) {
+      if (roi >= cuts[i]) band = i;
+    }
+    return TIER_COLORS[band];
+  }
+
+  return { tier, color, cuts };
 }

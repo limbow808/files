@@ -1,7 +1,7 @@
 import { useState, useRef, Fragment, useMemo } from 'react';
 import { useApi } from '../hooks/useApi';
 import { useCalcProgress } from '../hooks/useCalcProgress';
-import { fmtISK, fmtVol, fmtDuration, toggleSet, roiTier } from '../utils/fmt';
+import { fmtISK, fmtVol, fmtDuration, toggleSet, roiTier, makeRoiScale } from '../utils/fmt';
 import SystemInput from '../components/SystemInput';
 import EsiBlueprintPanel from '../components/EsiBlueprintPanel';
 import BpFinderPanel from '../components/BpFinderPanel';
@@ -152,6 +152,13 @@ export default function CalculatorPage({ refreshKey = 0 }) {
     if (typeof av === 'string') return sortDir * av.localeCompare(bv);
     return sortDir * ((av || 0) - (bv || 0));
   });
+
+  // Build dynamic colour scale from the currently visible results
+  const roiScale = useMemo(
+    () => makeRoiScale((calcData?.results || []).map(r => r.roi || 0)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [calcData]
+  );
 
   const checkedItems = results.filter(r => checkedIds.has(r.output_id));
 
@@ -318,7 +325,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                 const runs     = Math.max(1, parseInt(getOverrideRaw(r.output_id, 'runs', 1),             10) || 1);
                 const totalTax = (r.sales_tax || 0) + (r.broker_fee || 0);
                 const roi      = r.roi || 0;
-                const tier     = roiTier(roi);
+                const tier     = roiScale.tier(roi);
 
                 return (
                   <Fragment key={r.output_id ?? i}>
@@ -381,7 +388,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                       <td>{fmtISK(r.isk_per_hour)}</td>
                       <td>{r.isk_per_m3 ? fmtISK(r.isk_per_m3) : '—'}</td>
                     </tr>
-                    {isSel && <CalcDetailPanel item={r} charSkills={charSkills} />}
+                    {isSel && <CalcDetailPanel item={r} charSkills={charSkills} roiColorFn={roiScale.color} />}
                   </Fragment>
                 );
               })

@@ -14,11 +14,11 @@ function SkillPips({ have, need }) {
   );
 }
 
-export default function CalcDetailPanel({ item, charSkills }) {
+export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
   const materials = item.material_breakdown || [];
   const skills    = item.required_skills    || [];
   const roi       = item.roi || 0;
-  const tierColor = roiColor(roi);
+  const tierColor = (roiColorFn ?? roiColor)(roi);
 
   let skillStatus = null;
   if (charSkills && skills.length > 0) {
