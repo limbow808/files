@@ -3,6 +3,7 @@ import Header from './components/Header';
 import OverviewPage from './pages/OverviewPage';
 import CalculatorPage from './pages/CalculatorPage';
 import CharactersPage from './pages/CharactersPage';
+import BpFinderPage from './pages/BpFinderPage';
 import { useApi } from './hooks/useApi';
 
 export const API = '';
@@ -54,6 +55,9 @@ export default function App() {
         </div>
         <div style={{ display: activeTab === 'CHARACTERS' ? 'contents' : 'none' }}>
           <CharactersPage />
+        </div>
+        <div style={{ display: activeTab === 'BP FINDER' ? 'contents' : 'none' }}>
+          <BpFinderPage refreshKey={refreshKey} />
         </div>
       </div>
     </div>

@@ -13,6 +13,20 @@ const ACTIVITY_COLORS = {
   'Invention':     '#44ffaa',
 };
 
+// Display chips: 'Research' groups ME Research + TE Research into one button
+const CHIP_LABELS = ['Manufacturing', 'Reaction', 'Reactions', 'Research', 'Copying', 'Invention'];
+
+// Map chip label → actual activity names in ESI data
+const CHIP_TO_ACTIVITIES = {
+  'Manufacturing': ['Manufacturing'],
+  'Reaction':      ['Reaction'],
+  'Reactions':     ['Reactions'],
+  'Research':      ['ME Research', 'TE Research'],
+  'Copying':       ['Copying'],
+  'Invention':     ['Invention'],
+};
+
+// Which activities count as "manufacturing" for showRuns/showSell
 const MFG_ACTIVITIES      = new Set(['Manufacturing', 'Reaction']);
 const RESEARCH_ACTIVITIES = new Set(['TE Research', 'ME Research', 'Copying', 'Invention']);
 
@@ -174,8 +188,9 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
 
 export default function ManufacturingJobs() {
   const { data, loading, error } = useApi('/api/industry/jobs');
-  const [now, setNow]   = useState(() => Math.floor(Date.now() / 1000));
-  const [tab, setTab]   = useState('MFG');   // 'MFG' | 'RESEARCH'
+  const [now, setNow]       = useState(() => Math.floor(Date.now() / 1000));
+  // Selected chip filters — default to Manufacturing + Reaction
+  const [activeFilters, setActiveFilters] = useState(new Set(['Manufacturing', 'Reaction']));
 
   // Live countdown tick
   useEffect(() => {
@@ -198,9 +213,36 @@ export default function ManufacturingJobs() {
     if (unique.length) seedCharColors(unique);
   }, [jobs]);
 
-  const mfgJobs      = jobs.filter(j => MFG_ACTIVITIES.has(j.activity));
-  const researchJobs = jobs.filter(j => RESEARCH_ACTIVITIES.has(j.activity));
-  const visibleJobs  = tab === 'MFG' ? mfgJobs : researchJobs;
+  // Count per chip (Research = ME + TE combined)
+  const countByChip = {};
+  CHIP_LABELS.forEach(chip => { countByChip[chip] = 0; });
+  jobs.forEach(j => {
+    for (const [chip, acts] of Object.entries(CHIP_TO_ACTIVITIES)) {
+      if (acts.includes(j.activity)) { countByChip[chip]++; break; }
+    }
+  });
+
+  function toggleFilter(chip) {
+    setActiveFilters(prev => {
+      const next = new Set(prev);
+      if (next.has(chip)) {
+        if (next.size === 1) return prev; // keep at least one
+        next.delete(chip);
+      } else {
+        next.add(chip);
+      }
+      return next;
+    });
+  }
+
+  // Expand active chip labels → actual activity names for filtering
+  const activeActivityNames = new Set(
+    [...activeFilters].flatMap(chip => CHIP_TO_ACTIVITIES[chip] || [chip])
+  );
+  const visibleJobs = jobs.filter(j => activeActivityNames.has(j.activity));
+
+  // showRuns/showSell only when all visible jobs are MFG activities
+  const allMfg = visibleJobs.every(j => MFG_ACTIVITIES.has(j.activity));
 
   // Detect multi-character for visible set
   const uniqueChars = new Set(visibleJobs.map(j => j.character_id).filter(Boolean));
@@ -211,18 +253,23 @@ export default function ManufacturingJobs() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* Header: chips on the left, status counter on the right */}
+      {/* Header: activity filter chips on the left, status counter on the right */}
       <div className="panel-hdr">
-        <div style={{ display: 'flex', gap: 4 }}>
-          {[['MFG', `MANUFACTURING (${mfgJobs.length})`], ['RESEARCH', `RESEARCH (${researchJobs.length})`]].map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => setTab(key)}
-              className={`chip${tab === key ? ' active' : ''}`}
-            >
-              {label}
-            </button>
-          ))}
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {CHIP_LABELS.map(chip => {
+            const isActive = activeFilters.has(chip);
+            const count = countByChip[chip] || 0;
+            return (
+              <button
+                key={chip}
+                onClick={() => toggleFilter(chip)}
+                className={`chip${isActive ? ' active' : ''}`}
+                title={`${chip} (${count})`}
+              >
+                {chip.toUpperCase()}{count > 0 ? ` (${count})` : ''}
+              </button>
+            );
+          })}
         </div>
         <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
           {loading ? '' : `${activeCount} ACTIVE · ${completeCount} READY`}
@@ -246,13 +293,13 @@ export default function ManufacturingJobs() {
             jobs={visibleJobs}
             now={now}
             multiChar={multiChar}
-            showRuns={tab === 'MFG'}
-            showSell={tab === 'MFG'}
+            showRuns={allMfg}
+            showSell={allMfg}
           />
         )}
       </div>
 
-      {tab === 'MFG' && !loading && visibleJobs.length > 0 && (
+      {allMfg && !loading && visibleJobs.length > 0 && (
         <SummaryBar jobs={visibleJobs} />
       )}
     </div>

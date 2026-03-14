@@ -4,7 +4,6 @@ import { useCalcProgress } from '../hooks/useCalcProgress';
 import { fmtISK, fmtVol, fmtDuration, toggleSet, roiTier, makeRoiScale } from '../utils/fmt';
 import SystemInput from '../components/SystemInput';
 import EsiBlueprintPanel from '../components/EsiBlueprintPanel';
-import BpFinderPanel from '../components/BpFinderPanel';
 import CalcDetailPanel from '../components/CalcDetailPanel';
 import ShoppingList from '../components/ShoppingList';
 import { API } from '../App';
@@ -64,7 +63,6 @@ export default function CalculatorPage({ refreshKey = 0 }) {
   const [overrides,    setOverrides]    = useState({});
   const [selectedIdx,  setSelectedIdx]  = useState(null);
   const [showEsiBps,   setShowEsiBps]   = useState(false);
-  const [showBpFinder, setShowBpFinder] = useState(false);
   const [checkedIds,   setCheckedIds]   = useState(new Set());
   const [retryKey,     setRetryKey]     = useState(0);
 
@@ -153,12 +151,9 @@ export default function CalculatorPage({ refreshKey = 0 }) {
     return sortDir * ((av || 0) - (bv || 0));
   });
 
-  // Build dynamic colour scale from the currently visible results
-  const roiScale = useMemo(
-    () => makeRoiScale((calcData?.results || []).map(r => r.roi || 0)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [calcData]
-  );
+  // Build dynamic colour scale from the currently visible (filtered) results
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const roiScale = useMemo(() => makeRoiScale(results.map(r => r.roi || 0)), [results]);
 
   const checkedItems = results.filter(r => checkedIds.has(r.output_id));
 
@@ -226,12 +221,6 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                   onClick={() => setShowEsiBps(v => !v)}
                   style={{ padding: '3px 14px', fontSize: 11 }}
                 >ESI BPs</button>
-                <button
-                  className={`btn${showBpFinder ? ' btn-primary' : ''}`}
-                  onClick={() => setShowBpFinder(v => !v)}
-                  style={{ padding: '3px 14px', fontSize: 11 }}
-                  title="Find blueprints available on contracts for profitable unowned items"
-                >BP FINDER</button>
               </div>
             </div>
           </div>
@@ -268,13 +257,6 @@ export default function CalculatorPage({ refreshKey = 0 }) {
         </div>
 
         {showEsiBps && <EsiBlueprintPanel />}
-
-        {showBpFinder && (
-          <BpFinderPanel
-            calcResults={calcData?.results || []}
-            esiBpMap={esiBpMap}
-          />
-        )}
 
         <div className="calc-search-bar">
           <span style={{ color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>SEARCH</span>

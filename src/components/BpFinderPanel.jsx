@@ -10,10 +10,35 @@ const REGION_OPTIONS = [
   { id: 10000030, name: 'Heimatar (Hek)'    },
 ];
 
-const SORT_OPTS = [
-  { key: 'net_profit',   label: 'PROFIT'  },
-  { key: 'roi',          label: 'ROI'     },
-  { key: 'isk_per_hour', label: 'ISK/HR'  },
+// Columns sortable in the scan results table
+// asc: true = sort ascending when active (e.g. breakeven: fewer runs = better)
+const SCAN_COLS = [
+  { key: 'name',           label: 'ITEM',           asc: false, sortable: false },
+  { key: 'bp_type',        label: 'TYPE',           asc: false, sortable: false },
+  { key: 'me',             label: 'ME',             asc: false, sortable: true  },
+  { key: 'te',             label: 'TE',             asc: false, sortable: true  },
+  { key: 'price',          label: 'CONTRACT PRICE', asc: false, sortable: true  },
+  { key: 'material_cost',  label: 'MAT COST',       asc: false, sortable: true  },
+  { key: 'gross_revenue',  label: 'REVENUE',        asc: false, sortable: true  },
+  { key: 'net_profit',     label: 'PROFIT/RUN',     asc: false, sortable: true  },
+  { key: 'roi',            label: 'ROI',            asc: false, sortable: true  },
+  { key: 'isk_per_hour',   label: 'ISK/HR',         asc: false, sortable: true  },
+  { key: 'breakeven_runs', label: 'BREAKEVEN',      asc: true,  sortable: true  },
+  { key: 'links',          label: 'LINKS',          asc: false, sortable: false },
+];
+
+// Columns sortable in the list (unowned items) table
+const LIST_COLS = [
+  { key: 'name',          label: 'ITEM',    asc: false, sortable: false },
+  { key: 'category',      label: 'CAT',     asc: false, sortable: true  },
+  { key: 'tech',          label: 'TECH',    asc: false, sortable: true  },
+  { key: 'avg_daily_volume', label: 'DEMAND', asc: false, sortable: true },
+  { key: 'material_cost', label: 'COST',    asc: false, sortable: true  },
+  { key: 'gross_revenue', label: 'REVENUE', asc: false, sortable: true  },
+  { key: 'net_profit',    label: 'PROFIT',  asc: false, sortable: true  },
+  { key: 'roi',           label: 'ROI',     asc: false, sortable: true  },
+  { key: 'isk_per_hour',  label: 'ISK/HR',  asc: false, sortable: true  },
+  { key: 'actions',       label: 'ACTIONS', asc: false, sortable: false },
 ];
 
 /**
@@ -26,17 +51,21 @@ const SORT_OPTS = [
  *   esiBpMap     - { lowercaseName: {hasBPO, hasBPC} } from parent
  */
 export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
-  const [sortKey,    setSortKey]    = useState('net_profit');
-  const [region,     setRegion]     = useState(10000002);
-  const [copiedId,   setCopiedId]   = useState(null);
-  const [search,     setSearch]     = useState('');
-  const [limit,      setLimit]      = useState(50);
+  const [listSortKey,  setListSortKey]  = useState('net_profit');
+  const [scanSortKey,  setScanSortKey]  = useState('net_profit');
+  const [region,       setRegion]       = useState(10000002);
+  const [copiedId,     setCopiedId]     = useState(null);
+  const [search,       setSearch]       = useState('');
+  const [limit,        setLimit]        = useState(50);
 
   // ── Market scan state ─────────────────────────────────────────────────────
-  const [scanState,   setScanState]   = useState('idle'); // idle | scanning | done | error
-  const [scanResults, setScanResults] = useState(null);   // null or { results, matched, pages_scanned, contracts_checked }
+  const [scanState,   setScanState]   = useState('idle');
+  const [scanResults, setScanResults] = useState(null);
   const [scanError,   setScanError]   = useState('');
-  const [scanView,    setScanView]    = useState(false);  // show scan results panel instead of main list
+  const [scanView,    setScanView]    = useState(false);
+  const [showBpo, setShowBpo] = useState(true);
+  const [showBpc, setShowBpc] = useState(true);
+  const [maxPages, setMaxPages] = useState(20);
 
   // Filter to unowned items: no personal ESI BP
   const unownedItems = useMemo(() => {
@@ -50,9 +79,9 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
       list = list.filter(r => r.name.toLowerCase().includes(q));
     }
 
-    list = [...list].sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
+    list = [...list].sort((a, b) => (b[listSortKey] || 0) - (a[listSortKey] || 0));
     return list.slice(0, limit);
-  }, [calcResults, esiBpMap, search, sortKey, limit]);
+  }, [calcResults, esiBpMap, search, listSortKey, limit]);
 
   function copyName(name, id) {
     navigator.clipboard.writeText(name).then(() => {
@@ -61,12 +90,13 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
     });
   }
 
-  function contractsUrl(blueprintId, name) {
-    // Eve Workbench market sell page — works with type_id
+  function contractsUrl(blueprintId) {
+    // Eve Workbench market sell page for the blueprint type
     return `https://www.eveworkbench.com/market/sell/${blueprintId}`;
   }
 
   function fuzzworkUrl(outputId) {
+    // Fuzzwork for the OUTPUT (crafted product) — shows actual market listings
     return `https://market.fuzzwork.co.uk/type/${outputId}/`;
   }
 
@@ -76,7 +106,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
     setScanResults(null);
     setScanView(true);
     try {
-      const params = new URLSearchParams({ region_id: region, max_pages: 5 });
+      const params = new URLSearchParams({ region_id: region, max_pages: maxPages });
       const resp = await fetch(`${API}/api/bpo_market_scan?${params}`);
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
@@ -91,13 +121,44 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
 
   const notReady = calcResults.length === 0;
 
+  const filteredScanResults = useMemo(() => {
+    if (!scanResults) return [];
+    let list = scanResults.results
+      .filter(r => (r.roi || 0) >= 1)   // hide useless <1% ROI results
+      .map(r => ({
+        ...r,
+        breakeven_runs: (r.net_profit > 0 && r.price > 0)
+          ? Math.ceil(r.price / r.net_profit)
+          : null,
+      }));
+    if (!showBpo) list = list.filter(r =>  r.is_bpc);
+    if (!showBpc) list = list.filter(r => !r.is_bpc);
+    const col = SCAN_COLS.find(c => c.key === scanSortKey);
+    const ascending = col?.asc ?? false;
+    if (scanSortKey === 'breakeven_runs') {
+      list = [...list].sort((a, b) => {
+        if (a.breakeven_runs === null && b.breakeven_runs === null) return 0;
+        if (a.breakeven_runs === null) return 1;
+        if (b.breakeven_runs === null) return -1;
+        return a.breakeven_runs - b.breakeven_runs;
+      });
+    } else {
+      list = [...list].sort((a, b) =>
+        ascending
+          ? (a[scanSortKey] || 0) - (b[scanSortKey] || 0)
+          : (b[scanSortKey] || 0) - (a[scanSortKey] || 0)
+      );
+    }
+    return list;
+  }, [scanResults, showBpo, showBpc, scanSortKey]);
+
   return (
     <div className="bp-finder-panel">
       {/* Header */}
       <div className="bp-finder-header">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div>
-            <span className="bp-finder-title">◈ BP FINDER</span>
+            <span className="bp-finder-title">BP FINDER</span>
             <span className="bp-finder-sub" style={{ marginLeft: 12 }}>
               Profitable items with no owned blueprint
             </span>
@@ -109,14 +170,14 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                 className={`chip${scanView ? '' : ' active'}`}
                 onClick={() => setScanView(false)}
                 style={{ fontSize: 10 }}
-              >📋 LIST</button>
+              >LIST</button>
             )}
             {scanResults && (
               <button
                 className={`chip${scanView ? ' active' : ''}`}
                 onClick={() => setScanView(true)}
                 style={{ fontSize: 10 }}
-              >⚡ SCAN RESULTS ({scanResults.matched})</button>
+              >SCAN RESULTS ({scanResults.matched})</button>
             )}
             {/* Scan button */}
             <button
@@ -130,23 +191,36 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                 color:       scanState === 'scanning' ? 'var(--accent)' : undefined,
               }}
             >
-              {scanState === 'scanning' ? '⏳ SCANNING…' : '⚡ SCAN MARKET'}
+              {scanState === 'scanning' ? 'SCANNING…' : 'SCAN CONTRACTS'}
             </button>
           </div>
         </div>
 
         <div className="bp-finder-controls">
-          {/* Sort */}
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 2 }}>SORT</span>
-            {SORT_OPTS.map(o => (
-              <button
-                key={o.key}
-                className={`chip${sortKey === o.key ? ' active' : ''}`}
-                onClick={() => setSortKey(o.key)}
-              >{o.label}</button>
-            ))}
-          </div>
+          {/* BP Type filter — only relevant when scan view is active */}
+          {scanView && scanResults && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 2 }}>SHOW</span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 11,
+                              color: showBpo ? '#4cff91' : 'var(--dim)' }}>
+                <input type="checkbox" checked={showBpo} onChange={e => {
+                  // prevent both being unchecked
+                  if (!e.target.checked && !showBpc) return;
+                  setShowBpo(e.target.checked);
+                }} style={{ accentColor: '#4cff91' }} />
+                BPO
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 11,
+                              color: showBpc ? '#ffcc00' : 'var(--dim)' }}>
+                <input type="checkbox" checked={showBpc} onChange={e => {
+                  // prevent both being unchecked
+                  if (!e.target.checked && !showBpo) return;
+                  setShowBpc(e.target.checked);
+                }} style={{ accentColor: '#ffcc00' }} />
+                BPC
+              </label>
+            </div>
+          )}
 
           {/* Region for scan + links */}
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -161,6 +235,19 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                 <option key={r.id} value={r.id}>{r.name}</option>
               ))}
             </select>
+          </div>
+
+          {/* Pages to scan */}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 2 }}>PAGES</span>
+            {[5, 10, 20].map(n => (
+              <button
+                key={n}
+                className={`chip${maxPages === n ? ' active' : ''}`}
+                onClick={() => setMaxPages(n)}
+                title={`Scan ${n * 1000} contracts`}
+              >{n}</button>
+            ))}
           </div>
 
           {/* Limit */}
@@ -192,42 +279,58 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
         {/* Scanning spinner */}
         {scanView && scanState === 'scanning' && (
           <div style={{ padding: '32px 20px', textAlign: 'center', color: 'var(--accent)', fontSize: 11, letterSpacing: 2 }}>
-            ⏳ SCANNING ESI PUBLIC CONTRACTS… this may take 15–30 seconds
+            SCANNING ESI PUBLIC CONTRACTS… this may take 15–30 seconds
           </div>
         )}
 
         {/* Scan error */}
         {scanView && scanState === 'error' && (
           <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--accent)', fontSize: 11, letterSpacing: 2 }}>
-            ⚠ {scanError}
+            ERROR: {scanError}
           </div>
         )}
 
         {/* Scan results table */}
         {scanView && scanState === 'done' && scanResults && (
           <>
-            {scanResults.results.length === 0 ? (
+            {filteredScanResults.length === 0 ? (
               <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
-                NO BPO CONTRACTS FOUND — tried {scanResults.contracts_checked?.toLocaleString()} contracts across {scanResults.pages_scanned} pages
+                {scanResults.results.length === 0
+                  ? `NO BLUEPRINT CONTRACTS FOUND — tried ${scanResults.contracts_checked?.toLocaleString()} contracts across ${scanResults.pages_scanned} pages`
+                  : `NO ${bpTypeFilter.toUpperCase()} CONTRACTS IN RESULTS — try ALL or a different filter`
+                }
               </div>
             ) : (
               <table className="bp-finder-table">
                 <thead>
                   <tr>
-                    <th style={{ textAlign: 'left' }}>ITEM</th>
-                    <th>ME</th>
-                    <th>TE</th>
-                    <th style={{ color: 'var(--accent)' }}>BPO PRICE</th>
-                    <th>MAT COST</th>
-                    <th>REVENUE</th>
-                    <th style={{ color: '#4cff91' }}>PROFIT/RUN</th>
-                    <th style={{ color: '#4cff91' }}>ROI</th>
-                    <th style={{ color: '#4cff91' }}>ISK/HR</th>
-                    <th style={{ textAlign: 'center' }}>LINKS</th>
+                    {SCAN_COLS.map(col => {
+                      const active = scanSortKey === col.key;
+                      const arrow  = active ? (col.asc ? ' ▲' : ' ▼') : '';
+                      return (
+                        <th
+                          key={col.key}
+                          style={{
+                            textAlign: col.key === 'name' ? 'left' : undefined,
+                            cursor: col.sortable ? 'pointer' : undefined,
+                            color: active ? 'var(--text)'
+                                 : ['net_profit','roi','isk_per_hour','breakeven_runs'].includes(col.key) ? '#4cff91'
+                                 : col.key === 'price' ? 'var(--accent)'
+                                 : undefined,
+                            userSelect: 'none',
+                            whiteSpace: 'nowrap',
+                          }}
+                          onClick={col.sortable ? () => setScanSortKey(col.key) : undefined}
+                          title={col.key === 'breakeven_runs' ? 'Runs needed to recoup BP contract price' : undefined}
+                        >
+                          {col.label}{arrow}
+                        </th>
+                      );
+                    })}
                   </tr>
                 </thead>
                 <tbody>
-                  {scanResults.results.map(r => (
+                  {filteredScanResults.map(r => (
                     <tr key={`${r.contract_id}-${r.blueprint_id}`} className="bp-finder-row">
                       <td style={{ textAlign: 'left' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -240,15 +343,26 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                           <span
                             className="bp-finder-name"
                             title="Click to copy blueprint name"
-                            onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
+                            onClick={() => copyName(r.name + (r.is_bpc ? ' Blueprint Copy' : ' Blueprint'), r.output_id)}
                           >
                             {r.name}
-                            {copiedId === r.output_id && <span className="copy-flash"> ✓</span>}
+                            {copiedId === r.output_id && <span className="copy-flash"> COPIED</span>}
                           </span>
                           {r.already_owned && (
-                            <span style={{ fontSize: 9, color: '#4cff91', letterSpacing: 1, marginLeft: 4, opacity: 0.7 }}>✓OWN</span>
+                            <span style={{ fontSize: 9, color: '#4cff91', letterSpacing: 1, marginLeft: 4, opacity: 0.7 }}>OWNED</span>
                           )}
                         </div>
+                      </td>
+                      <td>
+                        <span style={{
+                          fontSize: 9, fontWeight: 700, letterSpacing: 1, padding: '1px 5px',
+                          borderRadius: 3,
+                          background: r.is_bpc ? 'rgba(255,200,0,0.15)' : 'rgba(76,255,145,0.12)',
+                          color:      r.is_bpc ? '#ffcc00'              : '#4cff91',
+                          border:     r.is_bpc ? '1px solid #ffcc0060'  : '1px solid #4cff9160',
+                        }}>
+                          {r.is_bpc ? 'BPC' : 'BPO'}
+                        </span>
                       </td>
                       <td style={{ color: r.me >= 10 ? '#4cff91' : 'var(--text)' }}>
                         {r.me}
@@ -264,25 +378,36 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                       <td className="profit-val">{fmtISK(r.net_profit)}</td>
                       <td className="profit-val">{(r.roi || 0).toFixed(1)}%</td>
                       <td>{r.isk_per_hour ? fmtISK(r.isk_per_hour) : '—'}</td>
+                      <td style={{
+                        color: r.breakeven_runs === null ? 'var(--dim)'
+                             : r.breakeven_runs <= 10   ? '#4cff91'
+                             : r.breakeven_runs <= 50   ? 'var(--text)'
+                             : '#ffcc00',
+                        fontWeight: r.breakeven_runs !== null ? 600 : undefined,
+                      }}
+                        title={r.breakeven_runs ? `${r.breakeven_runs} runs to recoup BP cost` : 'N/A'}
+                      >
+                        {r.breakeven_runs !== null ? `${r.breakeven_runs.toLocaleString()} runs` : '—'}
+                      </td>
                       <td>
                         <div className="bp-finder-actions">
                           <button
                             className="bp-action-btn"
                             title={`Copy "${r.name} Blueprint" to clipboard`}
                             onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
-                          >{copiedId === r.output_id ? '✓' : '📋'}</button>
+                          >{copiedId === r.output_id ? 'OK' : 'COPY'}</button>
                           <a
                             className="bp-action-btn bp-action-link"
-                            href={contractsUrl(r.blueprint_id, r.name)}
+                            href={`https://www.eveworkbench.com/market/sell/${r.blueprint_id}`}
                             target="_blank" rel="noopener noreferrer"
                             title="View blueprint on Eve Workbench market"
-                          >🔍</a>
+                          >EWB</a>
                           <a
                             className="bp-action-btn bp-action-link"
                             href={fuzzworkUrl(r.output_id)}
                             target="_blank" rel="noopener noreferrer"
                             title="View manufactured item on Fuzzwork"
-                          >📈</a>
+                          >FW</a>
                         </div>
                       </td>
                     </tr>
@@ -308,16 +433,27 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
           <table className="bp-finder-table">
             <thead>
               <tr>
-                <th style={{ textAlign: 'left' }}>ITEM</th>
-                <th>CAT</th>
-                <th>TECH</th>
-                <th>DEMAND</th>
-                <th>COST</th>
-                <th>REVENUE</th>
-                <th style={{ color: '#4cff91' }}>PROFIT</th>
-                <th style={{ color: '#4cff91' }}>ROI</th>
-                <th style={{ color: '#4cff91' }}>ISK/HR</th>
-                <th style={{ textAlign: 'center' }}>ACTIONS</th>
+                {LIST_COLS.map(col => {
+                  const active = listSortKey === col.key;
+                  const arrow  = active ? ' ▼' : '';
+                  return (
+                    <th
+                      key={col.key}
+                      style={{
+                        textAlign: col.key === 'name' ? 'left' : undefined,
+                        cursor: col.sortable ? 'pointer' : undefined,
+                        color: active ? 'var(--text)'
+                             : ['net_profit','roi','isk_per_hour'].includes(col.key) ? '#4cff91'
+                             : undefined,
+                        userSelect: 'none',
+                        whiteSpace: 'nowrap',
+                      }}
+                      onClick={col.sortable ? () => setListSortKey(col.key) : undefined}
+                    >
+                      {col.label}{arrow}
+                    </th>
+                  );
+                })}
               </tr>
             </thead>
             <tbody>
@@ -337,7 +473,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                         onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
                       >
                         {r.name}
-                        {copiedId === r.output_id && <span className="copy-flash"> ✓</span>}
+                        {copiedId === r.output_id && <span className="copy-flash"> COPIED</span>}
                       </span>
                     </div>
                   </td>
@@ -355,19 +491,19 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                         className="bp-action-btn"
                         title={`Copy "${r.name} Blueprint" to clipboard`}
                         onClick={() => copyName(r.name + ' Blueprint', r.output_id)}
-                      >{copiedId === r.output_id ? '✓' : '📋'}</button>
+                      >{copiedId === r.output_id ? 'COPIED' : 'COPY'}</button>
                       <a
                         className="bp-action-btn bp-action-link"
                         href={contractsUrl(r.blueprint_id, r.name)}
                         target="_blank" rel="noopener noreferrer"
                         title="View blueprint on Eve Workbench market"
-                      >🔍</a>
+                      >EWB</a>
                       <a
                         className="bp-action-btn bp-action-link"
                         href={fuzzworkUrl(r.output_id)}
                         target="_blank" rel="noopener noreferrer"
                         title="View manufactured item on Fuzzwork"
-                      >📈</a>
+                      >FW</a>
                     </div>
                   </td>
                 </tr>
@@ -381,19 +517,30 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
       <div className="bp-finder-footer">
         {scanView && scanState === 'done' && scanResults ? (
           <>
-            {scanResults.matched} BPO{scanResults.matched !== 1 ? 'S' : ''} FOUND
+            {(() => {
+              const bpos = scanResults.results.filter(r => !r.is_bpc).length;
+              const bpcs = scanResults.results.filter(r => r.is_bpc).length;
+              return (
+                <>
+                  {bpos > 0 && <span style={{ color: '#4cff91' }}>{bpos} BPO{bpos !== 1 ? 'S' : ''}</span>}
+                  {bpos > 0 && bpcs > 0 && <span style={{ color: 'var(--dim)', margin: '0 4px' }}>·</span>}
+                  {bpcs > 0 && <span style={{ color: '#ffcc00' }}>{bpcs} BPC{bpcs !== 1 ? 'S' : ''}</span>}
+                  {' '}FOUND
+                </>
+              );
+            })()}
             <span style={{ color: 'var(--dim)', marginLeft: 8 }}>
               · {scanResults.contracts_checked?.toLocaleString()} contracts checked across {scanResults.pages_scanned} pages
             </span>
             <span style={{ color: 'var(--dim)', marginLeft: 8 }}>
-              · ME/TE highlighted green at max (10/20)
+              · BPO <span style={{ color: '#4cff91' }}>green</span> · BPC <span style={{ color: '#ffcc00' }}>yellow</span> · ME/TE max highlighted green (10/20)
             </span>
           </>
         ) : !scanView && !notReady && unownedItems.length > 0 ? (
           <>
             {unownedItems.length} ITEM{unownedItems.length !== 1 ? 'S' : ''} WITHOUT BLUEPRINT
             <span style={{ marginLeft: 12, color: 'var(--dim)' }}>
-              click 📋 to copy name · 🔍 Eve Workbench market · 📈 Fuzzwork · ⚡ to scan live contracts
+              click COPY to copy name · EWB for Eve Workbench market · FW for Fuzzwork · SCAN CONTRACTS for live contracts
             </span>
           </>
         ) : null}

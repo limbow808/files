@@ -28,6 +28,39 @@ from database import save_scan, record_wallet_snapshot, record_wealth_snapshot, 
 app = Flask(__name__)
 CORS(app)  # Allow React dev server (localhost:3000 / file://) to call the API
 
+# ── Corp BPO static fallback ──────────────────────────────────────────────────
+# Loaded once at startup from src/corp_BPOs (tab-separated, col 0 = BP name).
+# Used when ESI corp blueprints endpoint returns 403 (insufficient role).
+def _load_corp_bpo_type_ids() -> set:
+    """Parse src/corp_BPOs and return a set of blueprint type_ids via crest.db lookup."""
+    result = set()
+    try:
+        import sqlite3 as _sq
+        _base = os.path.dirname(__file__)
+        _txt  = os.path.join(_base, "src", "corp_BPOs")
+        _db   = os.path.join(_base, "crest.db")
+        if not os.path.exists(_txt) or not os.path.exists(_db):
+            return result
+        con = _sq.connect(_db)
+        cur = con.cursor()
+        cur.execute("SELECT blueprint_id, output_name FROM blueprints")
+        name_to_id = {(row[1].strip() + " Blueprint").lower(): row[0] for row in cur.fetchall()}
+        con.close()
+        with open(_txt, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if not parts or not parts[0].strip():
+                    continue
+                key = parts[0].strip().lower()
+                if key in name_to_id:
+                    result.add(name_to_id[key])
+        print(f"  [corp_BPOs] Loaded {len(result)} unique corp BP type_ids from static file.")
+    except Exception as e:
+        print(f"  [corp_BPOs] Failed to load static file: {e}")
+    return result
+
+CORP_BPO_TYPE_IDS: set = _load_corp_bpo_type_ids()
+
 # ── PLEX config ───────────────────────────────────────────────────────────────
 PLEX_CONFIG = {
     "accounts":         6,
@@ -1025,7 +1058,7 @@ def api_bpo_market_scan():
         region_id  = int(_freq.args.get("region_id", 10000002))
         system     = _freq.args.get("system",   "Korsiki")
         facility   = _freq.args.get("facility", "large")
-        max_pages  = min(int(_freq.args.get("max_pages", 5)), 20)
+        max_pages  = min(int(_freq.args.get("max_pages", 20)), 40)
 
         # ── 1. Get calc results from cache ─────────────────────────────────────
         cache_key = _calc_cache_key(system, facility)
@@ -1052,10 +1085,13 @@ def api_bpo_market_scan():
 
         # Personal ESI BPs (for flagging already-owned in results)
         personal_bp_ids = set()
+        corp_bp_ids = set(CORP_BPO_TYPE_IDS)  # start with static fallback
         try:
             from characters import get_all_auth_headers
             import requests as _ureq2
+            seen_corp_ids_scan = set()
             for cid, headers in get_all_auth_headers():
+                # Personal BPs
                 resp_p = _ureq2.get(
                     f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
                     headers=headers, timeout=10
@@ -1063,13 +1099,38 @@ def api_bpo_market_scan():
                 if resp_p.ok:
                     for bp in resp_p.json():
                         personal_bp_ids.add(bp.get("type_id"))
+                # Corp BPs via ESI (may fail with 403 if insufficient role)
+                try:
+                    corp_resp = _ureq2.get(
+                        f"https://esi.evetech.net/latest/characters/{cid}/",
+                        headers=headers, timeout=8
+                    )
+                    if corp_resp.ok:
+                        corp_id = corp_resp.json().get("corporation_id")
+                        if corp_id and corp_id not in seen_corp_ids_scan:
+                            seen_corp_ids_scan.add(corp_id)
+                            page = 1
+                            while True:
+                                cr = _ureq2.get(
+                                    f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
+                                    headers=headers,
+                                    params={"page": page},
+                                    timeout=15
+                                )
+                                if not cr.ok:
+                                    break  # static fallback already loaded above
+                                page_bps = cr.json()
+                                if not page_bps:
+                                    break
+                                for bp in page_bps:
+                                    corp_bp_ids.add(bp.get("type_id"))
+                                if len(page_bps) < 1000:
+                                    break
+                                page += 1
+                except Exception:
+                    pass
         except Exception:
             pass
-
-        # Corp BPs from crest.db
-        cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
-        corp_bp_ids = {r[0] for r in cdb.execute("SELECT blueprint_id FROM blueprints").fetchall()}
-        cdb.close()
 
         # Build: blueprint_id → calc row, for all profitable items
         bpid_to_calc = {}
@@ -1141,22 +1202,25 @@ def api_bpo_market_scan():
                 for item in items:
                     tid = item.get("type_id")
                     if tid in wanted_bp_ids and item.get("is_included", True):
+                        is_bpc = item.get("is_blueprint_copy", False)
                         return {
                             "contract":    contract,
                             "type_id":     tid,
                             "me":          item.get("material_efficiency", 0),
                             "te":          item.get("time_efficiency", 0),
                             "quantity":    item.get("quantity", 1),
+                            "is_bpc":      is_bpc,
                         }
             except Exception:
                 pass
             return None
 
-        # Only fetch items for contracts that look like they could be BPOs
-        # (single item, small volume, title hints — best-effort pre-filter)
+        # Only fetch items for contracts that look like they could contain BPs.
+        # Volume filter is intentionally generous — multi-item contracts can report
+        # higher volumes, and we deduplicate by cheapest price after matching anyway.
         bp_candidate_contracts = [
             c for c in all_contracts
-            if c.get("volume", 999) <= 10   # BPs are tiny (0.01 m3)
+            if c.get("volume", 999) <= 1000   # BPs are tiny but contracts can bundle items
         ]
 
         results = []
@@ -1177,6 +1241,7 @@ def api_bpo_market_scan():
                     "name":          calc_row.get("name", "?"),
                     "me":            match["me"],
                     "te":            match["te"],
+                    "is_bpc":        match.get("is_bpc", False),
                     "contract_id":   contract["contract_id"],
                     "price":         contract.get("price", 0),
                     "location_id":   contract.get("start_location_id"),
@@ -1192,6 +1257,26 @@ def api_bpo_market_scan():
                     "category":      calc_row.get("category", ""),
                     "tech":          calc_row.get("tech", ""),
                 })
+
+        # Deduplicate by blueprint_id — keep only the cheapest contract per BP
+        # Also track how many listings were found per BP for debugging
+        all_by_bpid = {}
+        for r in results:
+            bpid = r["blueprint_id"]
+            if bpid not in all_by_bpid:
+                all_by_bpid[bpid] = []
+            all_by_bpid[bpid].append(r)
+
+        cheapest = {}
+        for bpid, entries in all_by_bpid.items():
+            entries.sort(key=lambda x: x["price"])
+            best = entries[0]
+            best["listing_count"] = len(entries)
+            best["cheapest_price"] = entries[0]["price"]
+            if len(entries) > 1:
+                print(f"  [dedup] {best['name']}: {len(entries)} listings, prices: {[e['price'] for e in entries]} → keeping {best['price']}")
+            cheapest[bpid] = best
+        results = list(cheapest.values())
 
         # Sort by net_profit desc
         results.sort(key=lambda x: x.get("net_profit", 0), reverse=True)
@@ -1253,17 +1338,26 @@ def api_ui_open_ingame():
 @app.route("/api/blueprints/corp", methods=["GET"])
 def api_blueprints_corp():
     """
-    Return the set of output_ids present in crest.db — these are the corp's blueprints.
+    Return the set of output_ids for blueprints in the corp stash.
+    Uses the static corp_BPOs file (loaded at startup into CORP_BPO_TYPE_IDS).
     Response: { output_ids: [int, ...], count: int }
     """
     try:
         import sqlite3 as _sq
         cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
-        rows = cdb.execute("SELECT output_id, output_name FROM blueprints").fetchall()
+        # Get output_id for each blueprint_id in the corp stash
+        if CORP_BPO_TYPE_IDS:
+            placeholders = ",".join("?" * len(CORP_BPO_TYPE_IDS))
+            rows = cdb.execute(
+                f"SELECT blueprint_id, output_id, output_name FROM blueprints WHERE blueprint_id IN ({placeholders})",
+                list(CORP_BPO_TYPE_IDS)
+            ).fetchall()
+        else:
+            rows = []
         cdb.close()
         return jsonify({
-            "output_ids": [r[0] for r in rows],
-            "names":      {r[0]: r[1] for r in rows},
+            "output_ids": [r[1] for r in rows],
+            "names":      {r[1]: r[2] for r in rows},
             "count":      len(rows),
         })
     except Exception as e:
@@ -1316,6 +1410,7 @@ def api_blueprints_esi():
                     corp_id = corp_resp.json().get("corporation_id")
                     if corp_id and corp_id not in seen_corp_ids:
                         seen_corp_ids.add(corp_id)
+                        esi_corp_ok = False
                         page = 1
                         while True:
                             cr = req.get(
@@ -1325,7 +1420,8 @@ def api_blueprints_esi():
                                 timeout=15
                             )
                             if not cr.ok:
-                                break
+                                break  # fall through to static fallback below
+                            esi_corp_ok = True
                             page_bps = cr.json()
                             if not page_bps:
                                 break
@@ -1338,6 +1434,23 @@ def api_blueprints_esi():
                             if len(page_bps) < 1000:
                                 break
                             page += 1
+                        # Static fallback: if ESI corp fetch failed (e.g. 403 no role),
+                        # inject corp BPOs from the static corp_BPOs file
+                        if not esi_corp_ok and CORP_BPO_TYPE_IDS:
+                            print(f"  [esi-bps] ESI corp fetch failed for {char_name} — using static corp_BPOs fallback ({len(CORP_BPO_TYPE_IDS)} BPOs)")
+                            for tid in CORP_BPO_TYPE_IDS:
+                                all_bps.append({
+                                    "type_id":          tid,
+                                    "material_efficiency": 10,
+                                    "time_efficiency":  20,
+                                    "runs":             -1,
+                                    "location_id":      None,
+                                    "quantity":         1,
+                                    "_character_id":    cid,
+                                    "_character_name":  char_name,
+                                    "_owner":           "corp",
+                                    "_corp_id":         corp_id,
+                                })
             except Exception as e:
                 print(f"  [esi-bps] corp failed for {char_name}: {e}")
 
@@ -1504,6 +1617,7 @@ def api_industry_jobs():
             4: "ME Research",
             5: "Copying",
             8: "Invention",
+            9: "Reactions",
             11: "Reaction",
         }
 
@@ -1514,6 +1628,9 @@ def api_industry_jobs():
         auth_headers = get_all_auth_headers()  # list of (cid, header_dict)
 
         all_jobs = []
+        seen_job_ids = set()
+        seen_corp_ids_jobs = set()
+
         for cid, headers in auth_headers:
             char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
             try:
@@ -1526,11 +1643,42 @@ def api_industry_jobs():
                 if not resp.ok:
                     continue
                 for j in resp.json():
-                    j["_character_id"]   = cid
-                    j["_character_name"] = char_name
-                    all_jobs.append(j)
+                    jid = j.get("job_id")
+                    if jid and jid not in seen_job_ids:
+                        seen_job_ids.add(jid)
+                        j["_character_id"]   = cid
+                        j["_character_name"] = char_name
+                        all_jobs.append(j)
             except Exception as e:
                 print(f"  [jobs] Failed for {char_name}: {e}")
+
+            # Also try corp jobs endpoint (requires esi-industry.read_corporation_jobs.v1)
+            try:
+                corp_resp = req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/",
+                    timeout=10,
+                )
+                corp_id = corp_resp.json().get("corporation_id") if corp_resp.ok else None
+                if corp_id and corp_id not in seen_corp_ids_jobs:
+                    cresp = req.get(
+                        f"https://esi.evetech.net/latest/corporations/{corp_id}/industry/jobs/",
+                        headers=headers,
+                        params={"include_completed": False},
+                        timeout=15,
+                    )
+                    if cresp.ok:
+                        seen_corp_ids_jobs.add(corp_id)  # only mark seen on success
+                        for j in cresp.json():
+                            jid = j.get("job_id")
+                            if jid and jid not in seen_job_ids:
+                                seen_job_ids.add(jid)
+                                installer_id = j.get("installer_id", cid)
+                                installer_name = char_records.get(installer_id, {}).get("character_name", char_name)
+                                j["_character_id"]   = installer_id
+                                j["_character_name"] = installer_name
+                                all_jobs.append(j)
+            except Exception as e:
+                print(f"  [jobs] Corp jobs failed for {char_name}: {e}")
 
         if not all_jobs:
             return jsonify({"jobs": []})
@@ -1655,14 +1803,16 @@ def api_industry_jobs():
 
             total_secs = max(1, end_ts - start_ts)
             secs_left = max(0, end_ts - now_ts)
-            pid = j.get("product_type_id")
+            activity_id = j.get("activity_id", 0)
+            # For Copying (5), ESI returns no product_type_id — the output is a BPC of the source blueprint
+            pid = j.get("product_type_id") or (j.get("blueprint_type_id") if activity_id == 5 else None)
             runs = j.get("runs", 1)
             p = market_prices.get(pid) if pid else None
             sell_price = p["sell"] if p and p.get("sell") else None
             result.append({
                 "job_id":            j.get("job_id"),
-                "activity":          ACTIVITY_NAMES.get(j.get("activity_id", 0), f"Activity {j.get('activity_id')}"),
-                "activity_id":       j.get("activity_id", 0),
+                "activity":          ACTIVITY_NAMES.get(activity_id, f"Activity {activity_id}"),
+                "activity_id":       activity_id,
                 "product_type_id":   pid,
                 "product_name":      names.get(pid, f"Type {pid}"),
                 "runs":              runs,
