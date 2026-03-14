@@ -29,8 +29,6 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
   const [sortKey,    setSortKey]    = useState('net_profit');
   const [region,     setRegion]     = useState(10000002);
   const [copiedId,   setCopiedId]   = useState(null);
-  const [openingId,  setOpeningId]  = useState(null);
-  const [openResult, setOpenResult] = useState({});  // type_id → 'ok' | 'err'
   const [search,     setSearch]     = useState('');
   const [limit,      setLimit]      = useState(50);
 
@@ -58,30 +56,14 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
   }
 
   function contractsUrl(blueprintId, name) {
-    if (blueprintId) {
-      return `https://www.eveworkbench.com/contracts?type_id=${blueprintId}&region_id=${region}`;
-    }
-    return `https://www.eveworkbench.com/contracts?search=${encodeURIComponent(name + ' Blueprint')}&region_id=${region}`;
+    // Eve Workbench contract search — search by blueprint name in the selected region
+    const bpName = encodeURIComponent(name + ' Blueprint');
+    return `https://www.eveworkbench.com/trading/contracts?search=${bpName}&locationId=${region}`;
   }
 
-  async function openInGame(blueprintId, outputId) {
-    const typeId = blueprintId || outputId;
-    if (!typeId) return;
-    setOpeningId(typeId);
-    try {
-      const res = await fetch(`${API}/api/ui/open_ingame`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type_id: typeId, window: 'market' }),
-      });
-      const json = await res.json();
-      setOpenResult(prev => ({ ...prev, [typeId]: json.ok ? 'ok' : 'err' }));
-      setTimeout(() => setOpenResult(prev => { const n = { ...prev }; delete n[typeId]; return n; }), 3000);
-    } catch {
-      setOpenResult(prev => ({ ...prev, [typeId]: 'err' }));
-    } finally {
-      setOpeningId(null);
-    }
+  function fuzzworkUrl(outputId) {
+    // Fuzzwork market data for the manufactured item (not the BP)
+    return `https://market.fuzzwork.co.uk/type/${outputId}/`;
   }
 
   const notReady = calcResults.length === 0;
@@ -174,10 +156,6 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
             </thead>
             <tbody>
               {unownedItems.map(r => {
-                const typeId = r.blueprint_id || r.output_id;
-                const isOpening = openingId === typeId;
-                const openStatus = openResult[typeId];
-
                 return (
                   <tr key={r.output_id} className="bp-finder-row">
                     <td style={{ textAlign: 'left' }}>
@@ -219,26 +197,27 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                           {copiedId === r.output_id ? '✓' : '📋'}
                         </button>
 
-                        {/* Open contracts in browser (Eve Workbench) */}
+                        {/* Search contracts on Eve Workbench */}
                         <a
                           className="bp-action-btn bp-action-link"
                           href={contractsUrl(r.blueprint_id, r.name)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          title="Search contracts on Eve Workbench"
+                          title="Search blueprint contracts on Eve Workbench"
                         >
                           🔍
                         </a>
 
-                        {/* Open market window in EVE client via ESI */}
-                        <button
-                          className={`bp-action-btn${openStatus === 'ok' ? ' bp-action-ok' : openStatus === 'err' ? ' bp-action-err' : ''}`}
-                          title="Open market details in EVE client (requires EVE to be running)"
-                          onClick={() => openInGame(r.blueprint_id, r.output_id)}
-                          disabled={isOpening}
+                        {/* View item market data on Fuzzwork */}
+                        <a
+                          className="bp-action-btn bp-action-link"
+                          href={fuzzworkUrl(r.output_id)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="View market data on Fuzzwork"
                         >
-                          {isOpening ? '…' : openStatus === 'ok' ? '✓' : openStatus === 'err' ? '✗' : '▶'}
-                        </button>
+                          📈
+                        </a>
                       </div>
                     </td>
                   </tr>
@@ -254,7 +233,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
         <div className="bp-finder-footer">
           {unownedItems.length} ITEM{unownedItems.length !== 1 ? 'S' : ''} WITHOUT BLUEPRINT
           <span style={{ marginLeft: 12, color: 'var(--dim)' }}>
-            click 📋 to copy name · 🔍 to search contracts on Eve Workbench · ▶ to open in EVE
+            click 📋 to copy name · 🔍 to search contracts on Eve Workbench · 📈 to view market on Fuzzwork
           </span>
         </div>
       )}
