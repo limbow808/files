@@ -288,7 +288,7 @@ tr.row-selected td { color: #000; }
 .calc-body {
   flex: 1;
   overflow-y: auto;
-  overflow-x: auto;
+  overflow-x: hidden;
   min-height: 0;
 }
 .calc-bottom {
@@ -506,18 +506,72 @@ select.calc-input { appearance: none; -webkit-appearance: none; cursor: pointer;
 .calc-search-input:focus { border-color: var(--text); }
 .calc-search-input::placeholder { color: var(--dim); }
 
-.calc-table th { font-size: 10px; letter-spacing: 1.5px; padding: 6px 8px; }
-.calc-table td { padding: 5px 8px; font-size: 12px; }
+.calc-table th { font-size: 10px; letter-spacing: 0.5px; padding: 5px 6px; white-space: nowrap; }
+.calc-table td { padding: 3px 6px; font-size: 11px; }
 .calc-table th, .calc-table td { text-align: right; }
 .calc-table th:first-child, .calc-table td:first-child { text-align: left; }
 .calc-table th:nth-child(2), .calc-table td:nth-child(2) { text-align: left; }
-/* ITEM column: fixed width + icon + name layout */
+
+/* Table layout: fixed so ITEM column can flex and others stay compact */
+.calc-table {
+  table-layout: fixed;
+  width: 100%;
+}
+/* Checkbox column */
+.calc-table th:nth-child(1),
+.calc-table td:nth-child(1) { width: 28px; }
+/* ITEM column: takes all remaining space */
+.calc-table th:nth-child(2),
+.calc-table td:nth-child(2) { width: auto; min-width: 140px; }
+/* TECH */
+.calc-table th:nth-child(3),
+.calc-table td:nth-child(3) { width: 36px; }
+/* CAT */
+.calc-table th:nth-child(4),
+.calc-table td:nth-child(4) { width: 72px; }
+/* ME */
+.calc-table th:nth-child(5),
+.calc-table td:nth-child(5) { width: 32px; }
+/* TE */
+.calc-table th:nth-child(6),
+.calc-table td:nth-child(6) { width: 32px; }
+/* DURATION */
+.calc-table th:nth-child(7),
+.calc-table td:nth-child(7) { width: 62px; }
+/* DEMAND */
+.calc-table th:nth-child(8),
+.calc-table td:nth-child(8) { width: 58px; }
+/* QTY */
+.calc-table th:nth-child(9),
+.calc-table td:nth-child(9) { width: 44px; }
+/* RUNS */
+.calc-table th:nth-child(10),
+.calc-table td:nth-child(10) { width: 44px; }
+/* COST */
+.calc-table th:nth-child(11),
+.calc-table td:nth-child(11) { width: 80px; }
+/* REVENUE */
+.calc-table th:nth-child(12),
+.calc-table td:nth-child(12) { width: 80px; }
+/* TAX */
+.calc-table th:nth-child(13),
+.calc-table td:nth-child(13) { width: 68px; }
+/* PROFIT */
+.calc-table th:nth-child(14),
+.calc-table td:nth-child(14) { width: 80px; }
+/* ROI */
+.calc-table th:nth-child(15),
+.calc-table td:nth-child(15) { width: 48px; }
+/* ISK/HR */
+.calc-table th:nth-child(16),
+.calc-table td:nth-child(16) { width: 80px; }
+/* ISK/M³ */
+.calc-table th:nth-child(17),
+.calc-table td:nth-child(17) { width: 68px; }
+
+/* ITEM cell contents */
 .calc-table td:nth-child(2) {
-  max-width: 220px;
-  min-width: 120px;
-  white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 .item-cell {
   display: flex;
@@ -572,8 +626,8 @@ select.calc-input { appearance: none; -webkit-appearance: none; cursor: pointer;
   background: #050505;
   border: 1px solid var(--border);
   color: var(--text);
-  padding: 2px 6px;
-  width: 54px;
+  padding: 1px 4px;
+  width: 38px;
   text-align: right;
   outline: none;
 }
