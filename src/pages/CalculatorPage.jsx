@@ -4,6 +4,7 @@ import { useCalcProgress } from '../hooks/useCalcProgress';
 import { fmtISK, fmtVol, fmtDuration, toggleSet, roiTier } from '../utils/fmt';
 import SystemInput from '../components/SystemInput';
 import EsiBlueprintPanel from '../components/EsiBlueprintPanel';
+import BpFinderPanel from '../components/BpFinderPanel';
 import CalcDetailPanel from '../components/CalcDetailPanel';
 import ShoppingList from '../components/ShoppingList';
 import { API } from '../App';
@@ -63,6 +64,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
   const [overrides,    setOverrides]    = useState({});
   const [selectedIdx,  setSelectedIdx]  = useState(null);
   const [showEsiBps,   setShowEsiBps]   = useState(false);
+  const [showBpFinder, setShowBpFinder] = useState(false);
   const [checkedIds,   setCheckedIds]   = useState(new Set());
   const [retryKey,     setRetryKey]     = useState(0);
 
@@ -208,11 +210,19 @@ export default function CalculatorPage({ refreshKey = 0 }) {
             </div>
             <div className="filter-group" style={{ justifyContent: 'flex-end', borderRight: 'none' }}>
               <span className="filter-label" style={{ visibility: 'hidden' }}>–</span>
-              <button
-                className={`btn${showEsiBps ? ' btn-primary' : ''}`}
-                onClick={() => setShowEsiBps(v => !v)}
-                style={{ padding: '3px 14px', fontSize: 11 }}
-              >ESI BPs</button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  className={`btn${showEsiBps ? ' btn-primary' : ''}`}
+                  onClick={() => setShowEsiBps(v => !v)}
+                  style={{ padding: '3px 14px', fontSize: 11 }}
+                >ESI BPs</button>
+                <button
+                  className={`btn${showBpFinder ? ' btn-primary' : ''}`}
+                  onClick={() => setShowBpFinder(v => !v)}
+                  style={{ padding: '3px 14px', fontSize: 11 }}
+                  title="Find blueprints available on contracts for profitable unowned items"
+                >BP FINDER</button>
+              </div>
             </div>
           </div>
 
@@ -248,6 +258,14 @@ export default function CalculatorPage({ refreshKey = 0 }) {
         </div>
 
         {showEsiBps && <EsiBlueprintPanel />}
+
+        {showBpFinder && (
+          <BpFinderPanel
+            calcResults={calcData?.results || []}
+            esiBpMap={esiBpMap}
+            corpBpIds={corpBpIds}
+          />
+        )}
 
         <div className="calc-search-bar">
           <span style={{ color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>SEARCH</span>

@@ -607,7 +607,7 @@ def api_calculator():
             result["duration"]       = result.get("time_seconds") or bp.get("time_seconds", 0)
             result["volume"]         = bp.get("volume", 0)
             result["required_skills"] = bp.get("required_skills", [])
-
+            result["blueprint_id"]   = bp.get("blueprint_id")   # type_id of the BP itself
             # Derived metrics
             cost       = result.get("material_cost", 0) + result.get("job_cost", 0) + result.get("sales_tax", 0) + result.get("broker_fee", 0)
             profit     = result.get("net_profit", 0)
@@ -893,6 +893,152 @@ def api_skills():
 
     except Exception as e:
         return jsonify({"error": str(e), "skills": {}}), 200  # 200 so UI can still render
+
+
+@app.route("/api/blueprints/bp_finder", methods=["GET"])
+def api_blueprints_bp_finder():
+    """
+    Return profitable items that have NO personal or corp blueprint, sorted by net_profit desc.
+    Also includes blueprint_id (the BP's own type_id) for contract searches.
+
+    Query params:
+        system   - system name for calculator (default: Korsiki)
+        facility - facility type (default: large)
+        sell_loc - sell location hub (default: jita)
+        buy_loc  - buy location hub (default: jita)
+        limit    - max rows to return (default: 50)
+
+    Response: { items: [{output_id, blueprint_id, name, net_profit, roi, category, tech, ...}] }
+    """
+    try:
+        import sqlite3 as _sq
+
+        from flask import request as _freq
+        system   = _freq.args.get("system",   "Korsiki")
+        facility = _freq.args.get("facility", "large")
+        sell_loc = _freq.args.get("sell_loc", "jita")
+        buy_loc  = _freq.args.get("buy_loc",  "jita")
+        limit    = int(_freq.args.get("limit", 50))
+
+        # --- Get calc results (reuse cache if fresh, else use any cached key) ---
+        cache_key = _calc_cache_key(system, facility)
+
+        if not _calc_is_fresh(cache_key):
+            # Try to find ANY fresh cache entry (user may have loaded with different params)
+            fresh_key = next(
+                (k for k, v in _calc_cache.items()
+                 if (time.time() - v.get("generated_at", 0)) < CALC_CACHE_TTL),
+                None
+            )
+            if fresh_key:
+                cache_key = fresh_key
+            else:
+                # No cache at all — ask the user to open the Calculator tab first
+                return jsonify({
+                    "items": [],
+                    "count": 0,
+                    "not_ready": True,
+                    "message": "Open the Calculator tab first to load market prices, then try again.",
+                })
+
+        calc_results = _calc_cache[cache_key]["results"]
+
+        # --- Load corp BP set from crest.db ---
+        cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+        bp_rows = cdb.execute("SELECT output_id, blueprint_id FROM blueprints").fetchall()
+        cdb.close()
+        corp_output_ids  = {r[0] for r in bp_rows}
+        output_to_bpid   = {r[0]: r[1] for r in bp_rows}   # output_id → blueprint_id
+
+        # --- Load personal ESI BPs ---
+        personal_output_ids = set()
+        try:
+            from characters import get_all_auth_headers
+            import requests as _ureq
+            for cid, headers in get_all_auth_headers():
+                resp = _ureq.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
+                    headers=headers, timeout=10
+                )
+                if resp.ok:
+                    for bp in resp.json():
+                        personal_output_ids.add(bp.get("type_id"))
+        except Exception:
+            pass
+
+        # --- Filter: keep only items with no personal BP and not in corp library ---
+        items = []
+        for r in calc_results:
+            oid = r.get("output_id")
+            if oid in corp_output_ids:
+                continue
+            if oid in personal_output_ids:
+                continue
+            blueprint_id = output_to_bpid.get(oid)  # may be None if not in crest.db at all
+            items.append({
+                "output_id":    oid,
+                "blueprint_id": blueprint_id,
+                "name":         r.get("name", ""),
+                "net_profit":   r.get("net_profit", 0),
+                "roi":          r.get("roi", 0),
+                "isk_per_hour": r.get("isk_per_hour", 0),
+                "material_cost": r.get("material_cost", 0),
+                "gross_revenue": r.get("gross_revenue", 0),
+                "avg_daily_volume": r.get("avg_daily_volume", 0),
+                "category":     r.get("category", ""),
+                "tech":         r.get("tech", "I"),
+                "size":         r.get("size", "U"),
+                "duration":     r.get("duration", 0),
+            })
+            if len(items) >= limit:
+                break
+
+        return jsonify({"items": items, "count": len(items)})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e), "items": []}), 200
+
+
+@app.route("/api/ui/open_ingame", methods=["POST"])
+def api_ui_open_ingame():
+    """
+    Ask EVE client to open a window via ESI UI endpoints.
+    Body JSON: { type_id: int, window: "market" | "info" }
+    Uses the first available authenticated character.
+    """
+    try:
+        from characters import get_all_auth_headers
+        import requests as _ureq
+
+        from flask import request as _freq2
+        body     = _freq2.get_json(force=True, silent=True) or {}
+        type_id  = int(body.get("type_id", 0))
+        window   = body.get("window", "market")
+
+        if not type_id:
+            return jsonify({"error": "type_id required"}), 400
+
+        auth_headers = get_all_auth_headers()
+        if not auth_headers:
+            return jsonify({"error": "No authenticated characters"}), 401
+
+        # Use the first character's token
+        _, headers = auth_headers[0]
+
+        if window == "market":
+            url = f"https://esi.evetech.net/latest/ui/openwindow/marketdetails/?type_id={type_id}"
+        else:
+            url = f"https://esi.evetech.net/latest/ui/openwindow/information/?target_id={type_id}"
+
+        resp = _ureq.post(url, headers=headers, timeout=10)
+        if resp.status_code == 204:
+            return jsonify({"ok": True})
+        return jsonify({"ok": False, "status": resp.status_code, "detail": resp.text}), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
 
 
 @app.route("/api/blueprints/corp", methods=["GET"])
