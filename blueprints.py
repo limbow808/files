@@ -140,19 +140,39 @@ def load_blueprints(
     bp_ids = [r["blueprint_id"] for r in bp_rows]
     placeholders = ",".join("?" * len(bp_ids))
     mat_sql = f"""
-        SELECT blueprint_id, material_type_id AS type_id, base_quantity AS quantity
+        SELECT blueprint_id, material_type_id AS type_id, material_name AS name, base_quantity AS quantity
         FROM   blueprint_materials
         WHERE  blueprint_id IN ({placeholders})
     """
     cur.execute(mat_sql, bp_ids)
     mat_rows = cur.fetchall()
+
+    # Load skills for this result set
+    skill_sql = f"""
+        SELECT blueprint_id, skill_name, skill_level
+        FROM   blueprint_skills
+        WHERE  blueprint_id IN ({placeholders})
+        ORDER  BY sort_order
+    """
+    try:
+        cur.execute(skill_sql, bp_ids)
+        skill_rows = cur.fetchall()
+    except Exception:
+        skill_rows = []  # table may not exist yet — run seeder to populate
+
     conn.close()
 
     # Group materials by blueprint_id
     mats_by_bp: dict[int, list] = {}
     for m in mat_rows:
-        entry = {"type_id": m["type_id"], "quantity": m["quantity"]}
+        entry = {"type_id": m["type_id"], "quantity": m["quantity"], "name": m["name"]}
         mats_by_bp.setdefault(m["blueprint_id"], []).append(entry)
+
+    # Group skills by blueprint_id
+    skills_by_bp: dict[int, list] = {}
+    for s in skill_rows:
+        entry = {"name": s["skill_name"], "level": s["skill_level"]}
+        skills_by_bp.setdefault(s["blueprint_id"], []).append(entry)
 
     # ── Assemble result dicts ─────────────────────────────────────────────────
     results = []
@@ -174,7 +194,8 @@ def load_blueprints(
             "slot_type":    row["slot_type"],
             "volume":       row["volume_m3"],
             "time_seconds": row["time_seconds"] or 0,
-            "materials":    mats_by_bp.get(bp_id, []),
+            "materials":        mats_by_bp.get(bp_id, []),
+            "required_skills":  skills_by_bp.get(bp_id, []),
         })
 
     return results

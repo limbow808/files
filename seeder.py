@@ -21,6 +21,7 @@ SDE tables used:
 import sqlite3
 import os
 import sys
+import json
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 SDE_PATH   = os.path.join(os.path.dirname(__file__), "sqlite-latest.sqlite")
@@ -87,11 +88,20 @@ def _init_crest(conn: sqlite3.Connection) -> None:
             base_quantity     INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS blueprint_skills (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            blueprint_id INTEGER NOT NULL REFERENCES blueprints(blueprint_id),
+            skill_name   TEXT    NOT NULL,
+            skill_level  INTEGER NOT NULL,
+            sort_order   INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE INDEX IF NOT EXISTS idx_bp_output    ON blueprints(output_id);
         CREATE INDEX IF NOT EXISTS idx_bp_category  ON blueprints(category);
         CREATE INDEX IF NOT EXISTS idx_bp_tech      ON blueprints(tech_level);
         CREATE INDEX IF NOT EXISTS idx_bp_size      ON blueprints(size_class);
         CREATE INDEX IF NOT EXISTS idx_mat_bp       ON blueprint_materials(blueprint_id);
+        CREATE INDEX IF NOT EXISTS idx_skill_bp     ON blueprint_skills(blueprint_id);
     """)
     conn.commit()
 
@@ -190,6 +200,59 @@ def _load_times(sde: sqlite3.Connection) -> dict[int, int]:
     return times
 
 
+def _load_skills(sde: sqlite3.Connection) -> dict[int, list[dict]]:
+    """
+    Load required skills for all manufactured output types from the SDE.
+    Skill requirements live in dgmTypeAttributes on the *output* type:
+        Attribute 182–187 → required skill type IDs
+        Attribute 277–282 → required skill levels (matched by index)
+
+    Returns { output_type_id: [ {name, level}, ... ] }
+    """
+    print("  Loading skill requirements from dgmTypeAttributes...", end="", flush=True)
+
+    # Attribute ID pairs: (skillID_attr, levelID_attr)
+    SKILL_PAIRS = [(182, 277), (183, 278), (184, 279), (185, 280), (186, 281), (187, 282)]
+    SKILL_ATTR_IDS = [a for pair in SKILL_PAIRS for a in pair]
+
+    # Build a name lookup for skill types (category 16 = Skills)
+    name_cur = sde.cursor()
+    name_cur.execute("SELECT typeID, typeName FROM invTypes")
+    type_names: dict[int, str] = {r["typeID"]: r["typeName"] for r in name_cur.fetchall()}
+
+    # Pull all relevant dgmTypeAttributes rows in one query
+    placeholders = ",".join("?" * len(SKILL_ATTR_IDS))
+    attr_cur = sde.cursor()
+    attr_cur.execute(
+        f"SELECT typeID, attributeID, valueInt, valueFloat FROM dgmTypeAttributes WHERE attributeID IN ({placeholders})",
+        SKILL_ATTR_IDS,
+    )
+
+    # Build per-type maps: { type_id: { attr_id: value } }
+    type_attrs: dict[int, dict[int, int]] = {}
+    for row in attr_cur.fetchall():
+        val = int(row["valueInt"] or row["valueFloat"] or 0)
+        if val:
+            type_attrs.setdefault(row["typeID"], {})[row["attributeID"]] = val
+
+    # Assemble skill lists per output type
+    skills_by_type: dict[int, list] = {}
+    for type_id, attrs in type_attrs.items():
+        entries = []
+        for skill_attr, level_attr in SKILL_PAIRS:
+            skill_type_id = attrs.get(skill_attr)
+            skill_level   = attrs.get(level_attr)
+            if skill_type_id and skill_level:
+                name = type_names.get(skill_type_id, f"Skill {skill_type_id}")
+                entries.append({"name": name, "level": skill_level})
+        if entries:
+            skills_by_type[type_id] = entries
+
+    total = sum(len(v) for v in skills_by_type.values())
+    print(f" {total} skill requirements across {len(skills_by_type)} types")
+    return skills_by_type
+
+
 def seed_from_sde() -> tuple[int, int]:
     """
     Main seeding function. Connects to both databases, reads the SDE,
@@ -213,6 +276,9 @@ def seed_from_sde() -> tuple[int, int]:
 
     # ── 2b. Pre-load manufacturing times ──────────────────────────────────────
     times_by_bp = _load_times(sde)
+
+    # ── 2c. Pre-load skill requirements (keyed by OUTPUT type id) ─────────────
+    skills_by_output = _load_skills(sde)
 
     # ── 3. Query all manufacturable blueprint outputs ─────────────────────────
     print("  Querying manufacturable blueprints...", end="", flush=True)
@@ -255,6 +321,10 @@ def seed_from_sde() -> tuple[int, int]:
     mat_insert = """
         INSERT INTO blueprint_materials
             (blueprint_id, material_type_id, material_name, base_quantity)
+        VALUES (?,?,?,?)
+    """
+    skill_insert = """
+        INSERT INTO blueprint_skills (blueprint_id, skill_name, skill_level, sort_order)
         VALUES (?,?,?,?)
     """
 
@@ -300,6 +370,17 @@ def seed_from_sde() -> tuple[int, int]:
             )
             mat_count += len(mats)
 
+        # Insert skill requirements (keyed by output type, not blueprint_id)
+        skills = skills_by_output.get(output_id, [])
+        if skills:
+            crest.execute(
+                "DELETE FROM blueprint_skills WHERE blueprint_id = ?",
+                (bp_id,)
+            )
+            crest.executemany(skill_insert,
+                [(bp_id, s["name"], s["level"], i) for i, s in enumerate(skills)]
+            )
+
         bp_count += 1
 
         # Progress every 100 rows
@@ -310,14 +391,129 @@ def seed_from_sde() -> tuple[int, int]:
     crest.commit()
 
     # ── 5. Summary ────────────────────────────────────────────────────────────
+    skill_count = crest.execute("SELECT COUNT(*) FROM blueprint_skills").fetchone()[0]
     print(f"\n  Seeding complete.")
-    print(f"  {bp_count} blueprints, {mat_count} material rows saved to crest.db\n")
+    print(f"  {bp_count} blueprints, {mat_count} material rows, {skill_count} skill rows saved to crest.db\n")
 
     sde.close()
     crest.close()
     return bp_count, mat_count
 
 
+def seed_skills_from_esi() -> int:
+    """
+    Populate blueprint_skills in an existing crest.db using Fuzzwork's static
+    SDE CSV dumps (dgmTypeAttributes + invTypes).  No SDE file required.
+
+    Downloads two small compressed CSVs (~2 MB combined), parses skill
+    requirement attributes (182/183/184 = skill type IDs, 277/278/279 = levels),
+    resolves names via invTypes, then inserts rows for every blueprint whose
+    output type has skill requirements.
+
+    Returns the number of skill rows inserted.
+    """
+    import urllib.request
+    import bz2
+
+    SKILL_ID_ATTRS    = {182, 183, 184}   # requiredSkill1/2/3
+    SKILL_LEVEL_ATTRS = {277, 278, 279}   # requiredSkill1/2/3Level
+    # Pair them in order: 182↔277, 183↔278, 184↔279
+    SKILL_PAIRS = [(182, 277), (183, 278), (184, 279)]
+
+    def _fetch_csv(url: str) -> list[list[str]]:
+        req = urllib.request.Request(url, headers={"User-Agent": "CREST-Seeder/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = bz2.decompress(r.read())
+        lines = raw.decode("utf-8").splitlines()
+        return [line.split(",") for line in lines[1:]]  # skip header
+
+    crest = _connect_crest()
+    _init_crest(crest)  # creates blueprint_skills if missing
+
+    # ── Download & parse dgmTypeAttributes ───────────────────────────────────
+    print("  Downloading dgmTypeAttributes from Fuzzwork...", end="", flush=True)
+    attr_rows = _fetch_csv("https://www.fuzzwork.co.uk/dump/latest/dgmTypeAttributes.csv.bz2")
+    print(f" {len(attr_rows):,} rows")
+
+    # Build: { type_id: { attr_id: value } }
+    type_attrs: dict[int, dict[int, int]] = {}
+    ALL_SKILL_ATTRS = SKILL_ID_ATTRS | SKILL_LEVEL_ATTRS
+    for parts in attr_rows:
+        if len(parts) < 4:
+            continue
+        try:
+            attr_id = int(parts[1])
+            if attr_id not in ALL_SKILL_ATTRS:
+                continue
+            type_id = int(parts[0])
+            # valueInt is parts[2], valueFloat is parts[3]
+            val = parts[2] if parts[2] != "None" else parts[3]
+            int_val = int(float(val))
+            type_attrs.setdefault(type_id, {})[attr_id] = int_val
+        except (ValueError, IndexError):
+            continue
+
+    # ── Download & parse invTypes for skill name lookup ───────────────────────
+    print("  Downloading invTypes from Fuzzwork...", end="", flush=True)
+    inv_rows = _fetch_csv("https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2")
+    type_names: dict[int, str] = {}
+    for parts in inv_rows:
+        try:
+            type_names[int(parts[0])] = parts[2]
+        except (ValueError, IndexError):
+            continue
+    print(f" {len(type_names):,} type names loaded")
+
+    # ── Build skill list for each output type ─────────────────────────────────
+    skills_by_type: dict[int, list] = {}
+    for type_id, attrs in type_attrs.items():
+        entries = []
+        for skill_attr, level_attr in SKILL_PAIRS:
+            skill_type_id = attrs.get(skill_attr, 0)
+            skill_level   = attrs.get(level_attr, 0)
+            if skill_type_id and skill_level:
+                name = type_names.get(skill_type_id, f"Skill {skill_type_id}")
+                entries.append({"name": name, "level": skill_level})
+        if entries:
+            skills_by_type[type_id] = entries
+
+    print(f"  {len(skills_by_type):,} types have skill requirements")
+
+    # ── Insert into crest.db ──────────────────────────────────────────────────
+    bp_rows = crest.execute("SELECT blueprint_id, output_id FROM blueprints").fetchall()
+
+    skill_insert = """
+        INSERT OR IGNORE INTO blueprint_skills (blueprint_id, skill_name, skill_level, sort_order)
+        VALUES (?,?,?,?)
+    """
+
+    inserted = 0
+    for bp_id, output_id in bp_rows:
+        skills = skills_by_type.get(output_id, [])
+        if skills:
+            # Clear old rows and re-insert
+            crest.execute("DELETE FROM blueprint_skills WHERE blueprint_id = ?", (bp_id,))
+            crest.executemany(skill_insert,
+                [(bp_id, s["name"], s["level"], i) for i, s in enumerate(skills)]
+            )
+            inserted += len(skills)
+
+    crest.commit()
+    crest.close()
+
+    print(f"  Done — {inserted} skill requirement rows inserted into crest.db.")
+    return inserted
+
+
 # ─── Entry point ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    seed_from_sde()
+    if os.path.exists(SDE_PATH) and os.path.getsize(SDE_PATH) > 0:
+        seed_from_sde()
+    else:
+        print("\n  SDE file not found or empty — running ESI skill seeder only.")
+        print("  (Blueprint/material data must already be in crest.db)\n")
+        _connect_crest()  # ensure db exists
+        crest_tmp = _connect_crest()
+        _init_crest(crest_tmp)  # creates blueprint_skills table if missing
+        crest_tmp.close()
+        seed_skills_from_esi()
