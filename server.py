@@ -24,6 +24,7 @@ import requests
 from blueprints import load_blueprints, MINERALS
 from calculator import calculate_all
 from database import save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history
+import alert_scanner as _alert_scanner
 
 app = Flask(__name__)
 CORS(app)  # Allow React dev server (localhost:3000 / file://) to call the API
@@ -1668,11 +1669,15 @@ def api_industry_jobs():
                     )
                     if cresp.ok:
                         seen_corp_ids_jobs.add(corp_id)  # only mark seen on success
+                        our_char_ids = {int(k) for k in char_records.keys()}
                         for j in cresp.json():
+                            installer_id = j.get("installer_id")
+                            # Only include jobs installed by one of our authenticated characters
+                            if installer_id not in our_char_ids:
+                                continue
                             jid = j.get("job_id")
                             if jid and jid not in seen_job_ids:
                                 seen_job_ids.add(jid)
-                                installer_id = j.get("installer_id", cid)
                                 installer_name = char_records.get(installer_id, {}).get("character_name", char_name)
                                 j["_character_id"]   = installer_id
                                 j["_character_name"] = installer_name
@@ -1934,6 +1939,12 @@ def api_orders():
         return jsonify({"error": str(e), "sell": [], "buy": []}), 200
 
 
+@app.route("/api/alerts/status", methods=["GET"])
+def api_alerts_status():
+    """Return the current status of the background alert scanner."""
+    return jsonify(_alert_scanner.status)
+
+
 if __name__ == "__main__":
     # Pre-warm the scan cache in the background so the first dashboard load is instant
     def _prewarm():
@@ -1965,6 +1976,9 @@ if __name__ == "__main__":
             _time.sleep(7200)  # sleep 2 hours between snapshots
 
     threading.Thread(target=_wealth_snapshot_loop, daemon=True).start()
+
+    # Background alert scanner — Telegram notifications for high-ROI BPs and cheap contracts
+    _alert_scanner.start_alert_scanner(_calc_cache, CALC_CACHE_TTL)
 
     print()
     print("  ╔══════════════════════════════════════════════════╗")
