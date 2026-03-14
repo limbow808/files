@@ -609,16 +609,18 @@ select.calc-input { appearance: none; -webkit-appearance: none; cursor: pointer;
 }
 
 /* ── Row profit tiers ────────────────────────────────────────────── */
-.tier-great td:first-child { border-left: 3px solid #00cc66; }
-.tier-good  td:first-child { border-left: 3px solid #88cc44; }
+.tier-elite td:first-child { border-left: 3px solid #aa55ff; }
+.tier-great td:first-child { border-left: 3px solid #3399cc; }
+.tier-good  td:first-child { border-left: 3px solid #44bb55; }
 .tier-ok    td:first-child { border-left: 3px solid #ccaa00; }
 .tier-poor  td:first-child { border-left: 3px solid #cc5500; }
-.tier-bad   td:first-child { border-left: 3px solid #882200; }
-.tier-great .profit-val { color: #00cc66; }
-.tier-good  .profit-val { color: #88cc44; }
+.tier-bad   td:first-child { border-left: 3px solid #cc2200; }
+.tier-elite .profit-val { color: #aa55ff; }
+.tier-great .profit-val { color: #3399cc; }
+.tier-good  .profit-val { color: #44bb55; }
 .tier-ok    .profit-val { color: #ccaa00; }
 .tier-poor  .profit-val { color: #cc5500; }
-.tier-bad   .profit-val { color: var(--accent); }
+.tier-bad   .profit-val { color: #cc2200; }
 
 .inline-num {
   font-family: var(--mono);

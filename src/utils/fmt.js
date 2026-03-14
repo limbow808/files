@@ -34,17 +34,19 @@ export function toggleSet(set, val) {
 }
 
 export function roiTier(roi) {
+  if (roi >= 35) return 'tier-elite';
   if (roi >= 20) return 'tier-great';
   if (roi >= 12) return 'tier-good';
-  if (roi >= 6)  return 'tier-ok';
+  if (roi >= 5)  return 'tier-ok';
   if (roi >= 0)  return 'tier-poor';
   return 'tier-bad';
 }
 
 export function roiColor(roi) {
-  if (roi >= 20) return '#00cc66';
-  if (roi >= 12) return '#88cc44';
-  if (roi >= 6)  return '#ccaa00';
+  if (roi >= 35) return '#aa55ff';
+  if (roi >= 20) return '#3399cc';
+  if (roi >= 12) return '#44bb55';
+  if (roi >= 5)  return '#ccaa00';
   if (roi >= 0)  return '#cc5500';
-  return '#882200';
+  return '#cc2200';
 }
