@@ -24,7 +24,6 @@ const SORT_OPTS = [
  * Props:
  *   calcResults  - array from /api/calculator (already loaded by parent)
  *   esiBpMap     - { lowercaseName: {hasBPO, hasBPC} } from parent
- *   corpBpIds    - Set<output_id> from crest.db
  */
 export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
   const [sortKey,    setSortKey]    = useState('net_profit');
@@ -49,7 +48,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
 
     list = [...list].sort((a, b) => (b[sortKey] || 0) - (a[sortKey] || 0));
     return list.slice(0, limit);
-  }, [calcResults, esiBpMap, corpBpIds, search, sortKey, limit]);
+  }, [calcResults, esiBpMap, search, sortKey, limit]);
 
   function copyName(name, id) {
     navigator.clipboard.writeText(name).then(() => {
