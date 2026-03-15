@@ -87,34 +87,40 @@ def _fetch_all_orders():
     """
     Pull every order in The Forge from ESI, filter to Jita station only,
     and store in SQLite. Replaces previous data entirely.
+    Pages are fetched in parallel (20 workers) for ~20× speedup.
     """
     print("  Refreshing Jita market data from ESI...", end="", flush=True)
     url    = f"{ESI_BASE}/markets/{REGION_THE_FORGE}/orders/"
-    all_orders = []
-    page   = 1
 
-    while True:
-        try:
-            resp = requests.get(url, params={"order_type": "all", "page": page}, timeout=15)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            print(f"\n  [!] ESI market fetch failed on page {page}: {e}")
-            break
+    # First request to discover total pages
+    try:
+        resp = requests.get(url, params={"order_type": "all", "page": 1}, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        print(f"\n  [!] ESI market fetch failed on page 1: {e}")
+        return
 
-        orders = resp.json()
-        if not orders:
-            break
+    total_pages = int(resp.headers.get("X-Pages", 1))
+    all_orders = [o for o in resp.json() if o["location_id"] == JITA_STATION_ID]
+    print(f" {total_pages} pages", end="", flush=True)
 
-        # Filter to Jita 4-4 only for accuracy
-        jita_orders = [o for o in orders if o["location_id"] == JITA_STATION_ID]
-        all_orders.extend(jita_orders)
+    if total_pages > 1:
+        def _fetch_page(page_num):
+            try:
+                r = requests.get(url, params={"order_type": "all", "page": page_num}, timeout=15)
+                r.raise_for_status()
+                return [o for o in r.json() if o["location_id"] == JITA_STATION_ID]
+            except Exception:
+                return []
 
-        # Check if there are more pages
-        total_pages = int(resp.headers.get("X-Pages", 1))
-        print(".", end="", flush=True)
-        if page >= total_pages:
-            break
-        page += 1
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = {pool.submit(_fetch_page, p): p for p in range(2, total_pages + 1)}
+            done = 0
+            for f in as_completed(futures):
+                all_orders.extend(f.result())
+                done += 1
+                if done % 50 == 0:
+                    print(".", end="", flush=True)
 
     if not all_orders:
         print(" FAILED (no orders returned)")
@@ -171,6 +177,38 @@ def _get_price_from_db(type_id: int) -> dict | None:
         return None
 
     return {"sell": best_sell, "buy": best_buy}
+
+
+def _get_prices_bulk_from_db(type_ids: list[int]) -> dict[int, dict]:
+    """Query best buy/sell for many type_ids in one connection, two queries."""
+    if not type_ids:
+        return {}
+    conn = _get_conn()
+    cur  = conn.cursor()
+    ph   = ",".join("?" * len(type_ids))
+
+    cur.execute(
+        f"SELECT type_id, MIN(price) as best_sell FROM market_orders "
+        f"WHERE type_id IN ({ph}) AND is_buy_order=0 GROUP BY type_id",
+        type_ids,
+    )
+    sells = {r["type_id"]: r["best_sell"] for r in cur.fetchall()}
+
+    cur.execute(
+        f"SELECT type_id, MAX(price) as best_buy FROM market_orders "
+        f"WHERE type_id IN ({ph}) AND is_buy_order=1 GROUP BY type_id",
+        type_ids,
+    )
+    buys = {r["type_id"]: r["best_buy"] for r in cur.fetchall()}
+    conn.close()
+
+    results = {}
+    for tid in type_ids:
+        s = sells.get(tid)
+        b = buys.get(tid)
+        if s is not None and b is not None:
+            results[tid] = {"sell": s, "buy": b}
+    return results
 
 
 # ─── Volume history ───────────────────────────────────────────────────────────
@@ -253,24 +291,50 @@ def get_prices_bulk(type_ids: list[int], history_ids: list[int] | None = None) -
     # One freshness check for the whole batch
     _ensure_orders_fresh()
 
-    # Collect order prices first (all local DB — instant)
-    results = {}
-    for type_id in type_ids:
-        price = _get_price_from_db(type_id)
-        if price:
-            results[type_id] = price
+    # Bulk-query all prices in two SQL queries (instead of N × 2 per-item queries)
+    results = _get_prices_bulk_from_db(list(type_ids))
 
     # Fetch volume history only for the requested subset (or all if not specified)
     ids_to_fetch = [tid for tid in (history_ids if history_ids is not None else list(results.keys())) if tid in results]
 
-    # Workers capped at 10 to stay polite to ESI
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        futures = {pool.submit(_get_avg_volume, tid): tid for tid in ids_to_fetch}
-        for future in as_completed(futures):
-            tid = futures[future]
-            try:
-                results[tid]["avg_daily_volume"] = future.result()
-            except Exception:
-                results[tid]["avg_daily_volume"] = None
+    # Pre-load all cached volume history in one query to avoid N individual DB opens
+    cached_vols: dict[int, float | None] = {}
+    stale_ids: list[int] = []
+    if ids_to_fetch:
+        conn = _get_conn()
+        cur  = conn.cursor()
+        ph   = ",".join("?" * len(ids_to_fetch))
+        cur.execute(
+            f"SELECT type_id, avg_daily_volume, fetched_at FROM market_history WHERE type_id IN ({ph})",
+            ids_to_fetch,
+        )
+        now = time.time()
+        seen = set()
+        for row in cur.fetchall():
+            tid = row["type_id"]
+            seen.add(tid)
+            if (now - row["fetched_at"]) < HISTORY_TTL:
+                cached_vols[tid] = row["avg_daily_volume"]
+            else:
+                stale_ids.append(tid)
+        conn.close()
+        # IDs not in the DB at all also need fetching
+        stale_ids.extend(tid for tid in ids_to_fetch if tid not in seen)
+
+    # Apply cached volumes immediately
+    for tid, vol in cached_vols.items():
+        if tid in results:
+            results[tid]["avg_daily_volume"] = vol
+
+    # Only hit ESI for stale/missing volume histories
+    if stale_ids:
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_get_avg_volume, tid): tid for tid in stale_ids}
+            for future in as_completed(futures):
+                tid = futures[future]
+                try:
+                    results[tid]["avg_daily_volume"] = future.result()
+                except Exception:
+                    results[tid]["avg_daily_volume"] = None
 
     return results

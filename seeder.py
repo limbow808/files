@@ -202,55 +202,34 @@ def _load_times(sde: sqlite3.Connection) -> dict[int, int]:
 
 def _load_skills(sde: sqlite3.Connection) -> dict[int, list[dict]]:
     """
-    Load required skills for all manufactured output types from the SDE.
-    Skill requirements live in dgmTypeAttributes on the *output* type:
-        Attribute 182–187 → required skill type IDs
-        Attribute 277–282 → required skill levels (matched by index)
+    Load required manufacturing skills for all blueprints from the SDE.
+    Skills live in industryActivitySkills, keyed by blueprint typeID (NOT the output type).
+    activityID=1 is manufacturing.
 
-    Returns { output_type_id: [ {name, level}, ... ] }
+    Returns { blueprint_type_id: [ {name, level}, ... ] }
     """
-    print("  Loading skill requirements from dgmTypeAttributes...", end="", flush=True)
+    print("  Loading skill requirements from industryActivitySkills...", end="", flush=True)
 
-    # Attribute ID pairs: (skillID_attr, levelID_attr)
-    SKILL_PAIRS = [(182, 277), (183, 278), (184, 279), (185, 280), (186, 281), (187, 282)]
-    SKILL_ATTR_IDS = [a for pair in SKILL_PAIRS for a in pair]
-
-    # Build a name lookup for skill types (category 16 = Skills)
+    # Build a name lookup for all types (needed to resolve skill IDs to names)
     name_cur = sde.cursor()
     name_cur.execute("SELECT typeID, typeName FROM invTypes")
     type_names: dict[int, str] = {r["typeID"]: r["typeName"] for r in name_cur.fetchall()}
 
-    # Pull all relevant dgmTypeAttributes rows in one query
-    placeholders = ",".join("?" * len(SKILL_ATTR_IDS))
-    attr_cur = sde.cursor()
-    attr_cur.execute(
-        f"SELECT typeID, attributeID, valueInt, valueFloat FROM dgmTypeAttributes WHERE attributeID IN ({placeholders})",
-        SKILL_ATTR_IDS,
+    # Pull manufacturing (activityID=1) skill rows
+    skill_cur = sde.cursor()
+    skill_cur.execute(
+        "SELECT typeID, skillID, level FROM industryActivitySkills WHERE activityID = 1"
     )
 
-    # Build per-type maps: { type_id: { attr_id: value } }
-    type_attrs: dict[int, dict[int, int]] = {}
-    for row in attr_cur.fetchall():
-        val = int(row["valueInt"] or row["valueFloat"] or 0)
-        if val:
-            type_attrs.setdefault(row["typeID"], {})[row["attributeID"]] = val
+    skills_by_bp: dict[int, list] = {}
+    for row in skill_cur.fetchall():
+        bp_id = row["typeID"]
+        skill_name = type_names.get(row["skillID"], f"Skill {row['skillID']}")
+        skills_by_bp.setdefault(bp_id, []).append({"name": skill_name, "level": row["level"]})
 
-    # Assemble skill lists per output type
-    skills_by_type: dict[int, list] = {}
-    for type_id, attrs in type_attrs.items():
-        entries = []
-        for skill_attr, level_attr in SKILL_PAIRS:
-            skill_type_id = attrs.get(skill_attr)
-            skill_level   = attrs.get(level_attr)
-            if skill_type_id and skill_level:
-                name = type_names.get(skill_type_id, f"Skill {skill_type_id}")
-                entries.append({"name": name, "level": skill_level})
-        if entries:
-            skills_by_type[type_id] = entries
-
-    total = sum(len(v) for v in skills_by_type.values())
-    print(f" {total} skill requirements across {len(skills_by_type)} types")
-    return skills_by_type
+    total = sum(len(v) for v in skills_by_bp.values())
+    print(f" {total} skill requirements across {len(skills_by_bp)} blueprints")
+    return skills_by_bp
 
 
 def seed_from_sde() -> tuple[int, int]:
@@ -277,8 +256,8 @@ def seed_from_sde() -> tuple[int, int]:
     # ── 2b. Pre-load manufacturing times ──────────────────────────────────────
     times_by_bp = _load_times(sde)
 
-    # ── 2c. Pre-load skill requirements (keyed by OUTPUT type id) ─────────────
-    skills_by_output = _load_skills(sde)
+    # ── 2c. Pre-load skill requirements (keyed by blueprint type id) ──────────
+    skills_by_bp = _load_skills(sde)
 
     # ── 3. Query all manufacturable blueprint outputs ─────────────────────────
     print("  Querying manufacturable blueprints...", end="", flush=True)
@@ -370,8 +349,8 @@ def seed_from_sde() -> tuple[int, int]:
             )
             mat_count += len(mats)
 
-        # Insert skill requirements (keyed by output type, not blueprint_id)
-        skills = skills_by_output.get(output_id, [])
+        # Insert skill requirements (keyed by blueprint_id)
+        skills = skills_by_bp.get(bp_id, [])
         if skills:
             crest.execute(
                 "DELETE FROM blueprint_skills WHERE blueprint_id = ?",

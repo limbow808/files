@@ -2,11 +2,13 @@ import { useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { fmtISK, fmtVol } from '../utils/fmt';
 import { API } from '../App';
+import SmartBuyPanel from './SmartBuyPanel';
 
-export default function ShoppingList({ checkedItems, overrides }) {
-  const [collapsed, setCollapsed] = useState(false);
-  const [copyMode,  setCopyMode]  = useState('delta');
-  const [copied,    setCopied]    = useState(false);
+export default function ShoppingList({ checkedItems, overrides, playerSystem }) {
+  const [collapsed,      setCollapsed]      = useState(false);
+  const [copyMode,       setCopyMode]       = useState('delta');
+  const [copied,         setCopied]         = useState(false);
+  const [showSmartBuy,   setShowSmartBuy]   = useState(false);
 
   const { data: assetsData } = useApi(`${API}/api/assets`, []);
   const warehouse  = assetsData?.assets || {};
@@ -28,6 +30,7 @@ export default function ShoppingList({ checkedItems, overrides }) {
           name:       m.name || assetNames[tid] || `Type ${m.type_id}`,
           required:   0,
           unit_price: m.unit_price || 0,
+          volume_m3:  m.volume_m3 || 0,
         };
       }
       matMap[tid].required += (m.quantity || 0) * runs;
@@ -92,6 +95,12 @@ export default function ShoppingList({ checkedItems, overrides }) {
   const totalDeltaCost = matRows
     .filter(m => !m.missing_bp)
     .reduce((s, m) => s + Math.max(0, m.required - getWarehouse(m.type_id)) * m.unit_price, 0);
+  const totalRequiredM3 = matRows
+    .filter(m => !m.missing_bp)
+    .reduce((s, m) => s + (m.volume_m3 || 0) * m.required, 0);
+  const totalDeltaM3 = matRows
+    .filter(m => !m.missing_bp)
+    .reduce((s, m) => s + (m.volume_m3 || 0) * Math.max(0, m.required - getWarehouse(m.type_id)), 0);
   const hasWarehouse = Object.keys(warehouse).length > 0;
 
   return (
@@ -120,10 +129,22 @@ export default function ShoppingList({ checkedItems, overrides }) {
                 TOTAL REQUIRED:{' '}
                 <span style={{ color: 'var(--text)' }}>{fmtISK(totalRequired)} ISK</span>
               </span>
+              {totalRequiredM3 > 0 && (
+                <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
+                  TOTAL M³:{' '}
+                  <span style={{ color: 'var(--text)' }}>{totalRequiredM3.toLocaleString(undefined, { maximumFractionDigits: 1 })} m³</span>
+                </span>
+              )}
               {hasWarehouse && (
                 <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
                   STILL TO BUY:{' '}
                   <span style={{ color: 'var(--accent)' }}>{fmtISK(totalDeltaCost)} ISK</span>
+                </span>
+              )}
+              {hasWarehouse && totalDeltaM3 > 0 && (
+                <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
+                  TO HAUL:{' '}
+                  <span style={{ color: 'var(--accent)' }}>{totalDeltaM3.toLocaleString(undefined, { maximumFractionDigits: 1 })} m³</span>
                 </span>
               )}
             </>
@@ -183,7 +204,11 @@ export default function ShoppingList({ checkedItems, overrides }) {
                           {m.name}
                         </td>
                         <td>{fmtVol(m.required)}</td>
-                        <td style={{ color: 'var(--dim)' }}>—</td>
+                        <td style={{ color: 'var(--dim)' }}>
+                          {m.volume_m3 > 0
+                            ? (m.volume_m3 * m.required).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' m³'
+                            : '—'}
+                        </td>
                         <td style={{ color: 'var(--dim)' }}>{m.unit_price > 0 ? fmtISK(m.unit_price) : '—'}</td>
                         <td>{value > 0 ? fmtISK(value) : '—'}</td>
                         <td style={{ color: have > 0 ? '#00cc66' : 'var(--dim)' }}>
@@ -223,10 +248,34 @@ export default function ShoppingList({ checkedItems, overrides }) {
             >
               {copied ? '✓ COPIED' : '⎘ COPY FOR MULTI-BUY'}
             </button>
+            <button
+              className="btn btn-smart-buy"
+              style={{ fontSize: 10, padding: '2px 14px', marginLeft: 4 }}
+              onClick={() => setShowSmartBuy(true)}
+              title="Find the cheapest market hub for each material, accounting for jumps and haul volume"
+            >
+              ◈ SMART BUY
+            </button>
             <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1, marginLeft: 'auto' }}>
               Paste into EVE Online → Market → Multi-Buy
             </span>
           </div>
+
+          {showSmartBuy && (
+            <SmartBuyPanel
+              items={matRows
+                .filter(m => !m.missing_bp)
+                .map(m => ({
+                  type_id:  m.type_id,
+                  name:     m.name,
+                  quantity: Math.max(0, m.required - getWarehouse(m.type_id)),
+                }))
+                .filter(m => m.quantity > 0)
+              }
+              playerSystem={playerSystem || ''}
+              onClose={() => setShowSmartBuy(false)}
+            />
+          )}
         </>
       )}
 

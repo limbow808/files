@@ -642,11 +642,13 @@ def api_calculator():
             if not result:
                 continue
 
-            # Resolve material names — use the name already loaded from crest.db,
-            # fall back to mineral_names dict, then a "Type N" placeholder
+            # Resolve material names — name already set by calculator from blueprint_materials.
+            # For anything still missing (minerals, datacores, PI mats not in crest.db)
+            # fall back to the mineral_names dict; genuinely unknown IDs get a temp placeholder
+            # that is resolved in bulk after the loop.
             for mat in result.get("material_breakdown", []):
                 if not mat.get("name"):
-                    mat["name"] = mineral_names.get(mat["type_id"], f"Type {mat['type_id']}")
+                    mat["name"] = mineral_names.get(mat["type_id"], f"__UNKNOWN_{mat['type_id']}__")
 
             # Add blueprint metadata
             result["me_level"]       = bp.get("me_level", 0)
@@ -678,6 +680,105 @@ def api_calculator():
             results.append(result)
 
         results.sort(key=lambda x: x["net_profit"], reverse=True)
+
+        # ── Bulk-resolve any remaining __UNKNOWN_N__ material names ──────────
+        # Collect all type_ids still needing a name
+        unknown_ids: set[int] = set()
+        for r in results:
+            for mat in r.get("material_breakdown", []):
+                n = mat.get("name", "")
+                if n.startswith("__UNKNOWN_"):
+                    try:
+                        unknown_ids.add(int(n.split("_")[3]))
+                    except Exception:
+                        pass
+
+        resolved_names: dict[int, str] = {}
+        if unknown_ids:
+            # Stage 1: query crest.db invTypes (or blueprint_materials) for names
+            try:
+                import sqlite3 as _sq
+                _sde = os.path.join(_HERE, "sqlite-latest.sqlite")
+                if os.path.exists(_sde):
+                    _c = _sq.connect(_sde)
+                    _c.row_factory = _sq.Row
+                    _ph = ",".join("?" * len(unknown_ids))
+                    _rows = _c.execute(
+                        f"SELECT typeID, typeName FROM invTypes WHERE typeID IN ({_ph})",
+                        list(unknown_ids),
+                    ).fetchall()
+                    _c.close()
+                    for row in _rows:
+                        resolved_names[row["typeID"]] = row["typeName"]
+            except Exception:
+                pass
+
+            # Stage 2: any still-unknown → ESI universe/names bulk call (≤1000 per batch)
+            still_missing = [tid for tid in unknown_ids if tid not in resolved_names]
+            if still_missing:
+                try:
+                    for i in range(0, len(still_missing), 1000):
+                        chunk = still_missing[i:i+1000]
+                        nr = requests.post(
+                            "https://esi.evetech.net/latest/universe/names/",
+                            json=chunk,
+                            timeout=10,
+                        )
+                        if nr.ok:
+                            for item in nr.json():
+                                resolved_names[item["id"]] = item["name"]
+                except Exception:
+                    pass
+
+            # Apply resolved names back; fall back to "Type N" only if ESI also fails
+            for r in results:
+                for mat in r.get("material_breakdown", []):
+                    n = mat.get("name", "")
+                    if n.startswith("__UNKNOWN_"):
+                        try:
+                            tid = int(n.split("_")[3])
+                            mat["name"] = resolved_names.get(tid, f"Type {tid}")
+                        except Exception:
+                            mat["name"] = n  # leave as-is
+
+        # Inject volume_m3 into every material_breakdown entry
+        # Bulk-preload volumes for all type_ids in one query to avoid N db opens
+        _vol_type_ids = set()
+        for r in results:
+            for mat in r.get("material_breakdown", []):
+                if mat["type_id"] not in _PACKAGED_VOLUMES:
+                    _vol_type_ids.add(mat["type_id"])
+        if _vol_type_ids:
+            try:
+                import sqlite3 as _sq
+                _vids = list(_vol_type_ids)
+                conn = _sq.connect(os.path.join(_HERE, "crest.db"))
+                ph = ",".join("?" * len(_vids))
+                for row in conn.execute(
+                    f"SELECT output_id, volume_m3 FROM blueprints WHERE output_id IN ({ph}) AND volume_m3 IS NOT NULL",
+                    _vids
+                ).fetchall():
+                    _PACKAGED_VOLUMES[row[0]] = float(row[1])
+                conn.close()
+                # For any still missing, try SDE in bulk
+                still_missing = [t for t in _vids if t not in _PACKAGED_VOLUMES]
+                if still_missing:
+                    sde_path = os.path.join(_HERE, "sqlite-latest.sqlite")
+                    if os.path.exists(sde_path):
+                        conn2 = _sq.connect(sde_path)
+                        ph2 = ",".join("?" * len(still_missing))
+                        for row in conn2.execute(
+                            f"SELECT typeID, volume FROM invTypes WHERE typeID IN ({ph2}) AND volume IS NOT NULL",
+                            still_missing
+                        ).fetchall():
+                            _PACKAGED_VOLUMES[row[0]] = float(row[1])
+                        conn2.close()
+            except Exception:
+                pass
+        for r in results:
+            for mat in r.get("material_breakdown", []):
+                if "volume_m3" not in mat:
+                    mat["volume_m3"] = _PACKAGED_VOLUMES.get(mat["type_id"], 0.01)
 
         # Deduplicate by output_id — keep the highest-profit entry per product
         seen_output_ids = set()
@@ -1503,6 +1604,20 @@ def api_ui_open_ingame():
         return jsonify({"error": str(e)}), 200
 
 
+# ── ESI response caches (TTL-based, avoid hammering ESI on every page load) ──
+_ESI_BP_CACHE:      dict  = {}
+_ESI_BP_CACHE_TS:   float = 0
+_ESI_BP_TTL               = 300   # 5 min
+
+_ESI_JOBS_CACHE:    dict  = {}
+_ESI_JOBS_CACHE_TS: float = 0
+_ESI_JOBS_TTL             = 120   # 2 min
+
+_ESI_ORDERS_CACHE:    dict  = {}
+_ESI_ORDERS_CACHE_TS: float = 0
+_ESI_ORDERS_TTL             = 120   # 2 min
+
+
 @app.route("/api/blueprints/corp", methods=["GET"])
 def api_blueprints_corp():
     """
@@ -1536,24 +1651,27 @@ def api_blueprints_corp():
 def api_blueprints_esi():
     """
     Return character AND corporation blueprints from ESI for ALL authenticated characters.
-    Returns list of { type_id, name, me_level, te_level, runs, location_id, bp_type,
-                       character_id, character_name, owner }
-    owner = 'personal' | 'corp'
+    Cached for 5 minutes. Personal blueprint fetches are parallelised across characters.
     """
+    global _ESI_BP_CACHE, _ESI_BP_CACHE_TS
     try:
+        from flask import request as flask_request
+        force = flask_request.args.get("force", "0") == "1"
+        if not force and _ESI_BP_CACHE and (time.time() - _ESI_BP_CACHE_TS) < _ESI_BP_TTL:
+            return jsonify(_ESI_BP_CACHE)
+
         from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import requests as req
 
         char_records = load_characters()
         auth_headers = get_all_auth_headers()
 
-        all_bps = []
-        seen_corp_ids = set()   # avoid duplicate fetches when multiple chars share a corp
-
-        for cid, headers in auth_headers:
+        # ── Parallel fetch: personal BPs + character info for all chars at once ──
+        def _fetch_personal(cid, headers):
             char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
-
-            # ── Personal blueprints ──
+            bps_out = []
+            corp_id = None
             try:
                 resp = req.get(
                     f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
@@ -1564,79 +1682,96 @@ def api_blueprints_esi():
                         bp["_character_id"]   = cid
                         bp["_character_name"] = char_name
                         bp["_owner"]          = "personal"
-                        all_bps.append(bp)
+                        bps_out.append(bp)
             except Exception as e:
                 print(f"  [esi-bps] personal failed for {char_name}: {e}")
-
-            # ── Corp blueprints ──
             try:
-                corp_resp = req.get(
-                    f"https://esi.evetech.net/latest/characters/{cid}/",
-                    headers=headers, timeout=10
-                )
-                if corp_resp.ok:
-                    corp_id = corp_resp.json().get("corporation_id")
-                    if corp_id and corp_id not in seen_corp_ids:
-                        seen_corp_ids.add(corp_id)
-                        esi_corp_ok = False
-                        page = 1
-                        while True:
-                            cr = req.get(
-                                f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
-                                headers=headers,
-                                params={"page": page},
-                                timeout=15
-                            )
-                            if not cr.ok:
-                                break  # fall through to static fallback below
-                            esi_corp_ok = True
-                            page_bps = cr.json()
-                            if not page_bps:
-                                break
-                            for bp in page_bps:
-                                bp["_character_id"]   = cid
-                                bp["_character_name"] = char_name
-                                bp["_owner"]          = "corp"
-                                bp["_corp_id"]        = corp_id
-                                all_bps.append(bp)
-                            if len(page_bps) < 1000:
-                                break
-                            page += 1
-                        # Static fallback: if ESI corp fetch failed (e.g. 403 no role),
-                        # inject corp BPOs from the static corp_BPOs file
-                        if not esi_corp_ok and CORP_BPO_TYPE_IDS:
-                            print(f"  [esi-bps] ESI corp fetch failed for {char_name} — using static corp_BPOs fallback ({len(CORP_BPO_TYPE_IDS)} BPOs)")
-                            for tid in CORP_BPO_TYPE_IDS:
-                                all_bps.append({
-                                    "type_id":          tid,
-                                    "material_efficiency": 10,
-                                    "time_efficiency":  20,
-                                    "runs":             -1,
-                                    "location_id":      None,
-                                    "quantity":         1,
-                                    "_character_id":    cid,
-                                    "_character_name":  char_name,
-                                    "_owner":           "corp",
-                                    "_corp_id":         corp_id,
-                                })
-            except Exception as e:
-                print(f"  [esi-bps] corp failed for {char_name}: {e}")
+                cr = req.get(f"https://esi.evetech.net/latest/characters/{cid}/", timeout=10)
+                if cr.ok:
+                    corp_id = cr.json().get("corporation_id")
+            except Exception:
+                pass
+            return cid, char_name, headers, bps_out, corp_id
+
+        all_bps = []
+        char_corp_info = []  # [(cid, char_name, headers, corp_id), ...]
+
+        with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+            futures = [pool.submit(_fetch_personal, cid, h) for cid, h in auth_headers]
+            for f in as_completed(futures):
+                cid, char_name, headers, bps, corp_id = f.result()
+                all_bps.extend(bps)
+                if corp_id:
+                    char_corp_info.append((cid, char_name, headers, corp_id))
+
+        # ── Corp blueprints (deduplicated by corp_id) ──
+        seen_corp_ids = set()
+        for cid, char_name, headers, corp_id in char_corp_info:
+            if corp_id in seen_corp_ids:
+                continue
+            seen_corp_ids.add(corp_id)
+            esi_corp_ok = False
+            page = 1
+            while True:
+                try:
+                    cr = req.get(
+                        f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
+                        headers=headers, params={"page": page}, timeout=15
+                    )
+                except Exception:
+                    break
+                if not cr.ok:
+                    break
+                esi_corp_ok = True
+                page_bps = cr.json()
+                if not page_bps:
+                    break
+                for bp in page_bps:
+                    bp["_character_id"]   = cid
+                    bp["_character_name"] = char_name
+                    bp["_owner"]          = "corp"
+                    bp["_corp_id"]        = corp_id
+                    all_bps.append(bp)
+                if len(page_bps) < 1000:
+                    break
+                page += 1
+            if not esi_corp_ok and CORP_BPO_TYPE_IDS:
+                print(f"  [esi-bps] ESI corp fetch failed for {char_name} — using static corp_BPOs fallback ({len(CORP_BPO_TYPE_IDS)} BPOs)")
+                for tid in CORP_BPO_TYPE_IDS:
+                    all_bps.append({
+                        "type_id": tid, "material_efficiency": 10, "time_efficiency": 20,
+                        "runs": -1, "location_id": None, "quantity": 1,
+                        "_character_id": cid, "_character_name": char_name,
+                        "_owner": "corp", "_corp_id": corp_id,
+                    })
 
         if not all_bps:
             return jsonify({"blueprints": []})
 
-        # Resolve type names
+        # Resolve type names — try crest.db first (instant), ESI for remainder
         type_ids = list({bp["type_id"] for bp in all_bps})
         names = {}
-        for i in range(0, len(type_ids), 1000):
-            chunk = type_ids[i:i+1000]
-            names_resp = req.post(
-                "https://esi.evetech.net/latest/universe/names/",
-                json=chunk, timeout=10
-            )
-            if names_resp.ok:
-                for item in names_resp.json():
-                    names[item["id"]] = item["name"]
+        try:
+            import sqlite3 as _sq
+            conn = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+            ph = ",".join("?" * len(type_ids))
+            for row in conn.execute(f"SELECT blueprint_id, output_name FROM blueprints WHERE blueprint_id IN ({ph})", type_ids).fetchall():
+                names[row[0]] = row[1] + " Blueprint"
+            conn.close()
+        except Exception:
+            pass
+
+        missing = [tid for tid in type_ids if tid not in names]
+        if missing:
+            for i in range(0, len(missing), 1000):
+                chunk = missing[i:i+1000]
+                try:
+                    nr = req.post("https://esi.evetech.net/latest/universe/names/", json=chunk, timeout=10)
+                    if nr.ok:
+                        for item in nr.json():
+                            names[item["id"]] = item["name"]
+                except Exception:
+                    pass
 
         result = []
         for bp in all_bps:
@@ -1655,7 +1790,9 @@ def api_blueprints_esi():
             })
 
         result.sort(key=lambda x: x["name"])
-        return jsonify({"blueprints": result, "count": len(result)})
+        _ESI_BP_CACHE = {"blueprints": result, "count": len(result)}
+        _ESI_BP_CACHE_TS = time.time()
+        return jsonify(_ESI_BP_CACHE)
 
     except Exception as e:
         return jsonify({"error": str(e), "blueprints": []}), 200
@@ -1772,10 +1909,21 @@ def api_industry_jobs():
     """
     Return active industry jobs for ALL authenticated characters combined,
     sorted by time remaining (soonest first).
-    Each job includes character_name and character_id for attribution.
+    Cached for 2 minutes. Personal + corp job fetches parallelised across characters.
     """
+    global _ESI_JOBS_CACHE, _ESI_JOBS_CACHE_TS
     try:
+        from flask import request as flask_request
+        force = flask_request.args.get("force", "0") == "1"
+        if not force and _ESI_JOBS_CACHE and (time.time() - _ESI_JOBS_CACHE_TS) < _ESI_JOBS_TTL:
+            # Update seconds_remaining in-place for cached results
+            now_ts = int(time.time())
+            for j in _ESI_JOBS_CACHE.get("jobs", []):
+                j["seconds_remaining"] = max(0, j["end_ts"] - now_ts)
+            return jsonify(_ESI_JOBS_CACHE)
+
         from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import requests as req
         from datetime import datetime, timezone
 
@@ -1789,91 +1937,96 @@ def api_industry_jobs():
             11: "Reaction",
         }
 
-        # Load character records for name lookup
-        char_records = load_characters()  # cid → record
+        char_records = load_characters()
+        auth_headers = get_all_auth_headers()
+        our_char_ids = {int(k) for k in char_records.keys()}
 
-        # Fetch jobs from every character in parallel (sequential for simplicity)
-        auth_headers = get_all_auth_headers()  # list of (cid, header_dict)
-
-        all_jobs = []
-        seen_job_ids = set()
-        seen_corp_ids_jobs = set()
-
-        for cid, headers in auth_headers:
+        # ── Parallel fetch: personal jobs + char info for corp_id ──
+        def _fetch_char_jobs(cid, headers):
             char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            personal = []
+            corp_id = None
             try:
                 resp = req.get(
                     f"https://esi.evetech.net/latest/characters/{cid}/industry/jobs/",
-                    headers=headers,
-                    params={"include_completed": False},
-                    timeout=15,
+                    headers=headers, params={"include_completed": False}, timeout=15,
                 )
-                if not resp.ok:
-                    continue
-                for j in resp.json():
+                if resp.ok:
+                    for j in resp.json():
+                        j["_character_id"]   = cid
+                        j["_character_name"] = char_name
+                        personal.append(j)
+            except Exception as e:
+                print(f"  [jobs] Failed for {char_name}: {e}")
+            try:
+                cr = req.get(f"https://esi.evetech.net/latest/characters/{cid}/", timeout=10)
+                if cr.ok:
+                    corp_id = cr.json().get("corporation_id")
+            except Exception:
+                pass
+            return cid, char_name, headers, personal, corp_id
+
+        all_jobs = []
+        seen_job_ids = set()
+        char_corp_info = []
+
+        with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+            futures = [pool.submit(_fetch_char_jobs, cid, h) for cid, h in auth_headers]
+            for f in as_completed(futures):
+                cid, char_name, headers, personal, corp_id = f.result()
+                for j in personal:
                     jid = j.get("job_id")
                     if jid and jid not in seen_job_ids:
                         seen_job_ids.add(jid)
-                        j["_character_id"]   = cid
-                        j["_character_name"] = char_name
                         all_jobs.append(j)
-            except Exception as e:
-                print(f"  [jobs] Failed for {char_name}: {e}")
+                if corp_id:
+                    char_corp_info.append((cid, char_name, headers, corp_id))
 
-            # Also try corp jobs endpoint (requires esi-industry.read_corporation_jobs.v1)
+        # ── Corp jobs (deduplicated by corp_id) ──
+        seen_corp_ids_jobs = set()
+        for cid, char_name, headers, corp_id in char_corp_info:
+            if corp_id in seen_corp_ids_jobs:
+                continue
             try:
-                corp_resp = req.get(
-                    f"https://esi.evetech.net/latest/characters/{cid}/",
-                    timeout=10,
+                cresp = req.get(
+                    f"https://esi.evetech.net/latest/corporations/{corp_id}/industry/jobs/",
+                    headers=headers, params={"include_completed": False}, timeout=15,
                 )
-                corp_id = corp_resp.json().get("corporation_id") if corp_resp.ok else None
-                if corp_id and corp_id not in seen_corp_ids_jobs:
-                    cresp = req.get(
-                        f"https://esi.evetech.net/latest/corporations/{corp_id}/industry/jobs/",
-                        headers=headers,
-                        params={"include_completed": False},
-                        timeout=15,
-                    )
-                    if cresp.ok:
-                        seen_corp_ids_jobs.add(corp_id)  # only mark seen on success
-                        our_char_ids = {int(k) for k in char_records.keys()}
-                        for j in cresp.json():
-                            installer_id = j.get("installer_id")
-                            # Only include jobs installed by one of our authenticated characters
-                            if installer_id not in our_char_ids:
-                                continue
-                            jid = j.get("job_id")
-                            if jid and jid not in seen_job_ids:
-                                seen_job_ids.add(jid)
-                                installer_name = char_records.get(installer_id, {}).get("character_name", char_name)
-                                j["_character_id"]   = installer_id
-                                j["_character_name"] = installer_name
-                                all_jobs.append(j)
+                if cresp.ok:
+                    seen_corp_ids_jobs.add(corp_id)
+                    for j in cresp.json():
+                        installer_id = j.get("installer_id")
+                        if installer_id not in our_char_ids:
+                            continue
+                        jid = j.get("job_id")
+                        if jid and jid not in seen_job_ids:
+                            seen_job_ids.add(jid)
+                            installer_name = char_records.get(installer_id, {}).get("character_name", char_name)
+                            j["_character_id"]   = installer_id
+                            j["_character_name"] = installer_name
+                            all_jobs.append(j)
             except Exception as e:
                 print(f"  [jobs] Corp jobs failed for {char_name}: {e}")
 
         if not all_jobs:
             return jsonify({"jobs": []})
 
-        # Collect all product type_ids for name resolution
+        # ── Name resolution ──
         product_ids = list({j.get("product_type_id") for j in all_jobs if j.get("product_type_id")})
-
         names = {}
         if product_ids:
-            try:
-                nr = req.post(
-                    "https://esi.evetech.net/latest/universe/names/",
-                    json=product_ids[:1000],
-                    timeout=10,
-                )
-                if nr.ok:
-                    for item in nr.json():
-                        names[item["id"]] = item["name"]
-            except Exception:
-                pass
+            for i in range(0, len(product_ids), 1000):
+                try:
+                    nr = req.post("https://esi.evetech.net/latest/universe/names/",
+                                  json=product_ids[i:i+1000], timeout=10)
+                    if nr.ok:
+                        for item in nr.json():
+                            names[item["id"]] = item["name"]
+                except Exception:
+                    pass
 
-        # Fetch Jita sell prices for all product types (best sell order = estimated proceeds)
-        mfg_activity_ids = {1, 11}  # Manufacturing, Reaction
+        # ── Market prices for manufacturing/reaction outputs ──
+        mfg_activity_ids = {1, 11}
         mfg_product_ids = list({
             j.get("product_type_id") for j in all_jobs
             if j.get("activity_id") in mfg_activity_ids and j.get("product_type_id")
@@ -1886,75 +2039,63 @@ def api_industry_jobs():
             except Exception:
                 pass
 
-        # Look up material costs for MFG products from crest.db
-        # material_cost_per_unit[output_id] = ISK cost for 1 run at ME0 (approximate)
+        # ── Material cost lookup (single pass, batched queries) ──
         material_cost_per_unit: dict[int, float] = {}
         if mfg_product_ids:
             try:
                 import sqlite3 as _sqlite3
                 _cdb = _sqlite3.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
                 _cdb.row_factory = _sqlite3.Row
+
+                # 1) Bulk-fetch bp_id → output_id mapping
+                ph = ",".join("?" * len(mfg_product_ids))
+                bp_map = {}  # output_id → blueprint_id
+                for row in _cdb.execute(
+                    f"SELECT output_id, blueprint_id FROM blueprints WHERE output_id IN ({ph})",
+                    mfg_product_ids
+                ).fetchall():
+                    bp_map[row["output_id"]] = row["blueprint_id"]
+
+                # 2) Bulk-fetch all materials for those blueprints
+                bp_ids = list(set(bp_map.values()))
+                bp_mats: dict[int, list] = {}  # blueprint_id → [(mat_type_id, qty), ...]
+                if bp_ids:
+                    ph2 = ",".join("?" * len(bp_ids))
+                    for row in _cdb.execute(
+                        f"SELECT blueprint_id, material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id IN ({ph2})",
+                        bp_ids
+                    ).fetchall():
+                        bp_mats.setdefault(row["blueprint_id"], []).append(
+                            (row["material_type_id"], row["base_quantity"])
+                        )
+                _cdb.close()
+
+                # 3) Collect all unique material type_ids and fetch any missing prices
+                all_mat_ids = set()
+                for mats in bp_mats.values():
+                    for mid, _ in mats:
+                        all_mat_ids.add(mid)
+                missing_mat_ids = all_mat_ids - set(market_prices.keys())
+                if missing_mat_ids:
+                    from pricer import get_prices_bulk as _gpb
+                    market_prices.update(_gpb(list(missing_mat_ids)))
+
+                # 4) Compute costs in one pass
                 for pid in mfg_product_ids:
-                    bp_row = _cdb.execute(
-                        "SELECT blueprint_id FROM blueprints WHERE output_id = ? LIMIT 1", (pid,)
-                    ).fetchone()
-                    if not bp_row:
+                    bpid = bp_map.get(pid)
+                    if not bpid or bpid not in bp_mats:
                         continue
-                    mats = _cdb.execute(
-                        "SELECT material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id = ?",
-                        (bp_row["blueprint_id"],)
-                    ).fetchall()
                     cost = 0.0
-                    for mat in mats:
-                        mp = market_prices.get(mat["material_type_id"])
+                    for mid, qty in bp_mats[bpid]:
+                        mp = market_prices.get(mid)
                         if mp and mp.get("sell"):
-                            cost += mp["sell"] * mat["base_quantity"]
+                            cost += mp["sell"] * qty
                         else:
                             cost = None
                             break
                     if cost is not None:
                         material_cost_per_unit[pid] = cost
-                # Also fetch material prices for any mat type_ids not in market_prices
-                # (handles components that weren't in the initial price fetch)
-                missing_mat_ids = set()
-                for pid in mfg_product_ids:
-                    bp_row = _cdb.execute(
-                        "SELECT blueprint_id FROM blueprints WHERE output_id = ? LIMIT 1", (pid,)
-                    ).fetchone()
-                    if bp_row:
-                        for mat in _cdb.execute(
-                            "SELECT material_type_id FROM blueprint_materials WHERE blueprint_id = ?",
-                            (bp_row["blueprint_id"],)
-                        ).fetchall():
-                            if mat["material_type_id"] not in market_prices:
-                                missing_mat_ids.add(mat["material_type_id"])
-                if missing_mat_ids:
-                    from pricer import get_prices_bulk as _gpb
-                    extra = _gpb(list(missing_mat_ids))
-                    market_prices.update(extra)
-                    # Re-compute costs with full price data
-                    material_cost_per_unit.clear()
-                    for pid in mfg_product_ids:
-                        bp_row = _cdb.execute(
-                            "SELECT blueprint_id FROM blueprints WHERE output_id = ? LIMIT 1", (pid,)
-                        ).fetchone()
-                        if not bp_row:
-                            continue
-                        mats = _cdb.execute(
-                            "SELECT material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id = ?",
-                            (bp_row["blueprint_id"],)
-                        ).fetchall()
-                        cost = 0.0
-                        for mat in mats:
-                            mp = market_prices.get(mat["material_type_id"])
-                            if mp and mp.get("sell"):
-                                cost += mp["sell"] * mat["base_quantity"]
-                            else:
-                                cost = None
-                                break
-                        if cost is not None:
-                            material_cost_per_unit[pid] = cost
-                _cdb.close()
+
             except Exception as _e:
                 print(f"  [jobs] material cost lookup failed: {_e}")
 
@@ -1976,7 +2117,6 @@ def api_industry_jobs():
             total_secs = max(1, end_ts - start_ts)
             secs_left = max(0, end_ts - now_ts)
             activity_id = j.get("activity_id", 0)
-            # For Copying (5), ESI returns no product_type_id — the output is a BPC of the source blueprint
             pid = j.get("product_type_id") or (j.get("blueprint_type_id") if activity_id == 5 else None)
             runs = j.get("runs", 1)
             p = market_prices.get(pid) if pid else None
@@ -2002,9 +2142,10 @@ def api_industry_jobs():
                 **_build_profit(pid, runs, sell_price, material_cost_per_unit),
             })
 
-        # Sort by soonest completing first
         result.sort(key=lambda x: x["seconds_remaining"])
-        return jsonify({"jobs": result, "count": len(result)})
+        _ESI_JOBS_CACHE = {"jobs": result, "count": len(result)}
+        _ESI_JOBS_CACHE_TS = time.time()
+        return jsonify(_ESI_JOBS_CACHE)
 
     except Exception as e:
         return jsonify({"error": str(e), "jobs": []}), 200
@@ -2015,36 +2156,47 @@ def api_industry_jobs():
 def api_orders():
     """
     Return active sell and buy orders for ALL characters combined.
+    Cached for 2 minutes. Character order fetches parallelised.
     Also diffs against the previously stored orders to detect fulfilled
     (sold) sell orders and records them in sell_order_history.
-
-    Response: { sell: [...], buy: [...], newly_fulfilled: [...] }
-    Each order includes character_name and character_id for attribution.
     """
+    global _ESI_ORDERS_CACHE, _ESI_ORDERS_CACHE_TS
     try:
+        from flask import request as flask_request
+        force = flask_request.args.get("force", "0") == "1"
+        if not force and _ESI_ORDERS_CACHE and (time.time() - _ESI_ORDERS_CACHE_TS) < _ESI_ORDERS_TTL:
+            return jsonify(_ESI_ORDERS_CACHE)
+
         from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import requests as req
 
         char_records = load_characters()
         auth_headers = get_all_auth_headers()
 
-        all_orders = []
-        for cid, headers in auth_headers:
+        # ── Parallel fetch: orders for all chars at once ──
+        def _fetch_char_orders(cid, headers):
             char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            orders = []
             try:
                 resp = req.get(
                     f"https://esi.evetech.net/latest/characters/{cid}/orders/",
-                    headers=headers,
-                    timeout=15,
+                    headers=headers, timeout=15,
                 )
-                if not resp.ok:
-                    continue
-                for o in resp.json():
-                    o["_character_id"]   = cid
-                    o["_character_name"] = char_name
-                    all_orders.append(o)
+                if resp.ok:
+                    for o in resp.json():
+                        o["_character_id"]   = cid
+                        o["_character_name"] = char_name
+                        orders.append(o)
             except Exception as e:
                 print(f"  [orders] Failed for {char_name}: {e}")
+            return orders
+
+        all_orders = []
+        with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+            futures = [pool.submit(_fetch_char_orders, cid, h) for cid, h in auth_headers]
+            for f in as_completed(futures):
+                all_orders.extend(f.result())
 
         if not all_orders:
             return jsonify({"sell": [], "buy": [], "newly_fulfilled": []})
@@ -2053,14 +2205,14 @@ def api_orders():
         type_ids = list({o["type_id"] for o in all_orders})
         names = {}
         try:
-            nr = req.post(
-                "https://esi.evetech.net/latest/universe/names/",
-                json=type_ids[:1000],
-                timeout=10,
-            )
-            if nr.ok:
-                for item in nr.json():
-                    names[item["id"]] = item["name"]
+            for i in range(0, len(type_ids), 1000):
+                nr = req.post(
+                    "https://esi.evetech.net/latest/universe/names/",
+                    json=type_ids[i:i+1000], timeout=10,
+                )
+                if nr.ok:
+                    for item in nr.json():
+                        names[item["id"]] = item["name"]
         except Exception:
             pass
 
@@ -2071,8 +2223,7 @@ def api_orders():
             try:
                 rr = req.post(
                     "https://esi.evetech.net/latest/universe/names/",
-                    json=region_ids[:100],
-                    timeout=10,
+                    json=region_ids[:100], timeout=10,
                 )
                 if rr.ok:
                     for item in rr.json():
@@ -2111,10 +2262,510 @@ def api_orders():
         except Exception as e:
             print(f"  [orders] sync_open_orders failed: {e}")
 
-        return jsonify({"sell": sell, "buy": buy, "newly_fulfilled": newly_fulfilled})
+        _ESI_ORDERS_CACHE = {"sell": sell, "buy": buy, "newly_fulfilled": newly_fulfilled}
+        _ESI_ORDERS_CACHE_TS = time.time()
+        return jsonify(_ESI_ORDERS_CACHE)
 
     except Exception as e:
         return jsonify({"error": str(e), "sell": [], "buy": [], "newly_fulfilled": []}), 200
+
+
+# ── Smart Buy Sourcing ─────────────────────────────────────────────────────────
+
+# Hub definitions: name, system_id, region_id, station_id
+_MARKET_HUBS_SMART = [
+    {"name": "Jita",    "system_id": 30000142, "region_id": 10000002, "station_id": 60003760},
+    {"name": "Amarr",   "system_id": 30002187, "region_id": 10000043, "station_id": 60008494},
+    {"name": "Dodixie", "system_id": 30002659, "region_id": 10000032, "station_id": 60011866},
+    {"name": "Rens",    "system_id": 30002510, "region_id": 10000030, "station_id": 60004588},
+    {"name": "Hek",     "system_id": 30002053, "region_id": 10000042, "station_id": 60005686},
+]
+
+# Per-unit packaged volumes for common materials (m³).
+# Values from EVE SDE — used when the item is not in crest.db.
+_PACKAGED_VOLUMES: dict[int, float] = {
+    # Minerals
+    34:    0.01,   # Tritanium
+    35:    0.01,   # Pyerite
+    36:    0.01,   # Mexallon
+    37:    0.01,   # Isogen
+    38:    0.01,   # Nocxium
+    39:    0.01,   # Zydrine
+    40:    0.01,   # Megacyte
+    11399: 0.01,   # Morphite
+    # PI materials (T1–T4) typically 0.01 – 1.5 m³
+    2073:  0.01,   # Lustering Alloy
+    2390:  0.01,   # Sheen Compound
+    2389:  0.01,   # Gleaming Alloy
+    2392:  0.01,   # Motley Compound
+    2397:  0.01,   # Fiber Composite
+    2395:  0.01,   # Lucent Compound
+    2396:  0.01,   # Opulent Compound
+    2398:  0.01,   # Glossy Compound
+    2393:  0.01,   # Crystal Compound
+    2394:  0.01,   # Dark Compound
+    9828:  0.01,   # Neo Mercurite
+    2399:  0.01,   # Base Metals
+    2400:  0.01,   # Heavy Metals
+    2401:  0.01,   # Noble Metals
+    2402:  0.01,   # Reactive Metals
+    2403:  0.01,   # Precious Metals
+    2404:  0.01,   # Toxic Metals
+    2405:  0.01,   # Industrial Fibers
+    2406:  0.01,   # Supertensile Plastics
+    2407:  0.01,   # Polyaramids
+    2408:  0.01,   # Coolant
+    2409:  0.01,   # Condensates
+    2410:  0.01,   # Construction Blocks
+    2411:  0.01,   # Nanites
+    2412:  0.01,   # Silicate Glass
+    2413:  0.01,   # Smartfab Units
+    # T2 components (roughly 1 m³ each)
+    11530: 1.0,    # Radar Sensor Cluster
+    11538: 1.0,    # Magnetometric Sensor Cluster
+    11544: 1.0,    # Gravimetric Sensor Cluster
+    11548: 1.0,    # Ladar Sensor Cluster
+    11552: 1.0,    # Multispectral Sensor Cluster
+}
+
+_SMART_BUY_CACHE: dict = {}
+_SMART_BUY_CACHE_TTL = 180  # 3 minutes — market data is good for a bit
+
+
+def _get_jumps(origin_system_id: int, dest_system_id: int) -> int | None:
+    """
+    Query ESI /route/ for the number of jumps between two solar systems.
+    Returns None on error or same-system (0 jumps).
+    """
+    if origin_system_id == dest_system_id:
+        return 0
+    try:
+        resp = requests.get(
+            f"https://esi.evetech.net/latest/route/{origin_system_id}/{dest_system_id}/",
+            params={"flag": "shortest"},
+            timeout=8,
+        )
+        if resp.ok:
+            route = resp.json()
+            # route is a list of system IDs including origin and destination
+            return max(0, len(route) - 1)
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_system_id(name_or_id: str) -> int | None:
+    """Resolve a system name or numeric string to a system_id integer."""
+    if not name_or_id:
+        return None
+    if name_or_id.isdigit():
+        return int(name_or_id)
+    # Use the SCI name cache (already populated by _ensure_sci_cache)
+    _ensure_sci_cache()
+    sid_str = _SCI_NAME_CACHE.get(name_or_id.strip().lower())
+    if sid_str:
+        return int(sid_str)
+    # Fallback: ESI search
+    try:
+        resp = requests.get(
+            "https://esi.evetech.net/latest/search/",
+            params={"categories": "solar_system", "search": name_or_id, "strict": "true"},
+            timeout=8,
+        )
+        if resp.ok:
+            ids = resp.json().get("solar_system", [])
+            if ids:
+                return int(ids[0])
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_hub_sell_prices(hub: dict, type_ids: list[int]) -> dict[int, float]:
+    """
+    Fetch best sell (lowest) prices for a list of type_ids at a specific hub.
+
+    Jita  → instant SQLite query against local market_cache.db.
+    Others → ESI /markets/{region}/orders/?type_id=X&order_type=sell per item,
+             filtered to the hub's main station.  Parallelised with a thread pool
+             so the total latency is ~1 ESI round-trip regardless of item count.
+    Returns { type_id: best_sell_price } — missing entries mean no stock.
+    """
+    result: dict[int, float] = {}
+
+    if hub["name"] == "Jita":
+        # Fast path: local SQLite cache (populated by pricer._fetch_all_orders)
+        try:
+            import sqlite3 as _sq
+            conn = _sq.connect(os.path.join(_HERE, "market_cache.db"))
+            conn.row_factory = _sq.Row
+            placeholders = ",".join("?" * len(type_ids))
+            rows = conn.execute(
+                f"SELECT type_id, MIN(price) as best_sell FROM market_orders "
+                f"WHERE type_id IN ({placeholders}) AND is_buy_order=0 "
+                f"GROUP BY type_id",
+                type_ids,
+            ).fetchall()
+            conn.close()
+            for row in rows:
+                if row["best_sell"] is not None:
+                    result[row["type_id"]] = row["best_sell"]
+        except Exception:
+            pass
+        return result
+
+    # Non-Jita: use the ESI per-type endpoint — one call per item, parallelised.
+    # GET /markets/{region_id}/orders/?order_type=sell&type_id={type_id}
+    # Returns only orders for that type across the region; we filter to the hub station.
+    region_id  = hub["region_id"]
+    station_id = hub["station_id"]
+
+    def _fetch_one(tid: int) -> tuple[int, float | None]:
+        try:
+            resp = requests.get(
+                f"https://esi.evetech.net/latest/markets/{region_id}/orders/",
+                params={"order_type": "sell", "type_id": tid},
+                timeout=10,
+            )
+            if not resp.ok:
+                return tid, None
+            best = None
+            for o in resp.json():
+                if o.get("location_id") != station_id:
+                    continue
+                p = o["price"]
+                if best is None or p < best:
+                    best = p
+            return tid, best
+        except Exception:
+            return tid, None
+
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+    # Cap workers at 15 — ESI allows ~20 req/s; stay polite
+    with _TPE(max_workers=15) as pool:
+        futures = {pool.submit(_fetch_one, tid): tid for tid in type_ids}
+        for fut in _ac(futures):
+            tid, price = fut.result()
+            if price is not None:
+                result[tid] = price
+
+    return result
+
+
+def _get_volume_m3(type_id: int, fallback: float = 0.01) -> float:
+    """
+    Look up the packaged volume (m³) for a type_id.
+    Checks: (1) in-memory lookup table, (2) crest.db, (3) ESI, (4) fallback.
+    """
+    if type_id in _PACKAGED_VOLUMES:
+        return _PACKAGED_VOLUMES[type_id]
+    # Try crest.db blueprint materials volume
+    try:
+        import sqlite3 as _sq
+        conn = _sq.connect(os.path.join(_HERE, "crest.db"))
+        row = conn.execute(
+            "SELECT volume_m3 FROM blueprints WHERE output_id=? LIMIT 1", (type_id,)
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            v = float(row[0])
+            _PACKAGED_VOLUMES[type_id] = v
+            return v
+    except Exception:
+        pass
+    # Try sqlite-latest.sqlite (SDE)
+    try:
+        import sqlite3 as _sq
+        sde_path = os.path.join(_HERE, "sqlite-latest.sqlite")
+        if os.path.exists(sde_path):
+            conn = _sq.connect(sde_path)
+            row = conn.execute(
+                "SELECT volume FROM invTypes WHERE typeID=? LIMIT 1", (type_id,)
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                v = float(row[0])
+                _PACKAGED_VOLUMES[type_id] = v
+                return v
+    except Exception:
+        pass
+    return fallback
+
+
+@app.route("/api/shopping/optimal_sources", methods=["POST"])
+def api_shopping_optimal_sources():
+    """
+    Smart Buy: find the cheapest combination of market hubs to source all materials,
+    taking into account jump distance from the player's current system.
+
+    POST body (JSON):
+    {
+        "items": [{"type_id": 34, "name": "Tritanium", "quantity": 10000}, ...],
+        "player_system": "Korsiki"   // system name or numeric ID; optional
+    }
+
+    Response:
+    {
+        "per_material": [
+            {
+                "type_id": 34,
+                "name": "Tritanium",
+                "quantity": 10000,
+                "volume_m3": 100.0,
+                "sources": [
+                    {"hub": "Jita", "price": 5.12, "total_cost": 51200, "jumps": 2, "has_stock": true},
+                    ...
+                ],
+                "best_hub":          "Jita",
+                "best_price":        5.12,
+                "best_total_cost":   51200,
+                "jita_price":        5.12,
+                "jita_total_cost":   51200,
+                "in_hangar":         false,
+                "hangar_qty":        0
+            },
+            ...
+        ],
+        "summary": {
+            "total_optimal_cost":  1234567.0,
+            "total_jita_cost":     1345678.0,
+            "total_savings":       111111.0,
+            "total_haul_m3":       450.0,
+            "local_trips":         [{"hub": "Amarr", "jumps": 6, "items": 3, "cost": 123456.0}],
+            "materials_in_hangar": ["Tritanium", ...],
+            "materials_no_stock":  ["Rare Ore", ...]
+        },
+        "hub_jumps": {"Jita": 2, "Amarr": 6, ...}
+    }
+    """
+    from flask import request as freq
+    try:
+        body          = freq.get_json(force=True) or {}
+        items         = body.get("items", [])          # [{type_id, name, quantity}]
+        player_system = str(body.get("player_system", "")).strip()
+
+        if not items:
+            return jsonify({"error": "No items provided"}), 400
+
+        # ── Cache key ──────────────────────────────────────────────────────────
+        import hashlib, json as _json
+        cache_key = hashlib.md5(
+            _json.dumps({"items": sorted(items, key=lambda x: x["type_id"]),
+                         "player_system": player_system}, sort_keys=True).encode()
+        ).hexdigest()
+        cached = _SMART_BUY_CACHE.get(cache_key)
+        if cached and (time.time() - cached["_ts"]) < _SMART_BUY_CACHE_TTL:
+            return jsonify({k: v for k, v in cached.items() if k != "_ts"})
+
+        # ── Resolve player system ID ───────────────────────────────────────────
+        player_sys_id: int | None = _resolve_system_id(player_system) if player_system else None
+
+        # ── Resolve hub jump distances from player system (sequential — fast) ──
+        hub_jumps: dict[str, int | None] = {}
+        if player_sys_id:
+            for h in _MARKET_HUBS_SMART:
+                hub_jumps[h["name"]] = _get_jumps(player_sys_id, h["system_id"])
+        else:
+            for h in _MARKET_HUBS_SMART:
+                hub_jumps[h["name"]] = None
+
+        # ── Ensure Jita market cache is fresh (fast path for Jita lookups) ────
+        try:
+            from pricer import _ensure_orders_fresh
+            _ensure_orders_fresh()
+        except Exception:
+            pass
+
+        # ── Build type_id list ─────────────────────────────────────────────────
+        all_type_ids = [int(it["type_id"]) for it in items]
+        type_id_set  = set(all_type_ids)
+
+        # ── Fetch prices for all hubs in a single flat thread pool ─────────────
+        # Each (hub, type_id) pair is one ESI call.  Jita uses local DB — instant.
+        # Flatten into one pool to avoid nested ThreadPoolExecutors (which can
+        # deadlock in Flask's threaded server).
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+        # Jita is resolved synchronously via SQLite (fast, no threading needed)
+        jita_hub = next(h for h in _MARKET_HUBS_SMART if h["name"] == "Jita")
+        hub_prices: dict[str, dict[int, float]] = {
+            "Jita": _fetch_hub_sell_prices(jita_hub, all_type_ids)
+        }
+        for h in _MARKET_HUBS_SMART:
+            if h["name"] != "Jita":
+                hub_prices[h["name"]] = {}
+
+        # Non-Jita: flatten (hub, type_id) → one pool
+        def _fetch_one_hub_type(hub: dict, tid: int) -> tuple[str, int, float | None]:
+            region_id  = hub["region_id"]
+            station_id = hub["station_id"]
+            try:
+                resp = requests.get(
+                    f"https://esi.evetech.net/latest/markets/{region_id}/orders/",
+                    params={"order_type": "sell", "type_id": tid},
+                    timeout=10,
+                )
+                if not resp.ok:
+                    return hub["name"], tid, None
+                best = None
+                for o in resp.json():
+                    if o.get("location_id") != station_id:
+                        continue
+                    p = o["price"]
+                    if best is None or p < best:
+                        best = p
+                return hub["name"], tid, best
+            except Exception:
+                return hub["name"], tid, None
+
+        non_jita_hubs = [h for h in _MARKET_HUBS_SMART if h["name"] != "Jita"]
+        tasks = [(h, tid) for h in non_jita_hubs for tid in all_type_ids]
+
+        with _TPE(max_workers=20) as pool:
+            futures = [pool.submit(_fetch_one_hub_type, h, tid) for h, tid in tasks]
+            for fut in _ac(futures):
+                try:
+                    hub_name, tid, price = fut.result()
+                    if price is not None:
+                        if tid not in hub_prices[hub_name] or price < hub_prices[hub_name][tid]:
+                            hub_prices[hub_name][tid] = price
+                except Exception:
+                    pass
+
+        # ── Load hangar quantities ─────────────────────────────────────────────
+        hangar_qty: dict[int, int] = {}
+        try:
+            if _ASSETS_CACHE and _ASSETS_CACHE.get("assets"):
+                for k, v in _ASSETS_CACHE["assets"].items():
+                    hangar_qty[int(k)] = int(v)
+        except Exception:
+            pass
+
+        # ── Per-material analysis ──────────────────────────────────────────────
+        per_material = []
+        total_optimal_cost = 0.0
+        total_jita_cost    = 0.0
+        haul_m3_from_jita  = 0.0
+        materials_in_hangar: list[str] = []
+        materials_no_stock:  list[str] = []
+
+        # Accumulate per-hub totals for "local_trips" summary
+        hub_trip_costs:  dict[str, float] = {h["name"]: 0.0 for h in _MARKET_HUBS_SMART}
+        hub_trip_counts: dict[str, int]   = {h["name"]: 0   for h in _MARKET_HUBS_SMART}
+
+        for it in items:
+            tid      = int(it["type_id"])
+            name     = it.get("name", f"Type {tid}")
+            qty      = int(it.get("quantity", 0))
+            vol_unit = _get_volume_m3(tid)
+            vol_m3   = round(vol_unit * qty, 4)
+            h_qty    = hangar_qty.get(tid, 0)
+
+            # Build per-hub source info
+            sources = []
+            for hub in _MARKET_HUBS_SMART:
+                hub_name   = hub["name"]
+                price      = hub_prices.get(hub_name, {}).get(tid)
+                has_stock  = price is not None
+                total_cost = round(price * qty, 2) if price is not None else None
+                jumps      = hub_jumps.get(hub_name)
+                sources.append({
+                    "hub":        hub_name,
+                    "price":      price,
+                    "total_cost": total_cost,
+                    "jumps":      jumps,
+                    "has_stock":  has_stock,
+                })
+
+            # Choose best hub (cheapest available; None = no stock anywhere)
+            available = [s for s in sources if s["has_stock"]]
+            if available:
+                # Sort by price; if jumps known, break ties by jumps
+                best = min(
+                    available,
+                    key=lambda s: (
+                        s["total_cost"],
+                        s["jumps"] if s["jumps"] is not None else 999,
+                    ),
+                )
+            else:
+                best = None
+
+            jita_source = next((s for s in sources if s["hub"] == "Jita"), None)
+            jita_price       = jita_source["price"]      if jita_source else None
+            jita_total_cost  = jita_source["total_cost"] if jita_source else None
+
+            # Hangar coverage
+            in_hangar = h_qty >= qty
+
+            if in_hangar:
+                materials_in_hangar.append(name)
+            elif not available:
+                materials_no_stock.append(name)
+
+            if best and not in_hangar:
+                total_optimal_cost += best["total_cost"] or 0.0
+                hub_trip_costs[best["hub"]]  += best["total_cost"] or 0.0
+                hub_trip_counts[best["hub"]] += 1
+
+            if not in_hangar:
+                total_jita_cost += jita_total_cost or 0.0
+                if jita_source and jita_source["has_stock"]:
+                    # If best hub is Jita (or no stock elsewhere), count haul volume
+                    if best is None or best["hub"] == "Jita":
+                        haul_m3_from_jita += vol_m3
+
+            per_material.append({
+                "type_id":       tid,
+                "name":          name,
+                "quantity":      qty,
+                "volume_m3":     vol_m3,
+                "sources":       sources,
+                "best_hub":      best["hub"]        if best else None,
+                "best_price":    best["price"]      if best else None,
+                "best_total_cost": best["total_cost"] if best else None,
+                "jita_price":    jita_price,
+                "jita_total_cost": jita_total_cost,
+                "in_hangar":     in_hangar,
+                "hangar_qty":    h_qty,
+            })
+
+        # ── Build local_trips list (non-Jita hubs that are best for ≥1 material) ─
+        local_trips = []
+        for hub in _MARKET_HUBS_SMART:
+            hn = hub["name"]
+            if hn == "Jita":
+                continue
+            if hub_trip_counts[hn] > 0:
+                local_trips.append({
+                    "hub":    hn,
+                    "jumps":  hub_jumps.get(hn),
+                    "items":  hub_trip_counts[hn],
+                    "cost":   round(hub_trip_costs[hn], 2),
+                })
+        local_trips.sort(key=lambda x: (x["jumps"] or 999, x["hub"]))
+
+        result_payload = {
+            "per_material": per_material,
+            "summary": {
+                "total_optimal_cost": round(total_optimal_cost, 2),
+                "total_jita_cost":    round(total_jita_cost, 2),
+                "total_savings":      round(total_jita_cost - total_optimal_cost, 2),
+                "total_haul_m3":      round(haul_m3_from_jita, 4),
+                "local_trips":        local_trips,
+                "materials_in_hangar": materials_in_hangar,
+                "materials_no_stock":  materials_no_stock,
+            },
+            "hub_jumps": {k: v for k, v in hub_jumps.items()},
+        }
+
+        _SMART_BUY_CACHE[cache_key] = {**result_payload, "_ts": time.time()}
+        return jsonify(result_payload)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/sell_history", methods=["GET"])
@@ -2160,6 +2811,26 @@ if __name__ == "__main__":
     def _prewarm():
         print("  [prewarm] Background scan starting...")
         try:
+            # Pre-load skill name mapping (25MB bz2 download, only once)
+            global _skill_id_names
+            if not _skill_id_names:
+                try:
+                    import bz2 as _bz2, urllib.request as _ur
+                    _req = _ur.Request(
+                        "https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2",
+                        headers={"User-Agent": "CREST-Server/1.0"}
+                    )
+                    with _ur.urlopen(_req, timeout=30) as _r:
+                        _raw = _bz2.decompress(_r.read())
+                    for _line in _raw.decode("utf-8").splitlines()[1:]:
+                        _parts = _line.split(",")
+                        try:
+                            _skill_id_names[int(_parts[0])] = _parts[2]
+                        except (ValueError, IndexError):
+                            pass
+                    print(f"  [prewarm] Skill names loaded ({len(_skill_id_names)} types)")
+                except Exception as _e:
+                    print(f"  [prewarm] Skill names download failed: {_e}")
             with app.app_context():
                 client = app.test_client()
                 client.get("/api/scan")

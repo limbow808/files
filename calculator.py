@@ -126,6 +126,7 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
         material_cost += line_cost
         material_breakdown.append({
             "type_id":    tid,
+            "name":       mat.get("name", ""),
             "quantity":   actual_qty,
             "unit_price": unit_price,
             "line_cost":  line_cost

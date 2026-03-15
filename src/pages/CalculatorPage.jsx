@@ -432,7 +432,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
         )}
       </div>
 
-      <ShoppingList checkedItems={checkedItems} overrides={overrides} />
+      <ShoppingList checkedItems={checkedItems} overrides={overrides} playerSystem={system} />
     </div>
   );
 }
