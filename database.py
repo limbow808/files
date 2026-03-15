@@ -1,14 +1,18 @@
 """
-database.py - Simple SQLite storage for scan results
-====================================================
+database.py - Simple SQLite storage for scan results and sell order history
+===========================================================================
 Saves each scan's results (JSON) with a timestamp and exposes a small
 history API for the --history feature.
+
+Also tracks open market orders and detects when they disappear (= sold),
+recording the sale in sell_order_history for accurate ISK/hr calculations.
 """
 import sqlite3
 import json
 import time
 import threading
-from typing import List, Dict, Any
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
 
 DB_PATH = "crest_history.db"
 
@@ -37,6 +41,38 @@ def init_db() -> None:
         )
         """
     )
+    # ── Open orders snapshot (one row per order_id, updated each poll) ────────
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS open_orders (
+            order_id       INTEGER PRIMARY KEY,
+            type_id        INTEGER NOT NULL,
+            item_name      TEXT,
+            character_id   INTEGER,
+            quantity       INTEGER,
+            price          REAL,
+            issued         TEXT,
+            first_seen_ts  INTEGER NOT NULL
+        )
+        """
+    )
+    # ── Sell order history (written when an open order disappears) ─────────────
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sell_order_history (
+            order_id      INTEGER PRIMARY KEY,
+            type_id       INTEGER NOT NULL,
+            item_name     TEXT,
+            character_id  INTEGER,
+            quantity      INTEGER,
+            price         REAL,
+            issued        TEXT,
+            fulfilled     TEXT,
+            days_to_sell  REAL,
+            revenue       REAL
+        )
+        """
+    )
     conn.commit()
 
 
@@ -58,6 +94,182 @@ def get_history(days: int = 7) -> List[Dict[str, Any]]:
     cur.execute("SELECT ts, results FROM scans WHERE ts >= ? ORDER BY ts DESC", (cutoff,))
     rows = cur.fetchall()
     return [{"ts": r["ts"], "results": json.loads(r["results"])} for r in rows]
+
+
+# ─── Open order tracking ──────────────────────────────────────────────────────
+
+def _parse_iso(ts_str: str) -> float:
+    """Parse an ISO 8601 timestamp string to a Unix timestamp (float)."""
+    if not ts_str:
+        return time.time()
+    ts_str = ts_str.rstrip("Z")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
+        try:
+            dt = datetime.strptime(ts_str, fmt).replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return time.time()
+
+
+def sync_open_orders(current_orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Compare `current_orders` (fresh from ESI) against the stored open_orders table.
+
+    - Orders present in the DB but absent from current = fulfilled (sold).
+      These are written to sell_order_history and removed from open_orders.
+    - Orders not yet in the DB are inserted into open_orders.
+
+    Args:
+        current_orders: List of enriched order dicts from /api/orders (sell side only).
+                        Each must have: order_id, type_id, item_name, character_id,
+                        quantity (volume_remain), price, issued.
+
+    Returns:
+        List of newly-recorded sell history dicts (one per fulfilled order).
+    """
+    init_db()
+    conn = _get_conn()
+    cur  = conn.cursor()
+    now_ts   = int(time.time())
+    now_iso  = datetime.fromtimestamp(now_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Build lookup of currently-live order IDs
+    live_ids = {o["order_id"] for o in current_orders if o.get("order_id")}
+
+    # ── 1. Detect fulfilled orders ────────────────────────────────────────────
+    cur.execute("SELECT order_id, type_id, item_name, character_id, quantity, price, issued FROM open_orders")
+    stored_rows = cur.fetchall()
+
+    fulfilled = []
+    for row in stored_rows:
+        oid = row["order_id"]
+        if oid in live_ids:
+            continue  # still open
+
+        issued_ts    = _parse_iso(row["issued"])
+        days_to_sell = (now_ts - issued_ts) / 86400.0
+        revenue      = (row["price"] or 0) * (row["quantity"] or 0)
+
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO sell_order_history
+              (order_id, type_id, item_name, character_id, quantity,
+               price, issued, fulfilled, days_to_sell, revenue)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (oid, row["type_id"], row["item_name"], row["character_id"],
+             row["quantity"], row["price"], row["issued"],
+             now_iso, round(days_to_sell, 4), round(revenue, 2))
+        )
+        cur.execute("DELETE FROM open_orders WHERE order_id = ?", (oid,))
+        fulfilled.append({
+            "order_id":    oid,
+            "type_id":     row["type_id"],
+            "item_name":   row["item_name"],
+            "days_to_sell": round(days_to_sell, 4),
+            "revenue":     round(revenue, 2),
+            "fulfilled":   now_iso,
+        })
+
+    # ── 2. Upsert currently-live orders ───────────────────────────────────────
+    for o in current_orders:
+        oid = o.get("order_id")
+        if not oid:
+            continue
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO open_orders
+              (order_id, type_id, item_name, character_id, quantity,
+               price, issued, first_seen_ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (oid, o.get("type_id"), o.get("item_name") or o.get("type_name"),
+             o.get("character_id"), o.get("volume_remain") or o.get("quantity"),
+             o.get("price"), o.get("issued"), now_ts)
+        )
+
+    conn.commit()
+    return fulfilled
+
+
+def get_sell_history_stats() -> Dict[str, Any]:
+    """
+    Return per-item and overall sell-time statistics from sell_order_history.
+
+    Response shape:
+    {
+        "overall": { "avg_days_to_sell": float, "total_sales": int, "total_revenue": float },
+        "by_item": {
+            "<item_name>": {
+                "type_id":          int,
+                "avg_days_to_sell": float,
+                "total_sold":       int,
+                "total_revenue":    float,
+                "fastest_sale":     float,
+                "slowest_sale":     float,
+            },
+            ...
+        }
+    }
+    """
+    init_db()
+    conn = _get_conn()
+    cur  = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+            type_id,
+            item_name,
+            COUNT(*)               AS total_sold,
+            AVG(days_to_sell)      AS avg_days,
+            SUM(revenue)           AS total_revenue,
+            MIN(days_to_sell)      AS fastest_sale,
+            MAX(days_to_sell)      AS slowest_sale
+        FROM sell_order_history
+        GROUP BY type_id
+        ORDER BY total_sold DESC
+        """
+    )
+    rows = cur.fetchall()
+
+    by_item: Dict[str, Any] = {}
+    for r in rows:
+        key = r["item_name"] or f"Type {r['type_id']}"
+        by_item[key] = {
+            "type_id":          r["type_id"],
+            "avg_days_to_sell": round(r["avg_days"], 4) if r["avg_days"] is not None else None,
+            "total_sold":       r["total_sold"],
+            "total_revenue":    round(r["total_revenue"] or 0, 2),
+            "fastest_sale":     round(r["fastest_sale"], 4) if r["fastest_sale"] is not None else None,
+            "slowest_sale":     round(r["slowest_sale"], 4) if r["slowest_sale"] is not None else None,
+        }
+
+    # Overall average across all recorded sales
+    cur.execute("SELECT AVG(days_to_sell) AS avg_days, COUNT(*) AS n, SUM(revenue) AS rev FROM sell_order_history")
+    overall_row = cur.fetchone()
+    overall = {
+        "avg_days_to_sell": round(overall_row["avg_days"], 4) if overall_row["avg_days"] else None,
+        "total_sales":      overall_row["n"] or 0,
+        "total_revenue":    round(overall_row["rev"] or 0, 2),
+    }
+
+    return {"overall": overall, "by_item": by_item}
+
+
+def get_avg_days_to_sell_by_type() -> Dict[int, float]:
+    """
+    Return a mapping of { type_id: avg_days_to_sell } for all items in history.
+    Used by calculator.py to improve ISK/hr estimates.
+    """
+    init_db()
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        "SELECT type_id, AVG(days_to_sell) AS avg_days FROM sell_order_history GROUP BY type_id"
+    )
+    return {r["type_id"]: r["avg_days"] for r in cur.fetchall() if r["avg_days"] is not None}
 
 
 def _ensure_wallet_table(conn) -> None:

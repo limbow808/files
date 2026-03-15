@@ -91,15 +91,17 @@ export default function CalculatorPage({ refreshKey = 0 }) {
   // Corp BP set: output_ids owned by the corp (from crest.db)
   const corpBpIds = useMemo(() => new Set(corpBpData?.output_ids || []), [corpBpData]);
 
-  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC }
+  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC, hasPersonal }
   // ESI names include " Blueprint" suffix — strip it to match calculator product names
+  // owner='personal' → personally held BP; owner='corp' → corp hangar only
   const esiBpMap = useMemo(() => {
     const map = {};
     for (const bp of (esiBpData?.blueprints || [])) {
       const key = bp.name.toLowerCase().replace(/\s+blueprint$/, '');
-      if (!map[key]) map[key] = { hasBPO: false, hasBPC: false };
-      if (bp.bp_type === 'BPO')  map[key].hasBPO = true;
-      else                        map[key].hasBPC = true;
+      if (!map[key]) map[key] = { hasBPO: false, hasBPC: false, hasPersonal: false };
+      if (bp.bp_type === 'BPO')         map[key].hasBPO      = true;
+      else                               map[key].hasBPC      = true;
+      if (bp.owner === 'personal')       map[key].hasPersonal = true;
     }
     return map;
   }, [esiBpData]);
@@ -117,13 +119,13 @@ export default function CalculatorPage({ refreshKey = 0 }) {
 
     // BP ownership filter — classify each result against the ESI BP map
     const bpEntry  = esiBpMap[r.name?.toLowerCase()] ?? null;
-    const isOwned  = !!bpEntry;               // personally owned via ESI
+    const isOwned  = bpEntry?.hasPersonal ?? false;   // personally owned (not just corp)
     const hasBPO   = bpEntry?.hasBPO  ?? false;
     const hasBPC   = bpEntry?.hasBPC  ?? false;
     const hasCorp  = corpBpIds.has(r.output_id);  // corp holds this BP
 
-    // "Not Owned" = no personal ESI BP (corp ownership is separate)
-    const notOwned = !isOwned;
+    // "Not Owned" = neither personally owned nor in the corp hangar
+    const notOwned = !isOwned && !hasCorp;
 
     // If ALL bp chips are active → show everything (no filtering)
     const allBpOn = BP_FILTERS.every(f => bpFilters.has(f));

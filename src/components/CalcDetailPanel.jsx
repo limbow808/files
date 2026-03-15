@@ -130,6 +130,9 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
                 ['Job Install',   item.job_cost,       'var(--dim)'],
                 ['Sales Tax',     item.sales_tax,      'var(--dim)'],
                 ['Broker Fee',    item.broker_fee,     'var(--dim)'],
+                ...(item.invention_cost > 0
+                  ? [['Invention', item.invention_cost, 'var(--accent)']]
+                  : []),
               ].map(([label, val, col]) => (
                 <div key={label} className="mat-row">
                   <span style={{ color: 'var(--dim)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>{label}</span>

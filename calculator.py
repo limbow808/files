@@ -21,6 +21,7 @@ Update the CONFIG section below with your real values.
 import math
 from pricer import get_prices_bulk
 from blueprints import load_blueprints
+from invention import INVENTION_DATA, calculate_invention_cost
 
 # ─── CONFIG: Update these to match your setup ────────────────────────────────
 CONFIG = {
@@ -60,14 +61,23 @@ def apply_me(base_qty: int, me_level: int, structure_bonus: float = 0.0) -> int:
     return max(1, math.ceil(base_qty * reduction))
 
 
-def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None) -> dict | None:
+def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None,
+                     invention_prices: dict | None = None,
+                     sell_days_by_type: dict | None = None) -> dict | None:
     """
     Calculate profit for one blueprint run given a price dictionary.
 
     Args:
-        blueprint:       One entry from blueprints.BLUEPRINTS
-        prices:          Dict of { type_id: { 'sell': float, 'buy': float } }
-        config_override: Optional dict to override CONFIG values for this call
+        blueprint:          One entry from blueprints.BLUEPRINTS
+        prices:             Dict of { type_id: { 'sell': float, 'buy': float } }
+        config_override:    Optional dict to override CONFIG values for this call
+        invention_prices:   Optional pre-fetched prices dict covering datacores,
+                            used to calculate invention cost for T2 blueprints.
+                            If None and blueprint is T2, invention cost is skipped.
+        sell_days_by_type:  Optional dict of { type_id: avg_days_to_sell } from
+                            sell_order_history.  When provided the ISK/hr figure
+                            accounts for the time the item sits on the market
+                            before selling.  Falls back to DEFAULT_SELL_DAYS.
 
     Returns:
         Dict with full profit breakdown, or None if prices missing
@@ -143,17 +153,44 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
     broker_fee  = gross_revenue * cfg["broker_fee"]
     total_tax   = sales_tax + broker_fee
 
+    # ── Invention cost (T2 blueprints only) ───────────────────────────────────
+    invention_cost     = 0.0
+    invention_cost_per_run = None
+    invention_detail   = None
+
+    bp_name = blueprint.get("name", "")
+    is_t2   = blueprint.get("tech") == "II" or blueprint.get("tech_level") == 2
+
+    if is_t2 and bp_name in INVENTION_DATA:
+        if invention_prices is not None:
+            inv_result = calculate_invention_cost(bp_name, prices=invention_prices)
+            if inv_result:
+                invention_cost_per_run = inv_result["cost_per_run"]
+                invention_cost         = invention_cost_per_run * output_qty
+                invention_detail       = inv_result
+
     # ── Final profit ──────────────────────────────────────────────────────────
-    total_cost   = material_cost + job_cost + total_tax
+    total_cost   = material_cost + job_cost + total_tax + invention_cost
     net_profit   = gross_revenue - total_cost
     margin_pct   = (net_profit / gross_revenue * 100) if gross_revenue > 0 else 0
 
     # ── Duration with TE applied ──────────────────────────────────────────────
     # Formula: base_time * (1 - te_level/100)
-    # Structure time bonus not currently modelled; add cfg key if needed
     te_reduction  = 1 - (te_level / 100)
     time_seconds  = max(1, round(base_time * te_reduction)) if base_time else 0
-    isk_per_hour  = (net_profit / time_seconds * 3600) if time_seconds > 0 else None
+
+    # ── ISK/hr — manufacture time + time sitting on market ────────────────────
+    # DEFAULT_SELL_DAYS: assumed sell time when no history exists yet (3 days).
+    # When sell_days_by_type contains data for this output the real avg is used,
+    # giving a more accurate picture of capital turnover.
+    DEFAULT_SELL_DAYS = 3.0
+    if sell_days_by_type is not None:
+        avg_sell_days = sell_days_by_type.get(output_id, DEFAULT_SELL_DAYS)
+    else:
+        avg_sell_days = DEFAULT_SELL_DAYS
+    sell_seconds   = avg_sell_days * 86400.0
+    total_cycle_s  = time_seconds + sell_seconds   # manufacture + wait to sell
+    isk_per_hour   = (net_profit / total_cycle_s * 3600.0) if total_cycle_s > 0 else None
 
     return {
         "name":               blueprint["name"],
@@ -164,9 +201,12 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
         "job_cost":           job_cost,
         "sales_tax":          sales_tax,
         "broker_fee":         broker_fee,
+        "invention_cost":     invention_cost,
+        "invention_detail":   invention_detail,
         "net_profit":         net_profit,
         "margin_pct":         margin_pct,
         "time_seconds":       time_seconds,
+        "avg_sell_days":      round(avg_sell_days, 4),
         "isk_per_hour":       isk_per_hour,
         "material_breakdown": material_breakdown,
         "is_profitable":      net_profit > 0,
@@ -184,6 +224,8 @@ def calculate_all(blueprints: list = None, min_volume: float = 0.0) -> list:
     If `blueprints` is None, loads all blueprints from crest.db
     (or the hardcoded fallback list if crest.db is absent).
     """
+    from invention import _all_datacore_type_ids
+
     if blueprints is None:
         blueprints = load_blueprints()
     # Collect all unique type IDs we need prices for
@@ -193,13 +235,28 @@ def calculate_all(blueprints: list = None, min_volume: float = 0.0) -> list:
         for mat in bp["materials"]:
             all_type_ids.add(mat["type_id"])
 
+    # Include datacore IDs so invention costs can be calculated
+    for dc_id in _all_datacore_type_ids():
+        all_type_ids.add(dc_id)
+
     print(f"  Fetching prices for {len(all_type_ids)} items from Jita...")
     prices = get_prices_bulk(list(all_type_ids))
     print(f"  Got prices for {len(prices)} items.\n")
 
+    # Load historical sell-time data to improve ISK/hr accuracy
+    sell_days_by_type: dict = {}
+    try:
+        from database import get_avg_days_to_sell_by_type
+        sell_days_by_type = get_avg_days_to_sell_by_type()
+        if sell_days_by_type:
+            print(f"  Loaded sell-time history for {len(sell_days_by_type)} item types.\n")
+    except Exception as _e:
+        print(f"  [calculator] Could not load sell history: {_e}")
+
     results = []
     for bp in blueprints:
-        result = calculate_profit(bp, prices)
+        result = calculate_profit(bp, prices, invention_prices=prices,
+                                  sell_days_by_type=sell_days_by_type)
         if result:
             # Apply min_volume filter if set
             avg_vol = result.get("avg_daily_volume") or 0

@@ -23,7 +23,10 @@ import requests
 
 from blueprints import load_blueprints, MINERALS
 from calculator import calculate_all
-from database import save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history
+from database import (
+    save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history,
+    sync_open_orders, get_sell_history_stats,
+)
 import alert_scanner as _alert_scanner
 
 app = Flask(__name__)
@@ -591,10 +594,22 @@ def api_calculator():
                 all_type_ids.add(mat["type_id"])
         all_type_ids.update(MINERALS.values())
 
+        # Include datacore type IDs for invention cost calculation
+        from invention import _all_datacore_type_ids
+        all_type_ids.update(_all_datacore_type_ids())
+
         _broadcast_progress(cache_key, {"stage": "prices", "msg": "Fetching Jita market data…", "done": 0, "total": total_bps})
 
         # Only fetch volume history for outputs — skips thousands of material IDs
         prices = get_prices_bulk(list(all_type_ids), history_ids=list(output_ids))
+
+        # Load sell-time history once, share across all blueprint calculations
+        _sell_days_by_type: dict = {}
+        try:
+            from database import get_avg_days_to_sell_by_type
+            _sell_days_by_type = get_avg_days_to_sell_by_type()
+        except Exception:
+            pass
 
         # ── Build results ──────────────────────────────────────────────────────
         mineral_names = {v: k for k, v in MINERALS.items()}
@@ -610,7 +625,9 @@ def api_calculator():
                 "job_cost_structure_discount": facility_cfg["job_discount"],
                 "sales_tax":                  facility_cfg["sales_tax"],
             }
-            result = calculate_profit(bp, prices, config_override=cfg_override)
+            result = calculate_profit(bp, prices, config_override=cfg_override,
+                                      invention_prices=prices,
+                                      sell_days_by_type=_sell_days_by_type)
             done += 1
 
             # Broadcast progress every 50 items
@@ -646,7 +663,10 @@ def api_calculator():
             cost       = result.get("material_cost", 0) + result.get("job_cost", 0) + result.get("sales_tax", 0) + result.get("broker_fee", 0)
             profit     = result.get("net_profit", 0)
             time_s     = result.get("time_seconds") or bp.get("time_seconds", 0)
-            duration_h = time_s / 3600.0 if time_s else 0
+            # ISK/hr accounts for manufacture time + avg time sitting on market
+            avg_sell_days  = result.get("avg_sell_days", 3.0)
+            total_cycle_s  = time_s + avg_sell_days * 86400.0
+            duration_h     = total_cycle_s / 3600.0 if total_cycle_s else 0
             result["roi"]          = (profit / cost * 100) if cost > 0 else 0
             result["isk_per_hour"] = (profit / duration_h) if duration_h > 0 else None
             result["isk_per_m3"]   = (profit / result["volume"]) if result.get("volume", 0) > 0 else 0
@@ -680,6 +700,41 @@ def api_calculator():
         _broadcast_progress(cache_key, {"stage": "done", "msg": "Ready", "done": total_bps, "total": total_bps})
         return jsonify(payload)
 
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/invention/costs", methods=["GET"])
+def api_invention_costs():
+    """
+    Return invention cost breakdown for all T2 blueprints in INVENTION_DATA.
+    Uses live Jita datacore prices.
+
+    Response:
+    {
+      "costs": {
+        "Hammerhead II": {
+          "cost_per_bpc": 12345678.0,
+          "cost_per_run": 1234567.8,
+          "success_chance": 0.34,
+          "output_runs_per_bpc": 10,
+          "datacore_costs": { ... }
+        },
+        ...
+      },
+      "generated_at": 1234567890
+    }
+    """
+    import time
+    try:
+        from invention import calculate_all_invention_costs
+        costs = calculate_all_invention_costs()
+        return jsonify({
+            "costs":        costs,
+            "generated_at": int(time.time()),
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1960,7 +2015,10 @@ def api_industry_jobs():
 def api_orders():
     """
     Return active sell and buy orders for ALL characters combined.
-    Response: { sell: [...], buy: [...] }
+    Also diffs against the previously stored orders to detect fulfilled
+    (sold) sell orders and records them in sell_order_history.
+
+    Response: { sell: [...], buy: [...], newly_fulfilled: [...] }
     Each order includes character_name and character_id for attribution.
     """
     try:
@@ -1989,7 +2047,7 @@ def api_orders():
                 print(f"  [orders] Failed for {char_name}: {e}")
 
         if not all_orders:
-            return jsonify({"sell": [], "buy": []})
+            return jsonify({"sell": [], "buy": [], "newly_fulfilled": []})
 
         # Resolve type names
         type_ids = list({o["type_id"] for o in all_orders})
@@ -2045,10 +2103,50 @@ def api_orders():
         sell.sort(key=lambda x: x["price"] * x["volume_remain"], reverse=True)
         buy.sort(key=lambda x: x["escrow"], reverse=True)
 
-        return jsonify({"sell": sell, "buy": buy})
+        # ── Diff sell orders against stored snapshot ───────────────────────────
+        # Only track sell orders — buy orders don't generate revenue events.
+        newly_fulfilled = []
+        try:
+            newly_fulfilled = sync_open_orders(sell)
+        except Exception as e:
+            print(f"  [orders] sync_open_orders failed: {e}")
+
+        return jsonify({"sell": sell, "buy": buy, "newly_fulfilled": newly_fulfilled})
 
     except Exception as e:
-        return jsonify({"error": str(e), "sell": [], "buy": []}), 200
+        return jsonify({"error": str(e), "sell": [], "buy": [], "newly_fulfilled": []}), 200
+
+
+@app.route("/api/sell_history", methods=["GET"])
+def api_sell_history():
+    """
+    Return sell-time statistics derived from sell_order_history.
+
+    Response:
+    {
+        "overall": {
+            "avg_days_to_sell": float | null,
+            "total_sales":      int,
+            "total_revenue":    float
+        },
+        "by_item": {
+            "<item_name>": {
+                "type_id":          int,
+                "avg_days_to_sell": float | null,
+                "total_sold":       int,
+                "total_revenue":    float,
+                "fastest_sale":     float | null,
+                "slowest_sale":     float | null
+            },
+            ...
+        }
+    }
+    """
+    try:
+        stats = get_sell_history_stats()
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({"error": str(e), "overall": {}, "by_item": {}}), 200
 
 
 @app.route("/api/alerts/status", methods=["GET"])
