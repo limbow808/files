@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { API } from '../App';
 import { fmtISK } from '../utils/fmt';
 import { charColor, seedCharColors } from '../utils/charColors';
+import EveText from '../components/EveText';
+import { LoadingState } from '../components/ui';
 
 function PortraitPlaceholder({ name }) {
   const initials = name ? name.slice(0, 2).toUpperCase() : '??';
@@ -16,17 +18,19 @@ function PortraitPlaceholder({ name }) {
   );
 }
 
-function CharacterCard({ char, charStats, onRemove, color }) {
+function CharacterCard({ char, charStats, onRemove, color, index = 0 }) {
   const [confirming, setConfirming] = useState(false);
   const [imgError,   setImgError]   = useState(false);
 
   return (
     <div
+      className="eve-row-reveal eve-corners"
       style={{
         border: '1px solid var(--border)',
         borderLeft: `3px solid ${color}`,
         background: '#080808',
         display: 'flex', alignItems: 'stretch', transition: 'border-color 0.15s',
+        animationDelay: `${index * 80}ms`,
       }}
       onMouseEnter={e => e.currentTarget.style.borderColor = color}
       onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.borderLeftColor = color; }}
@@ -46,7 +50,7 @@ function CharacterCard({ char, charStats, onRemove, color }) {
       </div>
 
       {/* Info */}
-      <div style={{ flex: 1, padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ flex: 1, padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 5 }}>
         <div style={{ fontFamily: 'var(--mono)', fontSize: 14, letterSpacing: 2, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0, display: 'inline-block' }} />
           {char.character_name}
@@ -171,13 +175,13 @@ export default function CharactersPage() {
   const totalJobs   = characters.reduce((s, c) => s + (stats[c.character_id]?.active_jobs || 0), 0);
 
   return (
-    <div style={{ padding: '24px 28px', maxWidth: 780, display: 'flex', flexDirection: 'column', gap: 24 }}>
+    <div style={{ padding: '20px 24px', maxWidth: 780, display: 'flex', flexDirection: 'column', gap: 20 }}>
 
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
           <div style={{ fontFamily: 'var(--mono)', fontSize: 18, letterSpacing: 4, color: 'var(--text)' }}>
-            CHARACTERS
+            <EveText text="CHARACTERS" scramble={true} steps={10} speed={35} />
           </div>
           <div style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 2, marginTop: 2 }}>
             {characters.length} CHARACTER{characters.length !== 1 ? 'S' : ''} CONNECTED
@@ -228,8 +232,7 @@ export default function CharactersPage() {
 
       {/* Character list */}
       {loading ? (
-        <div style={{ color: 'var(--dim)', fontSize: 11, letterSpacing: 2, padding: '20px 0',
-          animation: 'pulse 1.2s ease-in-out infinite' }}>LOADING…</div>
+        <LoadingState label="LOADING CHARACTERS" sub="ESI · AUTH" />
       ) : characters.length === 0 ? (
         <div style={{
           border: '1px dashed var(--border)', padding: '40px 20px',
@@ -242,13 +245,14 @@ export default function CharactersPage() {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-          {characters.map(char => (
+          {characters.map((char, idx) => (
             <CharacterCard
               key={char.character_id}
               char={char}
               charStats={stats[char.character_id] ?? null}
               onRemove={handleRemove}
               color={charColor(char.character_id)}
+              index={idx}
             />
           ))}
         </div>

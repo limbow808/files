@@ -1,4 +1,5 @@
 import { fmtISK, fmtVol, fmtDuration, roiColor } from '../utils/fmt';
+import EveText from './EveText';
 
 function SkillPips({ have, need }) {
   return (
@@ -36,12 +37,14 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
   return (
     <tr>
       <td colSpan={16} style={{ padding: 0, background: '#000' }}>
-        <div className="calc-detail" style={{ borderLeft: `3px solid ${tierColor}` }}>
+        <div className="calc-detail eve-corners eve-panel-in" style={{ borderLeft: `3px solid ${tierColor}`, position: 'relative' }}>
+          <div className="eve-corners-inner" style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
+          <div className="eve-scanline" />
 
           {/* Header strip */}
           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
             <div style={{ fontFamily: 'var(--mono)', fontSize: 15, letterSpacing: 2, color: 'var(--text)' }}>
-              {item.name}
+              <EveText text={item.name} scramble={true} steps={10} speed={25} />
             </div>
             <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
               <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)' }}>
@@ -69,7 +72,7 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
             <div>
               <div className="calc-detail-section-title">◈ Required Materials</div>
               {materials.length > 0 ? materials.map((m, i) => (
-                <div key={i} className="mat-row">
+                <div key={i} className="mat-row eve-row-reveal" style={{ animationDelay: `${i * 30}ms` }}>
                   <span className="mat-name">{m.name || `Type ${m.type_id}`}</span>
                   <span className="mat-qty">
                     <span style={{ color: 'var(--text)', marginRight: 6 }}>{fmtVol(m.quantity)}</span>
@@ -164,6 +167,33 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
                   </div>
                 )}
               </div>
+
+              {/* Recommended runs */}
+              {item.recommended_runs && (() => {
+                const rec = item.recommended_runs;
+                const tooSlow = rec.max_per_day < (item.avg_daily_volume / (item.output_qty || 1));
+                const color = tooSlow ? '#00cc66' : rec.saturation_pct >= 90 ? 'var(--accent)' : 'var(--text)';
+                return (
+                  <div style={{ marginTop: 12, padding: '8px 10px', border: '1px solid var(--border)', background: '#050505' }}>
+                    <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 6 }}>◈ Recommended Runs</div>
+                    <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'baseline' }}>
+                      <div>
+                        <span style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 700, color }}>{rec.runs}</span>
+                        <span style={{ fontSize: 10, color: 'var(--dim)', marginLeft: 4 }}>RUNS/BATCH</span>
+                      </div>
+                      <div style={{ fontSize: 10, color: 'var(--dim)', lineHeight: 1.6 }}>
+                        <div>covers <span style={{ color: 'var(--text)' }}>{fmtVol(item.avg_daily_volume)}/day</span> demand</div>
+                        <div>sells in ~<span style={{ color: 'var(--text)' }}>{rec.days_to_sell}d</span> · {rec.max_per_day}/day capacity</div>
+                      </div>
+                    </div>
+                    {tooSlow && (
+                      <div style={{ marginTop: 6, fontSize: 9, color: '#00cc66', letterSpacing: 1 }}>
+                        ✓ DEMAND EXCEEDS YOUR CAPACITY — no oversaturation risk
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
           </div>

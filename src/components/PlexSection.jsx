@@ -1,5 +1,6 @@
 import { fmtISK } from '../utils/fmt';
 import WalletSparkline from './WalletSparkline';
+import EveText from './EveText';
 
 export default function PlexSection({ plexData, walletHistory, loading, error }) {
   const balance   = plexData?.current_balance  ?? 0;
@@ -21,10 +22,10 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, padding: '12px 14px', overflowY: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, padding: '10px 14px', overflowY: 'hidden' }}>
 
       {/* Header row: title left, days remaining right */}
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10, flexShrink: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 8, flexShrink: 0 }}>
         <span className="panel-title">◈ PLEX TRACKER — {month}</span>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', letterSpacing: 1 }}>
           {daysLeft} DAYS LEFT
@@ -33,21 +34,21 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
 
       {/* ESI error banner */}
       {error && !plexData && (
-        <div style={{ padding: '8px 0 4px', fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
+        <div style={{ padding: '8px 0 4px', fontSize: 10, color: '#ff4444', letterSpacing: 1 }}>
           ⚠ ESI UNAVAILABLE
         </div>
       )}
 
       {/* Wallet balance */}
-      <div style={{ marginBottom: 10, flexShrink: 0 }}>
+      <div style={{ marginBottom: 8, flexShrink: 0 }}>
         <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>WALLET</div>
         <div style={{ fontFamily: 'var(--mono)', fontSize: 26, fontWeight: 700, color: 'var(--accent)', lineHeight: 1 }}>
-          {loading && !plexData ? '—' : `${fmtISK(balance)} ISK`}
+          {loading && !plexData ? '—' : <EveText text={`${fmtISK(balance)} ISK`} scramble={true} steps={14} speed={30} />}
         </div>
       </div>
 
       {/* Sparkline — fills all remaining vertical space */}
-      <div style={{ flex: 1, minHeight: 0, marginBottom: 10 }}>
+      <div style={{ flex: 1, minHeight: 0, marginBottom: 8 }}>
         <WalletSparkline history={walletHistory ?? []} target={target} />
       </div>
 
@@ -59,9 +60,9 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
           <span>{fmtISK(target)} ISK</span>
         </div>
         <div style={{ height: 6, background: '#0a0a0a', border: '1px solid var(--border)', marginBottom: 5 }}>
-          <div style={{ height: '100%', width: `${pct}%`, background: projOk ? '#00cc66' : 'var(--accent)', transition: 'width 0.8s ease' }} />
+          <div className="eve-bar-glow" style={{ height: '100%', width: `${pct}%`, background: projOk ? '#00cc66' : 'var(--accent)', transition: 'width 0.8s ease' }} />
         </div>
-        <div style={{ fontSize: 10, color: projOk ? '#00cc66' : 'var(--accent)', letterSpacing: 1, marginBottom: 10, textAlign: 'right' }}>
+          <div style={{ fontSize: 10, color: projOk ? '#00cc66' : 'var(--accent)', letterSpacing: 1, marginBottom: 8, textAlign: 'right' }}>
           {projOk ? 'TARGET ACHIEVED ✓' : `SHORT BY ${fmtISK(needed)} ISK`}
         </div>
       </div>

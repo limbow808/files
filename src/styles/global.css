@@ -60,7 +60,7 @@ html, body, #root {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 20px;
+  padding: 6px 14px;
   border-bottom: 1px solid var(--border);
   background: #030303;
 }
@@ -70,18 +70,18 @@ html, body, #root {
 table { width: 100%; border-collapse: collapse; }
 th {
   font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 2px;
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 1px;
   text-align: right;
-  padding: 8px 12px;
+  padding: 5px 8px;
   color: var(--dim);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 th:first-child, th:nth-child(2) { text-align: left; }
 td {
-  padding: 7px 12px;
+  padding: 5px 8px;
   text-align: right;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -215,7 +215,7 @@ tr.row-selected td { color: #000; }
 /* ── Connection dot ──────────────────────────────────────────────── */
 .dot { width: 8px; height: 8px; display: inline-block; border-radius: 50% !important; margin-right: 6px; vertical-align: middle; }
 .dot-green { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
-.dot-red   { background: #666; box-shadow: none; animation: pulse 1s infinite; }
+.dot-red   { background: #ff4444; box-shadow: 0 0 6px rgba(255,68,68,0.5); animation: pulse 1s infinite; }
 
 /* ── Hangar badge ────────────────────────────────────────────────── */
 .badge-ok   { color: #00cc66; }
@@ -237,14 +237,14 @@ tr.row-selected td { color: #000; }
   background: transparent;
   border: none;
   border-right: 1px solid var(--border);
-  border-bottom: 2px solid transparent;
+  border-bottom: none;
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  transition: color 0.15s, background 0.15s;
 }
 .nav-tab:hover { color: var(--text); }
-.nav-tab.active { color: #000; border-bottom-color: var(--accent); background: var(--accent); }
-.nav-tab.active:hover { background: var(--text); border-bottom-color: var(--text); color: #000; }
+.nav-tab.active { color: #000; background: var(--accent); }
+.nav-tab.active:hover { background: var(--text); color: #000; }
 
 /* ── Panel tab buttons (Sell/Buy, Minerals/Ores, etc.) ───────────── */
 .tab-btn {
@@ -255,14 +255,14 @@ tr.row-selected td { color: #000; }
   padding: 5px 14px;
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-bottom: none;
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.12s, background 0.12s, border-color 0.12s;
+  transition: color 0.12s, background 0.12s;
 }
 .tab-btn:hover { color: var(--text); background: rgba(200,200,183,0.06); }
-.tab-btn.active { border-bottom-color: var(--accent); background: var(--accent); color: #000; }
-.tab-btn.active:hover { background: var(--text); border-bottom-color: var(--text); color: #000; }
+.tab-btn.active { background: var(--accent); color: #000; }
+.tab-btn.active:hover { background: var(--text); color: #000; }
 
 /* ── App layout ────────────────────────────────────────────────── */
 .app-shell {
@@ -352,8 +352,8 @@ tr.row-selected td { color: #000; }
   overflow-x: auto;
 }
 .shopping-mats table { min-width: 700px; }
-.shopping-mats th { font-size: 10px; padding: 5px 10px; position: sticky; top: 0; background: #030303; z-index: 1; }
-.shopping-mats td { font-size: 11px; padding: 4px 10px; }
+.shopping-mats th { font-size: 9px; padding: 5px 8px; position: sticky; top: 0; background: #030303; z-index: 1; }
+.shopping-mats td { font-size: 11px; padding: 5px 8px; }
 .shopping-copy-bar {
   flex-shrink: 0;
   display: flex;
@@ -1077,11 +1077,11 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   height: 100%;
 }
 .bp-finder-header {
-  padding: 10px 20px 8px;
+  padding: 8px 16px 6px;
   border-bottom: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
 }
 .bp-finder-title {
@@ -1113,7 +1113,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 }
 .bp-finder-table th {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: 9px;
   letter-spacing: 1px;
   color: var(--dim);
   text-transform: uppercase;
@@ -1125,6 +1125,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   background: #030303;
   z-index: 1;
   white-space: nowrap;
+  font-weight: 400;
 }
 .bp-finder-table td {
   padding: 4px 8px;
@@ -1158,7 +1159,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   align-items: center;
 }
 .bp-action-btn {
-  font-size: 13px;
+  font-size: 10px;
   background: transparent;
   border: 1px solid var(--border);
   color: var(--dim);
@@ -1171,7 +1172,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 }
 .bp-action-btn:hover { border-color: var(--text); color: var(--text); background: rgba(200,200,183,0.06); }
 .bp-action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.bp-action-link { font-size: 13px; }
+.bp-action-link { font-size: 10px; }
 .bp-action-ok  { border-color: #4cff91 !important; color: #4cff91 !important; }
 .bp-action-err { border-color: var(--accent) !important; color: var(--accent) !important; }
 .bp-finder-footer {

@@ -1,5 +1,6 @@
 import { useApi } from '../hooks/useApi';
 import { API } from '../App';
+import EveText from './EveText';
 
 export default function EsiBlueprintPanel() {
   const { data, loading, error } = useApi(`${API}/api/blueprints/esi`, []);
@@ -23,12 +24,12 @@ export default function EsiBlueprintPanel() {
       <div className="panel-hdr">
         <span className="panel-title">◈ ESI Blueprint Library</span>
         <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
-          {loading ? 'LOADING...' : `${bps.length} BLUEPRINTS`}
+          {loading ? <EveText text="LOADING…" scramble={true} wave={true} speed={30} steps={6} /> : `${bps.length} BLUEPRINTS`}
         </span>
       </div>
       {loading ? (
-        <div style={{ padding: '12px 20px', color: 'var(--dim)', fontSize: 11, letterSpacing: 1, animation: 'pulse 1.5s infinite' }}>
-          FETCHING FROM ESI...
+        <div style={{ padding: '12px 20px', color: 'var(--dim)', fontSize: 11, letterSpacing: 1 }}>
+          <EveText text="FETCHING FROM ESI…" scramble={true} wave={true} speed={35} steps={10} />
         </div>
       ) : (
         <div className="esi-bp-list">

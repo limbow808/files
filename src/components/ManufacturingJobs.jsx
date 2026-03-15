@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useApi } from '../hooks/useApi';
 import CharTag from './CharTag';
 import { charColor, seedCharColors } from '../utils/charColors';
 import { fmtISK } from '../utils/fmt';
+import { LoadingState } from './ui';
 
 const ACTIVITY_COLORS = {
   'Manufacturing': 'var(--accent)',
@@ -97,91 +98,128 @@ function SummaryBar({ jobs }) {
   );
 }
 
-function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
+// Abbreviated activity labels so the badge stays narrow
+const ACTIVITY_SHORT = {
+  'Manufacturing': 'MFG',
+  'Reaction':      'RXN',
+  'Reactions':     'RXN',
+  'TE Research':   'T.E.',
+  'ME Research':   'M.E.',
+  'Copying':       'COPY',
+  'Invention':     'INV',
+};
+
+function JobRow({ j, idx, multiChar, showRuns, showSell }) {
+  const countdownRef = useRef(null);
+  const progressRef  = useRef(null);
+  const nameRef      = useRef(null);
+
+  // Direct DOM updates for countdown — no React re-renders
+  useEffect(() => {
+    const tick = () => {
+      const secsLeft = Math.max(0, j.end_ts - Math.floor(Date.now() / 1000));
+      if (countdownRef.current) {
+        countdownRef.current.textContent = fmtCountdown(secsLeft);
+        countdownRef.current.style.color =
+          secsLeft <= 0 ? '#00cc66' : secsLeft < 3600 ? 'var(--accent)' : 'var(--text)';
+      }
+      if (progressRef.current) {
+        const totalSecs = j.total_secs || 86400;
+        const pct = totalSecs > 0 ? Math.max(0, Math.min(100, (1 - secsLeft / totalSecs) * 100)) : 100;
+        progressRef.current.style.width = `${pct}%`;
+        progressRef.current.style.background = secsLeft <= 0 ? '#00cc66' : secsLeft < 3600 ? 'var(--accent)' : '#4da6ff';
+      }
+      if (nameRef.current) {
+        nameRef.current.style.color = secsLeft <= 0 ? '#00cc66' : 'var(--text)';
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [j.end_ts, j.total_secs]);
+
+  const aColor = ACTIVITY_COLORS[j.activity] || 'var(--text)';
+  const cColor = j.character_id ? charColor(j.character_id) : 'var(--dim)';
+  const pColor = profitColor(j.profit);
+  const shortAct = ACTIVITY_SHORT[j.activity] || j.activity.slice(0, 4).toUpperCase();
+
+  return (
+    <tr key={j.job_id} className="eve-row-reveal" style={{ animationDelay: `${idx * 30}ms` }}>
+      {/* Name + optional ×runs suffix + progress bar */}
+      <td style={{ padding: '5px 6px 5px 10px', textAlign: 'left', maxWidth: 0, width: '99%' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 5, overflow: 'hidden' }}>
+          <span ref={nameRef} style={{
+            fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
+          }}>{j.product_name}</span>
+          {showRuns && j.runs > 1 && (
+            <span style={{ fontSize: 10, color: 'var(--dim)', flexShrink: 0 }}>×{j.runs}</span>
+          )}
+        </div>
+        <div style={{ height: 2, background: '#111', width: '100%', marginTop: 3 }}>
+          <div ref={progressRef} style={{ height: '100%', transition: 'width 1s linear' }} />
+        </div>
+      </td>
+      {/* Char — only when multi-char */}
+      {multiChar && (
+        <td style={{ padding: '5px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+          <CharTag name={j.character_name} color={cColor} />
+        </td>
+      )}
+      {/* Profit (with margin %) — mfg only */}
+      {showSell && (
+        <td style={{ padding: '5px 6px', textAlign: 'right', fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>
+          {j.profit != null ? (
+            <>
+              <div style={{ fontSize: 11, color: pColor }}>{fmtISK(j.profit)}</div>
+              {j.margin_pct != null && (
+                <div style={{ fontSize: 9, color: pColor, opacity: 0.65, marginTop: 1 }}>
+                  {j.margin_pct.toFixed(1)}%
+                </div>
+              )}
+            </>
+          ) : (
+            <span style={{ color: PROFIT_NONE }}>—</span>
+          )}
+        </td>
+      )}
+      {/* Countdown */}
+      <td ref={countdownRef} style={{ padding: '5px 10px 5px 6px', textAlign: 'right',
+                                      fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'nowrap' }} />
+    </tr>
+  );
+}
+
+const TH = ({ children, align = 'right' }) => (
+  <th style={{
+    textAlign: align, padding: '5px 6px', fontSize: 9, color: 'var(--dim)',
+    letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400,
+    whiteSpace: 'nowrap',
+  }}>{children}</th>
+);
+
+function JobTable({ jobs, multiChar, showRuns, showSell }) {
   if (jobs.length === 0) {
     return (
-      <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 2, textAlign: 'center' }}>
+      <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 1, textAlign: 'center' }}>
         NO ACTIVE JOBS
       </div>
     );
   }
   return (
-    <table className="jobs-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+    <table className="jobs-table" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
       <thead>
         <tr>
-          <th style={{ textAlign: 'left',  padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>ITEM</th>
-          {showRuns && (
-            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>RUNS</th>
-          )}
-          {showSell && (
-            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>EST. SELL</th>
-          )}
-          {showSell && (
-            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>PROFIT</th>
-          )}
-          <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>TYPE</th>
-          {multiChar && (
-            <th style={{ textAlign: 'right', padding: '6px 10px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>CHAR</th>
-          )}
-          <th style={{ textAlign: 'right', padding: '6px 12px', fontSize: 10, color: 'var(--dim)', letterSpacing: 2, borderBottom: '1px solid var(--border)' }}>REMAINING</th>
+          <TH align="left">ITEM</TH>
+          {multiChar && <TH>CHAR</TH>}
+          {showSell  && <TH>PROFIT</TH>}
+          <TH>REMAINING</TH>
         </tr>
       </thead>
       <tbody>
-        {jobs.map(j => {
-          const secsLeft = Math.max(0, j.end_ts - now);
-          const isReady  = secsLeft <= 0;
-          const urgent   = secsLeft > 0 && secsLeft < 3600;
-          const aColor   = ACTIVITY_COLORS[j.activity] || 'var(--text)';
-          const cColor   = j.character_id ? charColor(j.character_id) : 'var(--dim)';
-          const pColor   = profitColor(j.profit);
-          return (
-            <tr key={j.job_id}>
-              <td style={{ padding: '6px 12px', textAlign: 'left' }}>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: isReady ? '#00cc66' : 'var(--text)' }}>
-                  {j.product_name}
-                </div>
-                <ProgressBar secs={secsLeft} totalSecs={j.total_secs || 86400} />
-              </td>
-              {showRuns && (
-                <td style={{ padding: '6px 10px', textAlign: 'right', fontSize: 11, color: 'var(--dim)' }}>×{j.runs}</td>
-              )}
-              {showSell && (
-                <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11,
-                             color: j.sell_total != null ? 'var(--accent)' : 'var(--dim)' }}>
-                  {j.sell_total != null ? fmtISK(j.sell_total) : '—'}
-                </td>
-              )}
-              {showSell && (
-                <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: 'var(--mono)' }}>
-                  {j.profit != null ? (
-                    <>
-                      <div style={{ fontSize: 11, color: pColor }}>{fmtISK(j.profit)}</div>
-                      <div style={{ fontSize: 9, color: pColor, opacity: 0.65, marginTop: 1 }}>
-                        {j.margin_pct != null ? `${j.margin_pct.toFixed(1)}%` : ''}
-                      </div>
-                    </>
-                  ) : (
-                    <span style={{ color: PROFIT_NONE }}>—</span>
-                  )}
-                </td>
-              )}
-              <td style={{ padding: '6px 10px', textAlign: 'right' }}>
-                <span style={{ fontSize: 10, color: aColor, letterSpacing: 1, border: `1px solid ${aColor}`, padding: '1px 5px', opacity: 0.8 }}>
-                  {j.activity.toUpperCase()}
-                </span>
-              </td>
-              {multiChar && (
-                <td style={{ padding: '6px 10px', textAlign: 'right' }}>
-                  <CharTag name={j.character_name} color={cColor} />
-                </td>
-              )}
-              <td style={{ padding: '6px 12px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 12,
-                           color: isReady ? '#00cc66' : urgent ? 'var(--accent)' : 'var(--text)' }}>
-                {fmtCountdown(secsLeft)}
-              </td>
-            </tr>
-          );
-        })}
+        {jobs.map((j, idx) => (
+          <JobRow key={j.job_id} j={j} idx={idx} multiChar={multiChar} showRuns={showRuns} showSell={showSell} />
+        ))}
       </tbody>
     </table>
   );
@@ -189,15 +227,8 @@ function JobTable({ jobs, now, multiChar, showRuns, showSell }) {
 
 export default function ManufacturingJobs() {
   const { data, loading, error } = useApi('/api/industry/jobs');
-  const [now, setNow]       = useState(() => Math.floor(Date.now() / 1000));
   // Selected chip filters — default to Manufacturing + Reaction
   const [activeFilters, setActiveFilters] = useState(new Set(['Manufacturing', 'Reaction']));
-
-  // Live countdown tick
-  useEffect(() => {
-    const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   const jobs = data?.jobs || [];
 
@@ -249,8 +280,9 @@ export default function ManufacturingJobs() {
   const uniqueChars = new Set(visibleJobs.map(j => j.character_id).filter(Boolean));
   const multiChar   = uniqueChars.size > 1;
 
-  const activeCount   = visibleJobs.filter(j => (j.end_ts - now) > 0).length;
-  const completeCount = visibleJobs.filter(j => (j.end_ts - now) <= 0).length;
+  const _now = Math.floor(Date.now() / 1000);
+  const activeCount   = visibleJobs.filter(j => (j.end_ts - _now) > 0).length;
+  const completeCount = visibleJobs.filter(j => (j.end_ts - _now) <= 0).length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -278,21 +310,17 @@ export default function ManufacturingJobs() {
       </div>
 
       {error && (
-        <div style={{ padding: '12px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 1 }}>
+        <div style={{ padding: '12px 16px', color: '#ff4444', fontSize: 11, letterSpacing: 1 }}>
           ⚠ ESI UNAVAILABLE
         </div>
       )}
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {loading && !data ? (
-          <div className="loading-state">
-            <span className="loading-label">FETCHING JOBS</span>
-            <span className="loading-sub">ESI · INDUSTRY</span>
-          </div>
+          <LoadingState label="FETCHING JOBS" sub="ESI · INDUSTRY" />
         ) : (
           <JobTable
             jobs={visibleJobs}
-            now={now}
             multiChar={multiChar}
             showRuns={allMfg}
             showSell={allMfg}

@@ -26,8 +26,8 @@ from invention import INVENTION_DATA, calculate_invention_cost
 # ─── CONFIG: Update these to match your setup ────────────────────────────────
 CONFIG = {
     # Tax/fee rates (as decimals, e.g. 0.02 = 2%)
-    "sales_tax":          0.036,   # Base 8%, reduced by Accounting skill (L5 = 3.6%)
-    "broker_fee":         0.03,    # Base 3%, reduced by Broker Relations skill
+    "sales_tax":          0.042,   # Jita NPC station: 4.2%
+    "broker_fee":         0.0268,  # Jita NPC station: 2.68%
     
     # System Cost Index for your manufacturing system
     # Find yours at: https://www.fuzzwork.co.uk/industry/
@@ -212,7 +212,41 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
         "material_breakdown": material_breakdown,
         "is_profitable":      net_profit > 0,
         # Propagate any avg_daily_volume for the output (if present)
-        "avg_daily_volume":   prices.get(output_id, {}).get("avg_daily_volume")
+        "avg_daily_volume":   prices.get(output_id, {}).get("avg_daily_volume"),
+        "recommended_runs":   _recommended_runs(
+            prices.get(output_id, {}).get("avg_daily_volume"),
+            output_qty,
+            time_seconds,
+        ),
+    }
+
+
+def _recommended_runs(avg_daily_volume, output_qty: int, time_seconds: int) -> dict | None:
+    """
+    Given market demand and production stats, return a recommendation dict:
+      runs       – how many runs to queue to match ~1 day of demand
+      note       – human-readable explanation
+      max_per_day– how many runs you *could* complete in 24h non-stop
+    Returns None when there is no volume data.
+    """
+    if not avg_daily_volume or not output_qty or not time_seconds:
+        return None
+    import math
+    # Runs needed to cover one full day of Jita demand
+    runs_for_daily_demand = max(1, math.ceil(avg_daily_volume / output_qty))
+    # How many runs fit in 24 h non-stop (production capacity ceiling)
+    max_per_day = max(1, int(86400 / time_seconds))
+    # Cap recommendation at production capacity (can't exceed what can be built in 24h)
+    runs = min(runs_for_daily_demand, max_per_day)
+    # Days to sell that batch at avg demand rate
+    units_produced = runs * output_qty
+    days_to_sell   = round(units_produced / avg_daily_volume, 1)
+    saturation_pct = round(units_produced / avg_daily_volume * 100)
+    return {
+        "runs":          runs,
+        "max_per_day":   max_per_day,
+        "days_to_sell":  days_to_sell,
+        "saturation_pct": saturation_pct,
     }
 
 

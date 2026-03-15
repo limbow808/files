@@ -136,21 +136,37 @@ def _unsubscribe_progress(cache_key: str, q: _queue.Queue):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+# Wallet cache: shared by /api/plex and /api/wallet, avoids duplicate serial ESI calls
+_WALLET_CACHE: float = 0.0
+_WALLET_CACHE_TS: float = 0
+_WALLET_CACHE_TTL = 60  # 1 min
+
 def _get_wallet() -> float:
-    """Fetch combined wallet balance across ALL authenticated characters."""
+    """Fetch combined wallet balance across ALL authenticated characters (parallel)."""
+    global _WALLET_CACHE, _WALLET_CACHE_TS
+    if (time.time() - _WALLET_CACHE_TS) < _WALLET_CACHE_TTL:
+        return _WALLET_CACHE
     try:
         import requests as _req
-        from characters import get_all_auth_headers, load_characters
+        from characters import get_all_auth_headers
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         ESI_BASE = "https://esi.evetech.net/latest"
         auth_headers = get_all_auth_headers()
-        total = 0.0
-        for cid, headers in auth_headers:
+
+        def _fetch_one(cid, headers):
             try:
                 r = _req.get(f"{ESI_BASE}/characters/{cid}/wallet/", headers=headers, timeout=8)
-                if r.ok:
-                    total += float(r.json())
+                return float(r.json()) if r.ok else 0.0
             except Exception:
-                pass
+                return 0.0
+
+        total = 0.0
+        with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+            futs = [pool.submit(_fetch_one, cid, h) for cid, h in auth_headers]
+            for f in as_completed(futs):
+                total += f.result()
+        _WALLET_CACHE = total
+        _WALLET_CACHE_TS = time.time()
         return total
     except Exception:
         return 0.0
@@ -182,6 +198,11 @@ def _mineral_prices(prices: dict) -> dict:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+
+@app.route("/api/ping", methods=["GET"])
+def ping():
+    return jsonify({"ok": True})
+
 
 @app.route("/", methods=["GET"])
 def dashboard():
@@ -314,8 +335,22 @@ def api_wallet():
     return jsonify({"balance": balance})
 
 
+# Plex endpoint cache
+_PLEX_CACHE: dict = {}
+_PLEX_CACHE_TS: float = 0
+_PLEX_CACHE_TTL = 60  # 1 min
+
 @app.route("/api/plex", methods=["GET"])
 def api_plex():
+    global _PLEX_CACHE, _PLEX_CACHE_TS
+    if _PLEX_CACHE and (time.time() - _PLEX_CACHE_TS) < _PLEX_CACHE_TTL:
+        # Update days_remaining live
+        from datetime import datetime, timezone
+        import calendar
+        now = datetime.now(timezone.utc)
+        _PLEX_CACHE["days_remaining"] = calendar.monthrange(now.year, now.month)[1] - now.day
+        return jsonify(_PLEX_CACHE)
+
     balance    = _get_wallet()
     if balance > 0:
         try:
@@ -324,23 +359,17 @@ def api_plex():
             pass
     plex_price = _get_plex_price({})
 
-    # NOTE: PLEX in the Account Vault is not exposed by esi-assets.read_assets.v1.
-    # All character asset pages were scanned — PLEX simply does not appear there.
-    # We return plex_count=null so the UI knows to hide the field rather than show 0.
-
     accounts         = PLEX_CONFIG["accounts"]
     plex_per_account = PLEX_CONFIG["plex_per_account"]
     monthly_target   = accounts * plex_per_account * plex_price
 
-    # Days remaining: rough estimate — use current day-of-month
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
-    # Last day of current month
     import calendar
     days_in_month   = calendar.monthrange(now.year, now.month)[1]
     days_remaining  = days_in_month - now.day
 
-    return jsonify({
+    _PLEX_CACHE = {
         "accounts":        accounts,
         "plex_price":      plex_price,
         "plex_per_account":plex_per_account,
@@ -349,7 +378,9 @@ def api_plex():
         "plex_count":      None,
         "plex_value":      None,
         "days_remaining":  days_remaining,
-    })
+    }
+    _PLEX_CACHE_TS = time.time()
+    return jsonify(_PLEX_CACHE)
 
 
 @app.route("/api/wallet/history", methods=["GET"])
@@ -805,6 +836,124 @@ def api_calculator():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/top-performers", methods=["GET"])
+def api_top_performers():
+    """
+    Return up to 12 manufacturing items where the player/corp owns a BP,
+    ranked by a composite score: ISK/hr × log(volume) × sqrt(max(0, ROI)).
+    Uses the most recently computed calculator cache — returns no_data if no
+    cache exists yet (client should fetch /api/calculator first).
+    """
+    import math, sqlite3 as _sq
+
+    # ── Find freshest calc cache entry ────────────────────────────────────────
+    best_key: str | None = None
+    best_ts: float = 0
+    for key, entry in _calc_cache.items():
+        ts = entry.get("generated_at", 0)
+        if ts > best_ts:
+            best_ts = ts
+            best_key = key
+
+    if not best_key:
+        return jsonify({"items": [], "status": "no_data"})
+
+    all_results = _calc_cache[best_key].get("results", [])
+
+    # ── Build owned blueprint_id sets ─────────────────────────────────────────
+    personal_bp_ids: set = set()
+    corp_bp_ids: set     = set()
+
+    for bp in _ESI_BP_CACHE.get("blueprints", []):
+        tid = bp.get("type_id")
+        if not tid:
+            continue
+        if bp.get("owner") == "personal":
+            personal_bp_ids.add(tid)
+        else:
+            corp_bp_ids.add(tid)
+
+    corp_bp_ids.update(CORP_BPO_TYPE_IDS)
+
+    all_bp_ids = personal_bp_ids | corp_bp_ids
+    if not all_bp_ids:
+        return jsonify({"items": [], "status": "no_blueprints"})
+
+    # ── Map blueprint_id → output_id (+ ownership) via crest.db ──────────────
+    personal_output_ids: set = set()
+    corp_output_ids: set     = set()
+
+    try:
+        db_path = os.path.join(os.path.dirname(__file__), "crest.db")
+        conn = _sq.connect(db_path)
+        ph   = ",".join("?" * len(all_bp_ids))
+        rows = conn.execute(
+            f"SELECT blueprint_id, output_id FROM blueprints WHERE blueprint_id IN ({ph})",
+            list(all_bp_ids),
+        ).fetchall()
+        conn.close()
+        for bp_id, out_id in rows:
+            if bp_id in personal_bp_ids:
+                personal_output_ids.add(out_id)
+            if bp_id in corp_bp_ids:
+                corp_output_ids.add(out_id)
+    except Exception as e:
+        print(f"[top-performers] DB error: {e}")
+
+    owned_output_ids = personal_output_ids | corp_output_ids
+
+    # ── Score and filter results ───────────────────────────────────────────────
+    candidates = []
+    for r in all_results:
+        out_id = r.get("output_id")
+        if out_id not in owned_output_ids:
+            continue
+        profit = r.get("net_profit", 0)
+        isk_hr  = r.get("isk_per_hour") or 0
+        vol     = r.get("avg_daily_volume") or 0
+        roi     = r.get("roi", 0)
+
+        if profit <= 0 or isk_hr <= 0:
+            continue
+
+        # Composite: reward ISK/hr efficiency × market depth × ROI
+        score = isk_hr * math.log1p(max(1.0, vol)) * math.sqrt(max(0.0, roi))
+
+        ownership = []
+        if out_id in personal_output_ids:
+            ownership.append("personal")
+        if out_id in corp_output_ids:
+            ownership.append("corp")
+
+        candidates.append({
+            "name":             r["name"],
+            "output_id":        out_id,
+            "tech":             r.get("tech", "I"),
+            "category":         r.get("category", ""),
+            "roi":              round(r.get("roi", 0), 1),
+            "net_profit":       round(r.get("net_profit", 0)),
+            "isk_per_hour":     round(r.get("isk_per_hour", 0)),
+            "avg_daily_volume": round(r.get("avg_daily_volume") or 0, 1),
+            "recommended_runs": r.get("recommended_runs"),
+            "ownership":        ownership,
+            "_score":           score,
+        })
+
+    candidates.sort(key=lambda x: x["_score"], reverse=True)
+
+    items = []
+    for r in candidates[:12]:
+        r.pop("_score", None)
+        items.append(r)
+
+    return jsonify({
+        "items":        items,
+        "generated_at": int(best_ts),
+        "total_owned":  len(candidates),
+        "cache_key":    best_key,
+    })
 
 
 @app.route("/api/invention/costs", methods=["GET"])

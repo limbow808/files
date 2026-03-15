@@ -1,0 +1,508 @@
+/* ══════════════════════════════════════════════════════════════════════
+   EVE Online–style UI Animations
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── Design tokens for animation ──────────────────────────────────── */
+:root {
+  --eve-glow:       rgba(255, 71, 0, 0.35);
+  --eve-glow-soft:  rgba(255, 71, 0, 0.12);
+  --eve-cyan:       #0cf;
+  --eve-scan:       rgba(200, 200, 183, 0.08);
+  --eve-line-speed: 0.3s;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   1. LINE-BUILD BUTTONS — borders extend from center on hover
+   ══════════════════════════════════════════════════════════════════════ */
+.eve-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Horizontal lines (top + bottom) */
+.eve-btn::before,
+.eve-btn::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  height: 1px;
+  width: 0;
+  background: var(--accent);
+  transition: width var(--eve-line-speed) cubic-bezier(0.4, 0, 0.2, 1),
+              left  var(--eve-line-speed) cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+.eve-btn::before { top: 0; }
+.eve-btn::after  { bottom: 0; }
+
+.eve-btn:hover::before,
+.eve-btn:hover::after {
+  width: 100%;
+  left: 0;
+}
+
+/* Vertical lines (left + right) via inner spans or box-shadow trick */
+.eve-btn-inner {
+  position: relative;
+  z-index: 1;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   2. WAVE-GLOW TEXT — per-character staggered glow
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveWaveGlow {
+  0%, 100% { opacity: 0.25; color: var(--dim);  text-shadow: none; }
+  50%      { opacity: 1;    color: var(--text); text-shadow: 0 0 6px var(--eve-glow-soft); }
+}
+
+.eve-wave-char {
+  display: inline-block;
+  animation: eveWaveGlow 1.8s ease-in-out infinite;
+  will-change: opacity, color;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   3. SCRAMBLE / DECRYPT TEXT — handled in JS, but style the container
+   ══════════════════════════════════════════════════════════════════════ */
+.eve-scramble {
+  font-family: var(--mono);
+  letter-spacing: 2px;
+  white-space: pre;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   4. SCAN-LINE SWEEP — horizontal light bar across panels
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveScanDown {
+  0%   { top: -2px;  opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { top: 100%;  opacity: 0; }
+}
+
+.eve-scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--eve-scan) 15%,
+    rgba(200,200,183,0.2) 50%,
+    var(--eve-scan) 85%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 10;
+  animation: eveScanDown 1.6s ease-out forwards;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   5. CORNER-BRACKET FRAMES — targeting reticle border accents
+   ══════════════════════════════════════════════════════════════════════ */
+.eve-corners {
+  position: relative;
+}
+
+.eve-corners::before,
+.eve-corners::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-style: solid;
+  border-color: var(--border);
+  pointer-events: none;
+  transition: border-color 0.3s, width 0.3s, height 0.3s;
+  z-index: 5;
+}
+
+/* Top-left */
+.eve-corners::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1px 0 0 1px;
+}
+
+/* Bottom-right */
+.eve-corners::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 1px 1px 0;
+}
+
+/* Extra corners via a wrapper child */
+.eve-corners-inner::before,
+.eve-corners-inner::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-style: solid;
+  border-color: var(--border);
+  pointer-events: none;
+  transition: border-color 0.3s, width 0.3s, height 0.3s;
+  z-index: 5;
+}
+
+/* Top-right */
+.eve-corners-inner::before {
+  top: -1px;
+  right: -1px;
+  border-width: 1px 1px 0 0;
+}
+
+/* Bottom-left */
+.eve-corners-inner::after {
+  bottom: -1px;
+  left: -1px;
+  border-width: 0 0 1px 1px;
+}
+
+/* On hover: corners extend + glow accent */
+.eve-corners:hover::before,
+.eve-corners:hover::after,
+.eve-corners:hover .eve-corners-inner::before,
+.eve-corners:hover .eve-corners-inner::after {
+  border-color: var(--accent);
+  width: 14px;
+  height: 14px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   6. GLOW PULSE — subtle box-shadow on hover for interactive elements
+   ══════════════════════════════════════════════════════════════════════ */
+.eve-glow:hover {
+  box-shadow: 0 0 8px var(--eve-glow), inset 0 0 6px var(--eve-glow-soft);
+  transition: box-shadow 0.25s ease;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   7. DATA-STREAM FLICKER — table rows appear with a brief flash
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveRowReveal {
+  0%   { opacity: 0; transform: translateX(-4px); }
+  40%  { opacity: 0.6; }
+  100% { opacity: 1; transform: translateX(0); }
+}
+
+.eve-row-reveal {
+  animation: eveRowReveal 0.35s ease-out both;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   8. PANEL FADE-IN — panels slide up + fade when mounted
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes evePanelIn {
+  0%   { opacity: 0; transform: translateY(6px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.eve-panel-in {
+  animation: evePanelIn 0.4s ease-out both;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   9. HEADER LINE-BUILD — accent line grows from center under header
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveHeaderLine {
+  0%   { width: 0; left: 50%; }
+  100% { width: 100%; left: 0; }
+}
+
+.eve-header-line {
+  position: absolute;
+  bottom: 0;
+  height: 1px;
+  background: var(--accent);
+  animation: eveHeaderLine 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  pointer-events: none;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   10. CONNECTION DOT PULSE — enhanced dot animation
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveDotPulse {
+  0%, 100% { box-shadow: 0 0 4px currentColor; }
+  50%      { box-shadow: 0 0 10px currentColor, 0 0 20px currentColor; }
+}
+
+.eve-dot-pulse {
+  animation: eveDotPulse 2s ease-in-out infinite;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   11. PROGRESS BAR GLOW — subtle animated glow on progress bars
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveBarGlow {
+  0%, 100% { box-shadow: 0 0 4px var(--eve-glow-soft); }
+  50%      { box-shadow: 0 0 8px var(--eve-glow); }
+}
+
+.eve-bar-glow {
+  animation: eveBarGlow 2s ease-in-out infinite;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   12. NAV TAB — line-build underline from center
+   ══════════════════════════════════════════════════════════════════════ */
+.nav-tab {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Accent underline that grows from center */
+.nav-tab::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: var(--accent);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              left  0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.nav-tab:hover::after {
+  width: 100%;
+  left: 0;
+}
+
+/* Active tab keeps the line visible */
+.nav-tab.active::after {
+  width: 100%;
+  left: 0;
+  background: var(--accent);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   13. TAB BUTTONS (panel tabs) — same line-build treatment
+   ══════════════════════════════════════════════════════════════════════ */
+.tab-btn {
+  position: relative;
+  overflow: hidden;
+}
+
+.tab-btn::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: var(--accent);
+  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              left  0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tab-btn:hover::after {
+  width: 100%;
+  left: 0;
+}
+
+.tab-btn.active::after {
+  width: 100%;
+  left: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   14. BUTTONS — line-build border on hover
+   ══════════════════════════════════════════════════════════════════════ */
+.btn {
+  position: relative;
+  overflow: hidden;
+}
+
+.btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 0;
+  height: 100%;
+  background: rgba(200, 200, 183, 0.06);
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+              left  0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.btn:hover::before {
+  width: 100%;
+  left: 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   15. INPUT FOCUS — line grows under input from center
+   ══════════════════════════════════════════════════════════════════════ */
+.calc-input,
+.calc-search-input,
+.sys-input,
+.inline-num {
+  position: relative;
+}
+
+/* We need a wrapper for pseudo-element on inputs, so we use box-shadow */
+.calc-input:focus,
+.calc-search-input:focus,
+.inline-num:focus {
+  box-shadow: 0 1px 0 0 var(--accent);
+  transition: box-shadow 0.3s ease;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   16. CHIP — subtle flash on toggle
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveChipFlash {
+  0%   { box-shadow: 0 0 0 0 var(--eve-glow); }
+  50%  { box-shadow: 0 0 8px 2px var(--eve-glow); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.chip:active {
+  animation: eveChipFlash 0.3s ease-out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   17. LOADING SPINNER — replaces basic ellipsis with hex-spinner
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes eveSpinnerRotate {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes eveSpinnerDash {
+  0%   { stroke-dashoffset: 60; }
+  50%  { stroke-dashoffset: 15; }
+  100% { stroke-dashoffset: 60; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   18. SMOOTH PAGE TRANSITIONS
+   ══════════════════════════════════════════════════════════════════════ */
+.app-content > div {
+  transition: opacity 0.15s ease;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   19. BOOT SCREEN — HUD initialization overlay
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Full-screen overlay */
+.boot-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* Phase 2: overlay dissolves — center first, edges last.
+   A wide horizontal ellipse mask makes the center semi-transparent,
+   so as opacity drops the center vanishes first = horizontal-first feel. */
+.boot-overlay.phase-2 {
+  -webkit-mask-image: radial-gradient(ellipse 80% 45% at 50% 50%,
+    transparent 0%,
+    rgba(0,0,0,0.2) 25%,
+    rgba(0,0,0,0.6) 50%,
+    #000 80%
+  );
+  mask-image: radial-gradient(ellipse 80% 45% at 50% 50%,
+    transparent 0%,
+    rgba(0,0,0,0.2) 25%,
+    rgba(0,0,0,0.6) 50%,
+    #000 80%
+  );
+  animation: bootOverlayOut 1s ease-in-out forwards;
+  pointer-events: none;
+}
+@keyframes bootOverlayOut {
+  0%   { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ── Center container ────────────────────────────────────────────── */
+.boot-center {
+  position: relative;
+  z-index: 10;
+}
+
+/* ── The INITIALIZE button — solid accent, black text ────────────── */
+.boot-btn {
+  position: relative;
+  background: var(--accent);
+  border: none;
+  color: #000;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 6px;
+  text-transform: uppercase;
+  padding: 12px 36px;
+  cursor: pointer;
+  transition: background 0.2s, box-shadow 0.2s;
+  overflow: visible;
+}
+
+.boot-btn:hover:not(:disabled) {
+  background: #fff;
+}
+
+.boot-btn:disabled {
+  cursor: default;
+}
+
+/* After click: button fades out after a short scramble delay */
+.boot-btn.boot-btn-fired {
+  animation: bootBtnFade 1s ease-out 0.4s forwards;
+}
+@keyframes bootBtnFade {
+  0%   { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.boot-btn-label {
+  position: relative;
+  z-index: 2;
+}
+
+/* ── Corner brackets — thin 1px L-shapes at button corners ───────── */
+.boot-corner {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-style: solid;
+  border-color: var(--accent);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.boot-center:hover .boot-corner {
+  opacity: 0.6;
+}
+
+.boot-corner-tl { top: -4px;    left: -4px;   border-width: 1px 0 0 1px; }
+.boot-corner-tr { top: -4px;    right: -4px;  border-width: 1px 1px 0 0; }
+.boot-corner-bl { bottom: -4px; left: -4px;   border-width: 0 0 1px 1px; }
+.boot-corner-br { bottom: -4px; right: -4px;  border-width: 0 1px 1px 0; }
+
+/* Phase 2: hide corners during reveal */
+.phase-2 .boot-corner {
+  opacity: 0 !important;
+}
+
+/* ── App reveal: soft opacity fade ── */
+.app-shell.hud-booting {
+  opacity: 0;
+}
+.app-shell.hud-booted {
+  animation: bootAppReveal 1s ease-out forwards;
+}
+@keyframes bootAppReveal {
+  0%   { opacity: 0; }
+  100% { opacity: 1; }
+}

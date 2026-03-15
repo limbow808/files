@@ -6,6 +6,7 @@ import SystemInput from '../components/SystemInput';
 import EsiBlueprintPanel from '../components/EsiBlueprintPanel';
 import CalcDetailPanel from '../components/CalcDetailPanel';
 import ShoppingList from '../components/ShoppingList';
+import EveText from '../components/EveText';
 import { API } from '../App';
 
 const BP_FILTERS   = ['Personal', 'Corporate', 'Not Owned', 'BPOs', 'BPCs'];
@@ -404,19 +405,19 @@ export default function CalculatorPage({ refreshKey = 0 }) {
         {loading && !calcData && (
           <div style={{ padding: '40px 20px', textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', letterSpacing: 2 }}>
             {progress && progress.stage === 'prices' ? (
-              <div style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>
-                FETCHING MARKET DATA…
+              <div>
+                <EveText text="FETCHING MARKET DATA…" scramble={true} wave={true} speed={30} steps={8} />
               </div>
             ) : progress && progress.stage === 'calc' ? (
               <div>
                 <div style={{ color: 'var(--text)', marginBottom: 8, fontSize: 12, letterSpacing: 1 }}>
-                  {progress.msg}
+                  <EveText text={progress.msg} scramble={true} steps={6} speed={25} />
                 </div>
                 <div style={{ color: 'var(--dim)', fontSize: 10 }}>
                   {progress.done} / {progress.total}
                 </div>
                 <div style={{ marginTop: 10, width: 240, margin: '10px auto 0', height: 2, background: '#1a1a1a', position: 'relative' }}>
-                  <div style={{
+                  <div className="eve-bar-glow" style={{
                     position: 'absolute', left: 0, top: 0, bottom: 0,
                     width: `${Math.round((progress.done / progress.total) * 100)}%`,
                     background: 'var(--accent)', transition: 'width 0.3s'
@@ -424,8 +425,8 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                 </div>
               </div>
             ) : (
-              <div style={{ animation: 'pulse 1.5s ease-in-out infinite' }}>
-                LOADING…
+              <div>
+                <EveText text="LOADING…" scramble={true} wave={true} speed={35} steps={10} />
               </div>
             )}
           </div>
