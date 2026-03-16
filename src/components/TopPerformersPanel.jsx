@@ -5,8 +5,8 @@ import { API } from '../App';
 
 // Ownership badge colours
 const OWN_COLORS = {
-  personal: { bg: 'rgba(255,71,0,0.18)',  border: 'rgba(255,71,0,0.55)',  label: 'PERS' },
-  corp:     { bg: 'rgba(68,187,85,0.18)', border: 'rgba(68,187,85,0.55)', label: 'CORP' },
+  personal: { fill: '#ff4700', label: 'PERS' },
+  corp:     { fill: '#44bb55', label: 'CORP' },
 };
 
 function OwnBadge({ kind }) {
@@ -14,15 +14,9 @@ function OwnBadge({ kind }) {
   if (!c) return null;
   return (
     <span style={{
-      display: 'inline-block',
-      padding: '1px 5px',
-      fontSize: 8,
-      letterSpacing: 1,
-      border: `1px solid ${c.border}`,
-      background: c.bg,
-      color: c.border,
-      borderRadius: 2,
-      lineHeight: 1.6,
+      display: 'inline-block', padding: '2px 6px', fontSize: 8, letterSpacing: 1,
+      background: c.fill, color: '#000',
+      borderRadius: 2, fontWeight: 700, flexShrink: 0,
     }}>{c.label}</span>
   );
 }
@@ -87,6 +81,14 @@ function ItemRow({ item, rank }) {
         overflow: 'hidden',
         paddingRight: 6,
       }} title={item.name}>
+        {item.output_id && (
+          <img
+            src={`https://images.evetech.net/types/${item.output_id}/icon?size=32`}
+            alt=""
+            style={{ width: 18, height: 18, flexShrink: 0, opacity: 0.85 }}
+            onError={e => { e.target.style.display = 'none'; }}
+          />
+        )}
         <span style={{
           fontFamily: 'var(--mono)', fontSize: 11,
           color: 'var(--text)',

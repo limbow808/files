@@ -336,6 +336,135 @@ def get_wallet_history(days: int = 30) -> List[Dict[str, Any]]:
     return [{"ts": r["ts"], "balance": r["balance"], "plex_count": r["plex_count"] or 0} for r in rows]
 
 
+# ─── Craft log ───────────────────────────────────────────────────────────────
+
+def _ensure_craft_log_table(conn) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS craft_log (
+            job_id          INTEGER PRIMARY KEY,
+            char_id         INTEGER,
+            char_name       TEXT,
+            product_type_id INTEGER,
+            product_name    TEXT,
+            activity_id     INTEGER,
+            activity        TEXT,
+            runs            INTEGER,
+            material_cost   REAL,
+            sell_price      REAL,
+            est_profit      REAL,
+            margin_pct      REAL,
+            completed_at    TEXT,
+            recorded_at     INTEGER
+        )
+    """)
+    conn.commit()
+
+
+def upsert_craft_jobs(jobs: List[Dict[str, Any]]) -> int:
+    """Insert-or-replace completed craft jobs. Returns number of new rows inserted."""
+    conn = _get_conn()
+    _ensure_craft_log_table(conn)
+    cur = conn.cursor()
+    inserted = 0
+    for j in jobs:
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO craft_log
+              (job_id, char_id, char_name, product_type_id, product_name,
+               activity_id, activity, runs, material_cost, sell_price,
+               est_profit, margin_pct, completed_at, recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                j["job_id"], j.get("char_id"), j.get("char_name"),
+                j.get("product_type_id"), j.get("product_name"),
+                j.get("activity_id"), j.get("activity"),
+                j.get("runs"), j.get("material_cost"), j.get("sell_price"),
+                j.get("est_profit"), j.get("margin_pct"),
+                j.get("completed_at"), int(time.time()),
+            ),
+        )
+        if cur.rowcount:
+            inserted += 1
+    conn.commit()
+    return inserted
+
+
+def get_craft_log(days: int = 90) -> List[Dict[str, Any]]:
+    conn = _get_conn()
+    _ensure_craft_log_table(conn)
+    cutoff = int(time.time()) - days * 86400
+    rows = conn.execute(
+        """
+        SELECT * FROM craft_log
+        WHERE recorded_at >= ?
+        ORDER BY completed_at DESC
+        """,
+        (cutoff,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_craft_stats(days: int = 90) -> Dict[str, Any]:
+    """Return per-item and overall craft profitability stats."""
+    conn = _get_conn()
+    _ensure_craft_log_table(conn)
+    cutoff = int(time.time()) - days * 86400
+
+    rows = conn.execute(
+        """
+        SELECT c.product_name, c.product_type_id, c.activity,
+               SUM(c.runs)           AS total_runs,
+               SUM(c.material_cost)  AS total_cost,
+               SUM(c.sell_price * c.runs) AS est_revenue,
+               SUM(c.est_profit)     AS est_profit,
+               AVG(c.margin_pct)     AS avg_margin,
+               COUNT(*)              AS job_count
+        FROM craft_log c
+        WHERE c.recorded_at >= ? AND c.material_cost IS NOT NULL
+        GROUP BY c.product_type_id
+        ORDER BY est_profit DESC
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    items = [dict(r) for r in rows]
+
+    # Join realized sales from sell_order_history (matched by type_id, no date filter —
+    # an item manufactured 90 days ago may only have sold recently)
+    try:
+        type_ids = [r["product_type_id"] for r in items if r["product_type_id"]]
+        if type_ids:
+            ph = ",".join("?" * len(type_ids))
+            realized = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    f"SELECT type_id, SUM(revenue) FROM sell_order_history WHERE type_id IN ({ph}) GROUP BY type_id",
+                    type_ids,
+                ).fetchall()
+            }
+            for item in items:
+                item["realized_revenue"] = realized.get(item["product_type_id"])
+                tc = item["total_cost"] or 0
+                rr = item["realized_revenue"]
+                item["realized_profit"] = round(rr - tc, 2) if rr is not None else None
+    except Exception:
+        for item in items:
+            item["realized_revenue"] = None
+            item["realized_profit"] = None
+
+    totals = {
+        "total_cost":        sum(r["total_cost"]    or 0 for r in items),
+        "est_revenue":       sum(r["est_revenue"]   or 0 for r in items),
+        "est_profit":        sum(r["est_profit"]    or 0 for r in items),
+        "realized_revenue":  sum(r["realized_revenue"] or 0 for r in items if r["realized_revenue"] is not None),
+        "realized_profit":   sum(r["realized_profit"]  or 0 for r in items if r["realized_profit"]  is not None),
+        "total_runs":        sum(r["total_runs"]    or 0 for r in items),
+        "job_count":         sum(r["job_count"]     or 0 for r in items),
+    }
+    return {"items": items, "totals": totals, "days": days}
+
+
 # ─── SDE / crest.db seeding helper ───────────────────────────────────────────
 
 def seed_from_sde(

@@ -26,6 +26,7 @@ from calculator import calculate_all
 from database import (
     save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history,
     sync_open_orders, get_sell_history_stats,
+    upsert_craft_jobs, get_craft_log, get_craft_stats,
 )
 import alert_scanner as _alert_scanner
 
@@ -841,10 +842,16 @@ def api_calculator():
 @app.route("/api/top-performers", methods=["GET"])
 def api_top_performers():
     """
-    Return up to 12 manufacturing items where the player/corp owns a BP,
-    ranked by a composite score: ISK/hr × log(volume) × sqrt(max(0, ROI)).
-    Uses the most recently computed calculator cache — returns no_data if no
-    cache exists yet (client should fetch /api/calculator first).
+    Return up to 20 manufacturing items where the player/corp owns a BP,
+    ranked by a smart composite score that factors in:
+      - ISK/hr × log(market depth) × sqrt(ROI)   — base efficiency
+      - Urgency: supply_days vs avg_daily_volume   — deprioritize overstocked items
+      - BPO copy overhead penalty                 — BPOs need copying, reducing real profitability
+      - Active job penalty                        — items already in the build queue need less urgency
+      - Capital lock penalty                      — penalise very long sell cycles
+
+    Uses the most recently computed calculator cache; also cross-references the
+    ESI orders and industry jobs caches for live signals.
     """
     import math, sqlite3 as _sq
 
@@ -862,28 +869,33 @@ def api_top_performers():
 
     all_results = _calc_cache[best_key].get("results", [])
 
-    # ── Build owned blueprint_id sets ─────────────────────────────────────────
-    personal_bp_ids: set = set()
-    corp_bp_ids: set     = set()
+    # ── Build owned blueprint_id sets (BPO vs BPC tracked separately) ─────────
+    personal_bpo_bp_ids: set = set()   # personal BPOs — original, need copying
+    personal_bpc_bp_ids: set = set()   # personal BPCs — ready to manufacture
+    corp_bp_ids: set         = set()
 
     for bp in _ESI_BP_CACHE.get("blueprints", []):
         tid = bp.get("type_id")
         if not tid:
             continue
         if bp.get("owner") == "personal":
-            personal_bp_ids.add(tid)
+            if bp.get("bp_type") == "BPO" or bp.get("runs", -1) == -1:
+                personal_bpo_bp_ids.add(tid)
+            else:
+                personal_bpc_bp_ids.add(tid)
         else:
             corp_bp_ids.add(tid)
 
     corp_bp_ids.update(CORP_BPO_TYPE_IDS)
-
+    personal_bp_ids = personal_bpo_bp_ids | personal_bpc_bp_ids
     all_bp_ids = personal_bp_ids | corp_bp_ids
     if not all_bp_ids:
         return jsonify({"items": [], "status": "no_blueprints"})
 
-    # ── Map blueprint_id → output_id (+ ownership) via crest.db ──────────────
-    personal_output_ids: set = set()
-    corp_output_ids: set     = set()
+    # ── Map blueprint_id → output_id (+ ownership + bp_type) via crest.db ────
+    personal_bpo_output_ids: set = set()
+    personal_bpc_output_ids: set = set()
+    corp_output_ids: set         = set()
 
     try:
         db_path = os.path.join(os.path.dirname(__file__), "crest.db")
@@ -895,22 +907,47 @@ def api_top_performers():
         ).fetchall()
         conn.close()
         for bp_id, out_id in rows:
-            if bp_id in personal_bp_ids:
-                personal_output_ids.add(out_id)
+            if bp_id in personal_bpo_bp_ids:
+                personal_bpo_output_ids.add(out_id)
+            if bp_id in personal_bpc_bp_ids:
+                personal_bpc_output_ids.add(out_id)
             if bp_id in corp_bp_ids:
                 corp_output_ids.add(out_id)
     except Exception as e:
         print(f"[top-performers] DB error: {e}")
 
-    owned_output_ids = personal_output_ids | corp_output_ids
+    personal_output_ids = personal_bpo_output_ids | personal_bpc_output_ids
+    owned_output_ids    = personal_output_ids | corp_output_ids
+
+    # ── Live signal 1: sell order inventory (supply coverage) ─────────────────
+    # Aggregate volume_remain per type_id across all open sell orders
+    sell_qty_by_type: dict[int, int] = {}
+    for o in _ESI_ORDERS_CACHE.get("sell", []):
+        tid = o.get("type_id")
+        if tid:
+            sell_qty_by_type[tid] = sell_qty_by_type.get(tid, 0) + (o.get("volume_remain") or 0)
+
+    # ── Live signal 2: items actively being manufactured or queued ─────────────
+    now_ts = int(time.time())
+    actively_producing: dict[int, int] = {}   # output type_id → runs in flight
+    for j in _ESI_JOBS_CACHE.get("jobs", []):
+        if j.get("activity_id") in (1, 9, 11):  # Manufacturing / Reactions
+            pid   = j.get("product_type_id")
+            secs  = max(0, j.get("end_ts", 0) - now_ts)
+            if pid and secs > 0:
+                actively_producing[pid] = actively_producing.get(pid, 0) + (j.get("runs") or 1)
 
     # ── Score and filter results ───────────────────────────────────────────────
+    URGENCY_HORIZON_DAYS = 7    # >7 days supply → near-zero urgency
+    BPO_COPY_PENALTY     = 0.70 # BPOs score 30% lower (copy overhead, 40-day waits)
+    MAX_SELL_DAYS_BEFORE_PENALTY = 21  # if it takes >21 days to sell, penalise
+
     candidates = []
     for r in all_results:
         out_id = r.get("output_id")
         if out_id not in owned_output_ids:
             continue
-        profit = r.get("net_profit", 0)
+        profit  = r.get("net_profit", 0)
         isk_hr  = r.get("isk_per_hour") or 0
         vol     = r.get("avg_daily_volume") or 0
         roi     = r.get("roi", 0)
@@ -918,8 +955,40 @@ def api_top_performers():
         if profit <= 0 or isk_hr <= 0:
             continue
 
-        # Composite: reward ISK/hr efficiency × market depth × ROI
-        score = isk_hr * math.log1p(max(1.0, vol)) * math.sqrt(max(0.0, roi))
+        # ── Urgency: how urgently do we need to produce more? ─────────────────
+        sell_qty      = sell_qty_by_type.get(out_id, 0)
+        supply_days   = (sell_qty / vol) if vol > 0 else 0
+        # sigmoid-style: urgency=1.0 at 0d coverage, ~0.5 at horizon/2, ~0.05 at horizon+
+        urgency = max(0.05, 1.0 - (supply_days / URGENCY_HORIZON_DAYS) ** 0.8)
+        # Boost: if already critically low (<1 day supply) signal very urgent
+        if supply_days < 1.0:
+            urgency = min(2.0, urgency * 1.5)
+
+        # Also factor in units already being produced vs supply gap
+        producing_qty = actively_producing.get(out_id, 0)
+        if vol > 0 and producing_qty > 0:
+            days_in_flight = producing_qty / vol
+            # Treat in-flight production as partial coverage
+            urgency = urgency * max(0.2, 1.0 - days_in_flight / URGENCY_HORIZON_DAYS)
+
+        # ── BPO copy penalty ─────────────────────────────────────────────────
+        # If only BPO available (no BPC in hand), manufacturing requires a copy first.
+        # Copy takes time + ISK that doesn't appear in the calc estimate.
+        is_bpo_only = (out_id in personal_bpo_output_ids and out_id not in personal_bpc_output_ids)
+        is_corp_bp  = out_id in corp_output_ids
+        # Corp BPs are BPOs but assumed always copyable/ready via corp hanger → no penalty
+        copy_penalty = BPO_COPY_PENALTY if (is_bpo_only and not is_corp_bp) else 1.0
+
+        # ── Capital lock penalty: penalise very slow-selling items ────────────
+        days_to_sell = 0
+        rec = r.get("recommended_runs")
+        if isinstance(rec, dict):
+            days_to_sell = rec.get("days_to_sell", 0) or 0
+        capital_penalty = max(0.3, 1.0 - max(0, days_to_sell - MAX_SELL_DAYS_BEFORE_PENALTY) / 60)
+
+        # ── Final composite score ─────────────────────────────────────────────
+        base    = isk_hr * math.log1p(max(1.0, vol)) * math.sqrt(max(0.0, roi))
+        score   = base * urgency * copy_penalty * capital_penalty
 
         ownership = []
         if out_id in personal_output_ids:
@@ -928,23 +997,29 @@ def api_top_performers():
             ownership.append("corp")
 
         candidates.append({
-            "name":             r["name"],
-            "output_id":        out_id,
-            "tech":             r.get("tech", "I"),
-            "category":         r.get("category", ""),
-            "roi":              round(r.get("roi", 0), 1),
-            "net_profit":       round(r.get("net_profit", 0)),
-            "isk_per_hour":     round(r.get("isk_per_hour", 0)),
-            "avg_daily_volume": round(r.get("avg_daily_volume") or 0, 1),
-            "recommended_runs": r.get("recommended_runs"),
-            "ownership":        ownership,
-            "_score":           score,
+            "name":              r["name"],
+            "output_id":         out_id,
+            "tech":              r.get("tech", "I"),
+            "category":          r.get("category", ""),
+            "roi":               round(r.get("roi", 0), 1),
+            "net_profit":        round(r.get("net_profit", 0)),
+            "isk_per_hour":      round(r.get("isk_per_hour", 0)),
+            "avg_daily_volume":  round(vol, 1),
+            "recommended_runs":  r.get("recommended_runs"),
+            "ownership":         ownership,
+            # ── live signals exposed to frontend ──
+            "supply_qty":        sell_qty,
+            "supply_days":       round(supply_days, 1),
+            "producing_qty":     producing_qty,
+            "is_bpo_only":       is_bpo_only and not is_corp_bp,
+            "urgency":           round(urgency, 2),
+            "_score":            score,
         })
 
     candidates.sort(key=lambda x: x["_score"], reverse=True)
 
     items = []
-    for r in candidates[:12]:
+    for r in candidates[:20]:
         r.pop("_score", None)
         items.append(r)
 
@@ -1469,7 +1544,7 @@ def api_bpo_market_scan():
           pages_scanned, contracts_checked, matched }
     """
     try:
-        import sqlite3 as _sq
+        import sqlite3 as _sq, math
         from flask import request as _freq
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1628,6 +1703,8 @@ def api_bpo_market_scan():
                             "te":          item.get("time_efficiency", 0),
                             "quantity":    item.get("quantity", 1),
                             "is_bpc":      is_bpc,
+                            # runs=-1 for BPOs (unlimited), positive for BPCs
+                            "runs":        item.get("runs", -1),
                         }
             except Exception:
                 pass
@@ -1653,27 +1730,72 @@ def api_bpo_market_scan():
                 calc_row  = bpid_to_calc.get(bpid, {})
                 oid       = calc_row.get("output_id")
 
+                is_bpc        = match.get("is_bpc", False)
+                runs          = match.get("runs", -1)   # -1 = unlimited (BPO)
+                price         = contract.get("price", 0)
+                net_profit_1r = calc_row.get("net_profit", 0)
+                gross_rev_1r  = calc_row.get("gross_revenue", 0)
+                mat_cost_1r   = calc_row.get("material_cost", 0)
+
+                # ── Amortised economics ────────────────────────────────────
+                # BPO: treat acquisition cost as capital (not consumed).
+                #      ROI per-run is unchanged; breakeven = runs needed to
+                #      recoup purchase price.
+                # BPC: cost is consumed over `runs` manufacturing jobs.
+                #      Each run effectively costs (price / runs) extra.
+                #      Net profit is reduced accordingly; if amortised cost
+                #      exceeds profit, this BPC can never break even.
+                if is_bpc and runs > 0:
+                    cost_per_run         = price / runs
+                    adj_net_profit_1r    = net_profit_1r - cost_per_run
+                    # adj_roi: adjusted profit vs total cost (materials + amortised BP)
+                    total_cost_1r        = mat_cost_1r + cost_per_run
+                    adj_roi              = (adj_net_profit_1r / total_cost_1r * 100) if total_cost_1r > 0 else 0
+                    total_adj_profit     = adj_net_profit_1r * runs
+                    can_breakeven        = adj_net_profit_1r > 0
+                    # Unadjusted breakeven (how many runs to recoup price from gross profit)
+                    breakeven_runs_unadj = math.ceil(price / net_profit_1r) if net_profit_1r > 0 else None
+                    # can the BPC actually achieve it given its runs?
+                    bpc_feasible         = (breakeven_runs_unadj is not None and breakeven_runs_unadj <= runs) if is_bpc else True
+                else:
+                    # BPO: no amortised cost per run
+                    adj_net_profit_1r    = net_profit_1r
+                    adj_roi              = calc_row.get("roi", 0)
+                    total_adj_profit     = None
+                    can_breakeven        = True
+                    breakeven_runs_unadj = math.ceil(price / net_profit_1r) if net_profit_1r > 0 else None
+                    bpc_feasible         = True
+                    runs                 = -1
+
                 results.append({
-                    "blueprint_id":  bpid,
-                    "output_id":     oid,
-                    "name":          calc_row.get("name", "?"),
-                    "me":            match["me"],
-                    "te":            match["te"],
-                    "is_bpc":        match.get("is_bpc", False),
-                    "contract_id":   contract["contract_id"],
-                    "price":         contract.get("price", 0),
-                    "location_id":   contract.get("start_location_id"),
-                    "issuer_id":     contract.get("issuer_id"),
-                    "expires":       contract.get("date_expired", ""),
-                    "already_owned": bpid in corp_bp_ids or bpid in personal_bp_ids,
-                    # Calc stats
-                    "net_profit":    calc_row.get("net_profit", 0),
-                    "roi":           calc_row.get("roi", 0),
-                    "isk_per_hour":  calc_row.get("isk_per_hour", 0),
-                    "material_cost": calc_row.get("material_cost", 0),
-                    "gross_revenue": calc_row.get("gross_revenue", 0),
-                    "category":      calc_row.get("category", ""),
-                    "tech":          calc_row.get("tech", ""),
+                    "blueprint_id":       bpid,
+                    "output_id":          oid,
+                    "name":               calc_row.get("name", "?"),
+                    "me":                 match["me"],
+                    "te":                 match["te"],
+                    "is_bpc":             is_bpc,
+                    "runs":               runs,
+                    "contract_id":        contract["contract_id"],
+                    "price":              price,
+                    "location_id":        contract.get("start_location_id"),
+                    "issuer_id":          contract.get("issuer_id"),
+                    "expires":            contract.get("date_expired", ""),
+                    "already_owned":      bpid in corp_bp_ids or bpid in personal_bp_ids,
+                    # Raw per-run calc stats
+                    "net_profit":         net_profit_1r,
+                    "roi":                calc_row.get("roi", 0),
+                    "isk_per_hour":       calc_row.get("isk_per_hour", 0),
+                    "material_cost":      mat_cost_1r,
+                    "gross_revenue":      gross_rev_1r,
+                    "category":           calc_row.get("category", ""),
+                    "tech":               calc_row.get("tech", ""),
+                    # Amortised / adjusted stats
+                    "adj_net_profit":     round(adj_net_profit_1r, 2),
+                    "adj_roi":            round(adj_roi, 2),
+                    "total_adj_profit":   round(total_adj_profit, 2) if total_adj_profit is not None else None,
+                    "can_breakeven":      can_breakeven,
+                    "bpc_feasible":       bpc_feasible,
+                    "breakeven_runs":     breakeven_runs_unadj,
                 })
 
         # Deduplicate by blueprint_id — keep only the cheapest contract per BP
@@ -1696,8 +1818,11 @@ def api_bpo_market_scan():
             cheapest[bpid] = best
         results = list(cheapest.values())
 
-        # Sort by net_profit desc
-        results.sort(key=lambda x: x.get("net_profit", 0), reverse=True)
+        # Sort: feasible items first (can break even), then by adj_net_profit desc
+        results.sort(key=lambda x: (
+            0 if x.get("can_breakeven", True) else 1,
+            -(x.get("adj_net_profit", 0))
+        ))
 
         return jsonify({
             "results":           results,
@@ -1711,6 +1836,303 @@ def api_bpo_market_scan():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e), "results": []}), 200
+
+
+@app.route("/api/bpo_market_scan_stream", methods=["GET"])
+def api_bpo_market_scan_stream():
+    """
+    Streaming SSE version of /api/bpo_market_scan.
+    Emits progress events as contracts and items are fetched so the frontend
+    can show a live progress bar.
+
+    Events (all JSON in the `data` field):
+        {"type":"status",    "msg": str}
+        {"type":"contracts", "page": int, "total_pages": int, "contracts": int}
+        {"type":"scanning",  "done": int, "total": int, "matched": int}
+        {"type":"done",      "results": [...], "matched": int,
+                             "pages_scanned": int, "contracts_checked": int}
+        {"type":"error",     "msg": str}
+    """
+    region_id = int(request.args.get("region_id", 10000002))
+    max_pages  = min(int(request.args.get("max_pages", 20)), 40)
+
+    def _sse(data):
+        return f"data: {json.dumps(data)}\n\n"
+
+    def generate():
+        try:
+            import math
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import requests as _esi
+
+            yield _sse({"type": "status", "msg": "Loading cached market data…"})
+
+            # ── 1. Grab calc results from cache ───────────────────────────
+            cache_key = _calc_cache_key("Korsiki", "large")
+            if not _calc_is_fresh(cache_key):
+                fresh_key = next(
+                    (k for k, v in _calc_cache.items()
+                     if (time.time() - v.get("generated_at", 0)) < CALC_CACHE_TTL),
+                    None
+                )
+                if fresh_key:
+                    cache_key = fresh_key
+                else:
+                    yield _sse({"type": "error",
+                                "msg": "Open the Calculator tab first to load market data, then scan."})
+                    return
+            calc_results = _calc_cache[cache_key]["results"]
+
+            # ── 2. Load owned BPs to flag duplicates ──────────────────────
+            yield _sse({"type": "status", "msg": "Loading owned blueprint data…"})
+
+            personal_bp_ids = set()
+            corp_bp_ids = set(CORP_BPO_TYPE_IDS)
+            try:
+                from characters import get_all_auth_headers
+                import requests as _ureq2
+                seen_corp_ids = set()
+                for cid, headers in get_all_auth_headers():
+                    resp_p = _ureq2.get(
+                        f"https://esi.evetech.net/latest/characters/{cid}/blueprints/",
+                        headers=headers, timeout=10
+                    )
+                    if resp_p.ok:
+                        for bp in resp_p.json():
+                            personal_bp_ids.add(bp.get("type_id"))
+                    try:
+                        corp_resp = _ureq2.get(
+                            f"https://esi.evetech.net/latest/characters/{cid}/",
+                            headers=headers, timeout=8
+                        )
+                        if corp_resp.ok:
+                            corp_id = corp_resp.json().get("corporation_id")
+                            if corp_id and corp_id not in seen_corp_ids:
+                                seen_corp_ids.add(corp_id)
+                                page = 1
+                                while True:
+                                    cr = _ureq2.get(
+                                        f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
+                                        headers=headers, params={"page": page}, timeout=15
+                                    )
+                                    if not cr.ok:
+                                        break
+                                    page_bps = cr.json()
+                                    if not page_bps:
+                                        break
+                                    for bp in page_bps:
+                                        corp_bp_ids.add(bp.get("type_id"))
+                                    if len(page_bps) < 1000:
+                                        break
+                                    page += 1
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Build blueprint_id → calc row
+            bpid_to_calc = {}
+            for r in calc_results:
+                bpid = r.get("blueprint_id")
+                if bpid:
+                    bpid_to_calc[bpid] = r
+            wanted_bp_ids = set(bpid_to_calc.keys())
+
+            if not wanted_bp_ids:
+                yield _sse({"type": "error",
+                            "msg": "No calc data — open the Calculator tab first."})
+                return
+
+            # ── 3. Fetch public contract pages ────────────────────────────
+            ESI_BASE = "https://esi.evetech.net/latest"
+            session = _esi.Session()
+
+            yield _sse({"type": "status", "msg": "Connecting to ESI contracts…"})
+
+            first_resp = session.get(
+                f"{ESI_BASE}/contracts/public/{region_id}/",
+                params={"page": 1}, timeout=12
+            )
+            first_resp.raise_for_status()
+            total_pages  = min(int(first_resp.headers.get("X-Pages", 1)), max_pages)
+            all_contracts = [c for c in first_resp.json() if c.get("type") == "item_exchange"]
+
+            yield _sse({"type": "contracts", "page": 1, "total_pages": total_pages,
+                        "contracts": len(all_contracts)})
+
+            if total_pages > 1:
+                def fetch_page(page):
+                    try:
+                        r = session.get(
+                            f"{ESI_BASE}/contracts/public/{region_id}/",
+                            params={"page": page}, timeout=12,
+                        )
+                        if r.status_code == 404:
+                            return page, []
+                        r.raise_for_status()
+                        return page, r.json()
+                    except Exception:
+                        return page, []
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    futures = {pool.submit(fetch_page, p): p
+                               for p in range(2, total_pages + 1)}
+                    for fut in as_completed(futures):
+                        pg, page_data = fut.result()
+                        all_contracts.extend(
+                            c for c in page_data if c.get("type") == "item_exchange"
+                        )
+                        yield _sse({"type": "contracts", "page": pg,
+                                    "total_pages": total_pages,
+                                    "contracts": len(all_contracts)})
+
+            contracts_checked = len(all_contracts)
+            bp_candidates = [c for c in all_contracts if c.get("volume", 999) <= 1000]
+
+            yield _sse({"type": "scanning", "done": 0,
+                        "total": len(bp_candidates), "matched": 0})
+
+            # ── 4. Fetch items for each candidate contract ────────────────
+            def fetch_items(contract):
+                cid = contract["contract_id"]
+                try:
+                    r = session.get(
+                        f"{ESI_BASE}/contracts/public/items/{cid}/",
+                        timeout=10
+                    )
+                    if not r.ok:
+                        return None
+                    items = r.json()
+                    for item in items:
+                        tid = item.get("type_id")
+                        if tid in wanted_bp_ids and item.get("is_included", True):
+                            return {
+                                "contract":  contract,
+                                "type_id":   tid,
+                                "me":        item.get("material_efficiency", 0),
+                                "te":        item.get("time_efficiency", 0),
+                                "quantity":  item.get("quantity", 1),
+                                "is_bpc":    item.get("is_blueprint_copy", False),
+                                "runs":      item.get("runs", -1),
+                            }
+                except Exception:
+                    pass
+                return None
+
+            raw_results = []
+            done_count  = 0
+            REPORT_EVERY = max(1, len(bp_candidates) // 40)  # ~40 progress ticks
+
+            with ThreadPoolExecutor(max_workers=12) as pool:
+                futures_list = [pool.submit(fetch_items, c) for c in bp_candidates]
+                for fut in as_completed(futures_list):
+                    done_count += 1
+                    match = fut.result()
+                    if match:
+                        raw_results.append(match)
+                    if done_count % REPORT_EVERY == 0 or done_count == len(bp_candidates):
+                        yield _sse({"type": "scanning", "done": done_count,
+                                    "total": len(bp_candidates),
+                                    "matched": len(raw_results)})
+
+            # ── 5. Build result rows (same logic as blocking endpoint) ────
+            results = []
+            for match in raw_results:
+                contract      = match["contract"]
+                bpid          = match["type_id"]
+                calc_row      = bpid_to_calc.get(bpid, {})
+                oid           = calc_row.get("output_id")
+                is_bpc        = match.get("is_bpc", False)
+                runs          = match.get("runs", -1)
+                price         = contract.get("price", 0)
+                net_profit_1r = calc_row.get("net_profit", 0)
+                mat_cost_1r   = calc_row.get("material_cost", 0)
+
+                if is_bpc and runs > 0:
+                    cost_per_run      = price / runs
+                    adj_net_profit_1r = net_profit_1r - cost_per_run
+                    total_cost_1r     = mat_cost_1r + cost_per_run
+                    adj_roi           = (adj_net_profit_1r / total_cost_1r * 100) if total_cost_1r > 0 else 0
+                    total_adj_profit  = adj_net_profit_1r * runs
+                    can_breakeven     = adj_net_profit_1r > 0
+                    breakeven_runs    = math.ceil(price / net_profit_1r) if net_profit_1r > 0 else None
+                    bpc_feasible      = (breakeven_runs is not None and breakeven_runs <= runs)
+                else:
+                    adj_net_profit_1r = net_profit_1r
+                    adj_roi           = calc_row.get("roi", 0)
+                    total_adj_profit  = None
+                    can_breakeven     = True
+                    breakeven_runs    = math.ceil(price / net_profit_1r) if net_profit_1r > 0 else None
+                    bpc_feasible      = True
+                    runs              = -1
+
+                results.append({
+                    "blueprint_id":    bpid,
+                    "output_id":       oid,
+                    "name":            calc_row.get("name", "?"),
+                    "me":              match["me"],
+                    "te":              match["te"],
+                    "is_bpc":          is_bpc,
+                    "runs":            runs,
+                    "contract_id":     contract["contract_id"],
+                    "price":           price,
+                    "location_id":     contract.get("start_location_id"),
+                    "issuer_id":       contract.get("issuer_id"),
+                    "expires":         contract.get("date_expired", ""),
+                    "already_owned":   bpid in corp_bp_ids or bpid in personal_bp_ids,
+                    "net_profit":      net_profit_1r,
+                    "roi":             calc_row.get("roi", 0),
+                    "isk_per_hour":    calc_row.get("isk_per_hour", 0),
+                    "material_cost":   mat_cost_1r,
+                    "gross_revenue":   calc_row.get("gross_revenue", 0),
+                    "category":        calc_row.get("category", ""),
+                    "tech":            calc_row.get("tech", ""),
+                    "adj_net_profit":  round(adj_net_profit_1r, 2),
+                    "adj_roi":         round(adj_roi, 2),
+                    "total_adj_profit": round(total_adj_profit, 2) if total_adj_profit is not None else None,
+                    "can_breakeven":   can_breakeven,
+                    "bpc_feasible":    bpc_feasible,
+                    "breakeven_runs":  breakeven_runs,
+                })
+
+            # Deduplicate — keep cheapest contract per blueprint
+            all_by_bpid = {}
+            for r in results:
+                all_by_bpid.setdefault(r["blueprint_id"], []).append(r)
+            cheapest = {}
+            for bpid, entries in all_by_bpid.items():
+                entries.sort(key=lambda x: x["price"])
+                best = entries[0]
+                best["listing_count"] = len(entries)
+                cheapest[bpid] = best
+            results = list(cheapest.values())
+            results.sort(key=lambda x: (
+                0 if x.get("can_breakeven", True) else 1,
+                -(x.get("adj_net_profit", 0))
+            ))
+
+            yield _sse({
+                "type":              "done",
+                "results":           results,
+                "matched":           len(results),
+                "pages_scanned":     total_pages,
+                "contracts_checked": contracts_checked,
+                "bp_candidates":     len(bp_candidates),
+            })
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            yield _sse({"type": "error", "msg": str(e)})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":    "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/api/ui/open_ingame", methods=["POST"])
@@ -1761,6 +2183,11 @@ _ESI_BP_TTL               = 300   # 5 min
 _ESI_JOBS_CACHE:    dict  = {}
 _ESI_JOBS_CACHE_TS: float = 0
 _ESI_JOBS_TTL             = 120   # 2 min
+
+_QUEUE_SUMMARY_CACHE:    dict  = {}
+_QUEUE_SUMMARY_CACHE_TS: float = 0
+_QUEUE_SUMMARY_TTL             = 120  # 2 min
+_TYPE_VOLUME_CACHE: dict       = {}   # type_id → packaged volume m³, persistent until restart
 
 _ESI_ORDERS_CACHE:    dict  = {}
 _ESI_ORDERS_CACHE_TS: float = 0
@@ -1955,7 +2382,8 @@ _ASSETS_TTL = 300  # 5 minutes
 @app.route("/api/assets", methods=["GET"])
 def api_assets():
     """
-    Return character assets as { type_id: total_quantity } plus name map.
+    Return assets for ALL authenticated characters as { type_id: total_quantity } plus name map.
+    Aggregates quantities across all characters in parallel.
     Response: { assets: {type_id: qty}, names: {type_id: name}, cached_at: ts }
     """
     global _ASSETS_CACHE, _ASSETS_CACHE_TS
@@ -1965,32 +2393,45 @@ def api_assets():
         if not force and _ASSETS_CACHE and (time.time() - _ASSETS_CACHE_TS) < _ASSETS_TTL:
             return jsonify(_ASSETS_CACHE)
 
-        from auth import get_auth_header
-        from assets import CHARACTER_ID
+        from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import requests as req
 
-        headers = get_auth_header()
+        char_records = load_characters()
+        auth_headers = get_all_auth_headers()
 
-        all_items = []
-        page = 1
-        while True:
-            resp = req.get(
-                f"https://esi.evetech.net/latest/characters/{CHARACTER_ID}/assets/",
-                headers=headers, params={"page": page}, timeout=15
-            )
-            resp.raise_for_status()
-            page_items = resp.json()
-            if not page_items:
-                break
-            all_items.extend(page_items)
-            if len(page_items) < 1000:
-                break
-            page += 1
+        def _fetch_char_assets(cid, headers):
+            char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            items = []
+            page = 1
+            while True:
+                try:
+                    resp = req.get(
+                        f"https://esi.evetech.net/latest/characters/{cid}/assets/",
+                        headers=headers, params={"page": page}, timeout=15
+                    )
+                    if not resp.ok:
+                        break
+                    page_items = resp.json()
+                    if not page_items:
+                        break
+                    items.extend(page_items)
+                    if len(page_items) < 1000:
+                        break
+                    page += 1
+                except Exception as e:
+                    print(f"  [assets] Failed for {char_name}: {e}")
+                    break
+            return items
 
         from collections import defaultdict
         inventory: dict = defaultdict(int)
-        for item in all_items:
-            inventory[item["type_id"]] += item["quantity"]
+
+        with ThreadPoolExecutor(max_workers=max(1, len(auth_headers))) as pool:
+            futures = [pool.submit(_fetch_char_assets, cid, h) for cid, h in auth_headers]
+            for f in as_completed(futures):
+                for item in f.result():
+                    inventory[item["type_id"]] += item["quantity"]
 
         type_ids = list(inventory.keys())
         names: dict = {}
@@ -2275,6 +2716,7 @@ def api_industry_jobs():
                 "activity":          ACTIVITY_NAMES.get(activity_id, f"Activity {activity_id}"),
                 "activity_id":       activity_id,
                 "product_type_id":   pid,
+                "blueprint_type_id": j.get("blueprint_type_id"),
                 "product_name":      names.get(pid, f"Type {pid}"),
                 "runs":              runs,
                 "start_date":        start_str,
@@ -2298,6 +2740,327 @@ def api_industry_jobs():
 
     except Exception as e:
         return jsonify({"error": str(e), "jobs": []}), 200
+
+
+# ── Craft Log ─────────────────────────────────────────────────────────────────
+@app.route("/api/craft-log", methods=["GET"])
+def api_craft_log():
+    """
+    Fetch delivered manufacturing jobs from ESI (last 90 days), enrich with
+    material cost + est profit, upsert into craft_log, and return all rows.
+    """
+    try:
+        from flask import request as flask_request
+        from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests as req
+        from datetime import datetime, timezone
+
+        days = int(flask_request.args.get("days", 90))
+        force = flask_request.args.get("force", "0") == "1"
+
+        # Only re-fetch from ESI when forced (expensive); otherwise just return DB
+        if force:
+            char_records = load_characters()
+            auth_headers = get_all_auth_headers()
+            our_char_ids = {int(k) for k in char_records.keys()}
+
+            ACTIVITY_NAMES = {
+                1: "Manufacturing", 3: "TE Research", 4: "ME Research",
+                5: "Copying", 8: "Invention", 9: "Reactions", 11: "Reaction",
+            }
+
+            def _fetch_completed(cid, headers):
+                char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+                jobs = []
+                try:
+                    r = req.get(
+                        f"https://esi.evetech.net/latest/characters/{cid}/industry/jobs/",
+                        headers=headers, params={"include_completed": True}, timeout=20,
+                    )
+                    if r.ok:
+                        for j in r.json():
+                            if j.get("status") == "delivered" and j.get("activity_id") in (1, 9, 11):
+                                j["_char_id"] = cid
+                                j["_char_name"] = char_name
+                                jobs.append(j)
+                except Exception as e:
+                    print(f"  [craft-log] ESI failed for {char_name}: {e}")
+                return jobs
+
+            raw_jobs = []
+            seen_ids = set()
+            with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+                futures = [pool.submit(_fetch_completed, cid, h) for cid, h in auth_headers]
+                for f in as_completed(futures):
+                    for j in f.result():
+                        jid = j.get("job_id")
+                        if jid and jid not in seen_ids:
+                            seen_ids.add(jid)
+                            raw_jobs.append(j)
+
+            if raw_jobs:
+                # Name + price resolution (reuse active-jobs logic)
+                product_ids = list({j.get("product_type_id") for j in raw_jobs if j.get("product_type_id")})
+                names, market_prices = {}, {}
+                if product_ids:
+                    for i in range(0, len(product_ids), 1000):
+                        try:
+                            nr = req.post("https://esi.evetech.net/latest/universe/names/",
+                                          json=product_ids[i:i+1000], timeout=10)
+                            if nr.ok:
+                                for item in nr.json():
+                                    names[item["id"]] = item["name"]
+                        except Exception:
+                            pass
+                    try:
+                        from pricer import get_prices_bulk
+                        market_prices = get_prices_bulk(product_ids)
+                    except Exception:
+                        pass
+
+                # Material costs
+                mat_cost_per_unit: dict[int, float] = {}
+                try:
+                    import sqlite3 as _sq
+                    _cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+                    _cdb.row_factory = _sq.Row
+                    ph = ",".join("?" * len(product_ids))
+                    bp_map = {row["output_id"]: row["blueprint_id"] for row in _cdb.execute(
+                        f"SELECT output_id, blueprint_id FROM blueprints WHERE output_id IN ({ph})",
+                        product_ids).fetchall()}
+                    bp_ids = list(set(bp_map.values()))
+                    bp_mats: dict = {}
+                    if bp_ids:
+                        ph2 = ",".join("?" * len(bp_ids))
+                        for row in _cdb.execute(
+                            f"SELECT blueprint_id, material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id IN ({ph2})",
+                            bp_ids).fetchall():
+                            bp_mats.setdefault(row["blueprint_id"], []).append(
+                                (row["material_type_id"], row["base_quantity"]))
+                    _cdb.close()
+                    all_mat_ids = {mid for mats in bp_mats.values() for mid, _ in mats}
+                    missing = all_mat_ids - set(market_prices.keys())
+                    if missing:
+                        from pricer import get_prices_bulk as _gpb
+                        market_prices.update(_gpb(list(missing)))
+                    for pid in product_ids:
+                        bpid = bp_map.get(pid)
+                        if not bpid or bpid not in bp_mats:
+                            continue
+                        cost = 0.0
+                        for mid, qty in bp_mats[bpid]:
+                            mp = market_prices.get(mid)
+                            if mp and mp.get("sell"):
+                                cost += mp["sell"] * qty
+                            else:
+                                cost = None
+                                break
+                        if cost is not None:
+                            mat_cost_per_unit[pid] = cost
+                except Exception as _e:
+                    print(f"  [craft-log] mat cost failed: {_e}")
+
+                to_store = []
+                for j in raw_jobs:
+                    pid   = j.get("product_type_id")
+                    runs  = j.get("runs", 1)
+                    p     = market_prices.get(pid) if pid else None
+                    sell  = p["sell"] if p and p.get("sell") else None
+                    cpu   = mat_cost_per_unit.get(pid)
+                    mat   = round(cpu * runs, 2) if cpu is not None else None
+                    rev   = round(sell * runs, 2) if sell is not None else None
+                    prof  = round(rev - mat, 2) if (rev is not None and mat is not None) else None
+                    mgn   = round(prof / mat * 100, 2) if (prof is not None and mat and mat > 0) else None
+                    to_store.append({
+                        "job_id":          j.get("job_id"),
+                        "char_id":         j["_char_id"],
+                        "char_name":       j["_char_name"],
+                        "product_type_id": pid,
+                        "product_name":    names.get(pid, f"Type {pid}") if pid else "—",
+                        "activity_id":     j.get("activity_id"),
+                        "activity":        ACTIVITY_NAMES.get(j.get("activity_id"), "Unknown"),
+                        "runs":            runs,
+                        "material_cost":   mat,
+                        "sell_price":      sell,
+                        "est_profit":      prof,
+                        "margin_pct":      mgn,
+                        "completed_at":    j.get("end_date", ""),
+                    })
+                upsert_craft_jobs(to_store)
+
+        log = get_craft_log(days=days)
+        return jsonify({"log": log, "count": len(log)})
+
+    except Exception as e:
+        return jsonify({"error": str(e), "log": []}), 200
+
+
+@app.route("/api/craft-stats", methods=["GET"])
+def api_craft_stats():
+    """Return aggregated craft profitability stats from the local DB."""
+    try:
+        from flask import request as flask_request
+        days = int(flask_request.args.get("days", 90))
+        return jsonify(get_craft_stats(days=days))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
+
+
+# ── Queue Summary (footer stats) ───────────────────────────────────────────────
+@app.route("/api/queue-summary", methods=["GET"])
+def api_queue_summary():
+    """
+    Aggregate stats for the overview page footer.
+    Returns:
+      running_jobs, max_jobs, queue_count, needs_shopping, total_cost_isk, haul_m3
+    Cached 2 minutes. Fetches character mfg skill levels for max_jobs.
+    """
+    global _QUEUE_SUMMARY_CACHE, _QUEUE_SUMMARY_CACHE_TS
+    try:
+        from flask import request as flask_request
+        force = flask_request.args.get("force", "0") == "1"
+        if not force and _QUEUE_SUMMARY_CACHE and (time.time() - _QUEUE_SUMMARY_CACHE_TS) < _QUEUE_SUMMARY_TTL:
+            return jsonify(_QUEUE_SUMMARY_CACHE)
+
+        import requests as req
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        now_ts = int(time.time())
+
+        # ── 1. Running jobs ────────────────────────────────────────────────────
+        jobs = _ESI_JOBS_CACHE.get("jobs", [])
+        running_jobs = sum(1 for j in jobs if j.get("end_ts", 0) > now_ts)
+
+        # ── 2. Max manufacturing slots (sum across characters) ─────────────────
+        MASS_PROD     = 3387
+        ADV_MASS_PROD = 24625
+        max_jobs = 0
+        try:
+            from characters import get_all_auth_headers
+
+            def _fetch_slots(cid, headers):
+                try:
+                    r = req.get(
+                        f"https://esi.evetech.net/latest/characters/{cid}/skills/",
+                        headers=headers, timeout=10,
+                    )
+                    if not r.ok:
+                        return 1
+                    skill_map = {s["skill_id"]: s["trained_skill_level"] for s in r.json().get("skills", [])}
+                    return 1 + skill_map.get(MASS_PROD, 0) + skill_map.get(ADV_MASS_PROD, 0)
+                except Exception:
+                    return 1
+
+            auth_headers = get_all_auth_headers()
+            if auth_headers:
+                with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+                    for slots in pool.map(lambda x: _fetch_slots(*x), auth_headers):
+                        max_jobs += slots
+            else:
+                max_jobs = 1
+        except Exception:
+            max_jobs = max(1, running_jobs + 1)
+
+        # ── 3. Queue planner items (owned BPs, profitable, from calc cache) ────
+        best_key = max(
+            _calc_cache.keys(),
+            key=lambda k: _calc_cache[k].get("generated_at", 0),
+            default=None,
+        )
+        queue_items = []
+        total_cost_isk = 0.0
+        haul_m3 = 0.0
+
+        if best_key:
+            all_results = _calc_cache[best_key].get("results", [])
+
+            # Build owned output_id set (same as top-performers)
+            personal_bp_ids: set = set()
+            corp_bp_ids: set     = set()
+            for bp in _ESI_BP_CACHE.get("blueprints", []):
+                tid = bp.get("type_id")
+                if not tid:
+                    continue
+                if bp.get("owner") == "personal":
+                    personal_bp_ids.add(tid)
+                else:
+                    corp_bp_ids.add(tid)
+            corp_bp_ids.update(CORP_BPO_TYPE_IDS)
+            all_bp_ids = personal_bp_ids | corp_bp_ids
+
+            owned_output_ids: set = set()
+            if all_bp_ids:
+                try:
+                    import sqlite3 as _sq
+                    _db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+                    ph = ",".join("?" * len(all_bp_ids))
+                    for bp_id, out_id in _db.execute(
+                        f"SELECT blueprint_id, output_id FROM blueprints WHERE blueprint_id IN ({ph})",
+                        list(all_bp_ids),
+                    ).fetchall():
+                        owned_output_ids.add(out_id)
+                    _db.close()
+                except Exception:
+                    pass
+
+            for r in all_results:
+                if r.get("output_id") not in owned_output_ids:
+                    continue
+                if (r.get("net_profit") or 0) <= 0:
+                    continue
+                queue_items.append(r)
+
+            # ── 4. Fetch packaged volumes for materials (cached per process) ───
+            mat_type_ids: set = set()
+            for r in queue_items:
+                for m in r.get("material_breakdown", []):
+                    mat_type_ids.add(m["type_id"])
+
+            missing_ids = mat_type_ids - set(_TYPE_VOLUME_CACHE.keys())
+            if missing_ids:
+                def _fetch_vol(tid):
+                    try:
+                        rv = req.get(
+                            f"https://esi.evetech.net/latest/universe/types/{tid}/",
+                            timeout=8,
+                        )
+                        if rv.ok:
+                            d = rv.json()
+                            return tid, float(d.get("packaged_volume") or d.get("volume") or 1.0)
+                    except Exception:
+                        pass
+                    return tid, 1.0
+
+                with ThreadPoolExecutor(max_workers=20) as pool:
+                    for tid, vol in pool.map(_fetch_vol, missing_ids):
+                        _TYPE_VOLUME_CACHE[tid] = vol
+
+            # ── 5. Aggregate cost + haul ───────────────────────────────────────
+            for r in queue_items:
+                rec  = r.get("recommended_runs") or {}
+                runs = rec.get("runs", 1) if isinstance(rec, dict) else 1
+                total_cost_isk += (r.get("material_cost") or 0) * runs
+                for m in r.get("material_breakdown", []):
+                    qty = (m.get("quantity") or 0) * runs
+                    vol = _TYPE_VOLUME_CACHE.get(m["type_id"], 1.0)
+                    haul_m3 += qty * vol
+
+        queue_count = len(queue_items)
+        result = {
+            "running_jobs":   running_jobs,
+            "max_jobs":       max_jobs,
+            "queue_count":    queue_count,
+            "needs_shopping": queue_count,
+            "total_cost_isk": round(total_cost_isk, 2),
+            "haul_m3":        round(haul_m3, 1),
+        }
+        _QUEUE_SUMMARY_CACHE    = result
+        _QUEUE_SUMMARY_CACHE_TS = time.time()
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
 
 
 # ── Character Market Orders ────────────────────────────────────────────────────
@@ -2402,6 +3165,24 @@ def api_orders():
 
         sell.sort(key=lambda x: x["price"] * x["volume_remain"], reverse=True)
         buy.sort(key=lambda x: x["escrow"], reverse=True)
+
+        # ── Enrich sell orders with market position from Jita cache ────────────
+        # market_position = number of cheaper sell orders for the same item
+        # (0 means the player is #1 in the order book)
+        try:
+            import sqlite3 as _sq
+            db_path = os.path.join(_HERE, "market_cache.db")
+            if os.path.exists(db_path):
+                conn = _sq.connect(db_path)
+                for o in sell:
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0 AND price < ?",
+                        (o["type_id"], o["price"]),
+                    ).fetchone()
+                    o["market_position"] = int(row[0]) if row else None
+                conn.close()
+        except Exception as _e:
+            print(f"  [orders] market_position lookup failed: {_e}")
 
         # ── Diff sell orders against stored snapshot ───────────────────────────
         # Only track sell orders — buy orders don't generate revenue events.

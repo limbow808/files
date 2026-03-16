@@ -7,6 +7,7 @@ import EsiBlueprintPanel from '../components/EsiBlueprintPanel';
 import CalcDetailPanel from '../components/CalcDetailPanel';
 import ShoppingList from '../components/ShoppingList';
 import EveText from '../components/EveText';
+import Loader from '../components/shared/Loader';
 import { API } from '../App';
 
 const BP_FILTERS   = ['Personal', 'Corporate', 'Not Owned', 'BPOs', 'BPCs'];
@@ -425,8 +426,8 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                 </div>
               </div>
             ) : (
-              <div>
-                <EveText text="LOADING…" scramble={true} wave={true} speed={35} steps={10} />
+              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8 }}>
+                <Loader size="md" label="LOADING" />
               </div>
             )}
           </div>

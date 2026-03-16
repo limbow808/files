@@ -4,6 +4,7 @@ import OverviewPage from './pages/OverviewPage';
 import CalculatorPage from './pages/CalculatorPage';
 import CharactersPage from './pages/CharactersPage';
 import BpFinderPage from './pages/BpFinderPage';
+import CraftLogPage from './pages/CraftLogPage';
 import BootScreen from './components/BootScreen';
 import { useApi } from './hooks/useApi';
 
@@ -84,6 +85,9 @@ export default function App() {
           </div>
           <div style={{ display: activeTab === 'BP FINDER' ? 'contents' : 'none' }}>
             <BpFinderPage refreshKey={refreshKey} />
+          </div>
+          <div style={{ display: activeTab === 'CRAFT LOG' ? 'contents' : 'none' }}>
+            <CraftLogPage />
           </div>
         </div>
       </div>

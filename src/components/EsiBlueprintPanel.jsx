@@ -34,12 +34,20 @@ export default function EsiBlueprintPanel() {
       ) : (
         <div className="esi-bp-list">
           {bps.map((bp, i) => (
-            <div key={i} className="esi-bp-card">
-              <div className="esi-bp-name">{bp.name}</div>
-              <div className="esi-bp-meta">
-                <span className={`esi-bp-type-${bp.bp_type.toLowerCase()}`}>{bp.bp_type}</span>
-                {' · '}ME {bp.me_level}{' · '}TE {bp.te_level}
-                {bp.runs !== -1 && <span style={{ color: 'var(--dim)' }}> · {bp.runs} runs</span>}
+            <div key={i} className="esi-bp-card" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <img
+                src={`https://images.evetech.net/types/${bp.type_id}/icon?size=32`}
+                alt=""
+                style={{ width: 24, height: 24, flexShrink: 0, opacity: 0.85 }}
+                onError={e => { e.target.style.display = 'none'; }}
+              />
+              <div style={{ minWidth: 0 }}>
+                <div className="esi-bp-name">{bp.name}</div>
+                <div className="esi-bp-meta">
+                  <span className={`esi-bp-type-${bp.bp_type.toLowerCase()}`}>{bp.bp_type}</span>
+                  {' · '}ME {bp.me_level}{' · '}TE {bp.te_level}
+                  {bp.runs !== -1 && <span style={{ color: 'var(--dim)' }}> · {bp.runs} runs</span>}
+                </div>
               </div>
             </div>
           ))}

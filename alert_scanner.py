@@ -28,7 +28,6 @@ Configuration (edit the CONFIG dict below):
 import time
 import threading
 import requests
-import statistics
 import os
 
 # ─── Configuration ────────────────────────────────────────────────────────────
@@ -51,24 +50,27 @@ CONFIG = {
     "TELEGRAM_TOKEN":          os.environ.get("TELEGRAM_TOKEN", ""),
     "TELEGRAM_CHAT_ID":        os.environ.get("TELEGRAM_CHAT_ID", ""),
 
-    # ROI alert: flag any blueprint where ROI >= this % (e.g. 50 = 50%)
-    "ROI_THRESHOLD":           50.0,
+    # Minimum manufacturing ROI % for a blueprint to be worth alerting on
+    "ROI_THRESHOLD":           10.0,
 
-    # Contract alert: flag a contract if its price <= this fraction of median (0.50 = 50% off)
-    "CHEAP_THRESHOLD":         0.50,
+    # Max runs to break even on the contract purchase price (ceil(price/profit_per_run))
+    # e.g. 50 = you recover the BP cost within 50 manufacturing runs
+    "BREAKEVEN_MAX_RUNS":      1000,
 
-    # How many hours before the same alert fires again (avoids spam)
+    # How many hours before the same contract fires again (avoids spam)
     "ALERT_COOLDOWN_HOURS":    6,
 
-    # Minimum net ISK profit for ROI alerts to fire
-    "MIN_NET_PROFIT":          5_000_000,   # 5M ISK
+    # Minimum net ISK profit per run (filters junk items)
+    "MIN_NET_PROFIT":          1_000_000,   # 1M ISK
 
-    # Scan intervals (seconds)
-    "ROI_SCAN_INTERVAL":       1800,   # 30 minutes
-    "CONTRACT_SCAN_INTERVAL":  3600,   # 1 hour
+    # Scan interval (seconds)
+    "CONTRACT_SCAN_INTERVAL":  900,    # 15 minutes — fast enough to snipe new listings
+
+    # How often to check industry job timers (seconds)
+    "JOB_SCAN_INTERVAL":       60,     # 1 minute
 
     # Max ESI contract pages to scan (each page = 1000 contracts)
-    "MAX_PAGES":               10,
+    "MAX_PAGES":               20,
 
     # ESI region to scan contracts in (10000002 = The Forge / Jita)
     "REGION_ID":               10000002,
@@ -79,16 +81,19 @@ CONFIG = {
 _alerted: dict[str, float] = {}
 _alerted_lock = threading.Lock()
 
+# Job notification state — persists for the process lifetime (job_ids are unique)
+_warned_5min: set = set()    # job_ids that received the 5-min warning
+_warned_done: set = set()    # job_ids that received the completion notice
+
 # Public status for the /api/alerts/status endpoint
 status = {
-    "running":            False,
-    "last_roi_scan":      None,   # ISO timestamp string
-    "last_contract_scan": None,
-    "last_alert_sent":    None,
-    "alerts_sent":        0,
-    "roi_deals_found":    0,
+    "running":              False,
+    "last_contract_scan":   None,   # ISO timestamp string
+    "last_job_scan":        None,
+    "last_alert_sent":      None,
+    "alerts_sent":          0,
     "contract_deals_found": 0,
-    "last_error":         None,
+    "last_error":           None,
 }
 
 
@@ -135,78 +140,6 @@ def _fmt_isk(v: float) -> str:
     return f"{v:.0f}"
 
 
-# ─── ROI scan ─────────────────────────────────────────────────────────────────
-
-def _run_roi_scan(calc_cache: dict, calc_cache_ttl: int):
-    """
-    Inspect the live calculator cache for high-ROI blueprints and alert.
-    calc_cache is the server.py _calc_cache dict (passed by reference).
-    """
-    try:
-        # Find the freshest cache entry
-        now = time.time()
-        fresh_entry = None
-        for entry in calc_cache.values():
-            gen = entry.get("generated_at", 0)
-            if (now - gen) < calc_cache_ttl:
-                if fresh_entry is None or gen > fresh_entry.get("generated_at", 0):
-                    fresh_entry = entry
-
-        if not fresh_entry:
-            print("  [alerts/roi] No fresh calc data — skipping scan.")
-            return
-
-        results = fresh_entry.get("results", [])
-        threshold = CONFIG["ROI_THRESHOLD"]
-        min_profit = CONFIG["MIN_NET_PROFIT"]
-
-        deals = [
-            r for r in results
-            if (r.get("roi") or 0) >= threshold
-            and (r.get("net_profit") or 0) >= min_profit
-        ]
-        deals.sort(key=lambda x: x.get("roi", 0), reverse=True)
-
-        status["roi_deals_found"] = len(deals)
-
-        if not deals:
-            print(f"  [alerts/roi] Scan complete. No blueprints above {threshold}% ROI.")
-            return
-
-        print(f"  [alerts/roi] {len(deals)} deal(s) above {threshold}% ROI found.")
-
-        for deal in deals[:10]:   # cap at 10 alerts per scan cycle
-            name    = deal.get("name", "?")
-            roi     = deal.get("roi", 0)
-            profit  = deal.get("net_profit", 0)
-            iph     = deal.get("isk_per_hour")
-            bpid    = deal.get("blueprint_id", "?")
-            alert_key = f"roi|{bpid}"
-
-            if not _should_alert(alert_key):
-                continue
-
-            iph_str = f"\n📈 ISK/hr: <b>{_fmt_isk(iph)} ISK/hr</b>" if iph else ""
-            msg = (
-                f"🟢 <b>High ROI Blueprint Alert</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📦 <b>{name}</b>\n"
-                f"💰 ROI: <b>{roi:.1f}%</b>\n"
-                f"🪙 Net profit/run: <b>{_fmt_isk(profit)} ISK</b>"
-                f"{iph_str}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"⚙️ Blueprint ID: {bpid}"
-            )
-            if _tg_send(msg):
-                status["alerts_sent"] += 1
-                status["last_alert_sent"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                print(f"  [alerts/roi] Alert sent: {name} ({roi:.1f}% ROI)")
-
-    except Exception as e:
-        status["last_error"] = str(e)
-        print(f"  [alerts/roi] Error: {e}")
-
-
 # ─── Contract scan ────────────────────────────────────────────────────────────
 
 def _fetch_contract_page(session, region_id: int, page: int):
@@ -240,14 +173,17 @@ def _fetch_contract_items(session, contract_id: int) -> list:
 
 def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
     """
-    Scan ESI public contracts for unusually cheap BPOs.
-    A BPO is flagged if its contract price is <= CHEAP_THRESHOLD * median_price
-    based on other listings found in the same scan.
+    Scan ESI public contracts for BPOs worth sniping.
+    A BPO is alerted when:
+      - Manufacturing ROI >= ROI_THRESHOLD
+      - net_profit >= MIN_NET_PROFIT per run
+      - breakeven_runs = ceil(price / net_profit) <= BREAKEVEN_MAX_RUNS
     """
+    import math as _math
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # ── Get wanted blueprint IDs from calc cache ──────────────────────────
+        # ── Pull fresh calc data ───────────────────────────────────────────────
         now = time.time()
         fresh_entry = None
         for entry in calc_cache.values():
@@ -260,31 +196,35 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
             print("  [alerts/contract] No fresh calc data — skipping scan.")
             return
 
+        roi_threshold  = CONFIG["ROI_THRESHOLD"]
+        min_profit     = CONFIG["MIN_NET_PROFIT"]
+        breakeven_max  = CONFIG["BREAKEVEN_MAX_RUNS"]
+
         calc_results = fresh_entry.get("results", [])
-        # Only alert on profitable blueprints (ROI > 0)
+        # Only watch BPOs that meet ROI + minimum profit thresholds
         bpid_to_calc = {
             r["blueprint_id"]: r
             for r in calc_results
-            if r.get("blueprint_id") and (r.get("roi") or 0) > 0
+            if r.get("blueprint_id")
+            and (r.get("roi") or 0) >= roi_threshold
+            and (r.get("net_profit") or 0) >= min_profit
         }
         wanted_bp_ids = set(bpid_to_calc.keys())
 
         if not wanted_bp_ids:
-            print("  [alerts/contract] No profitable BP IDs to watch.")
+            print(f"  [alerts/contract] No BPs meet ROI >= {roi_threshold}% threshold — skipping.")
             return
 
         region_id = CONFIG["REGION_ID"]
         max_pages = CONFIG["MAX_PAGES"]
         session   = requests.Session()
 
-        # ── Fetch first page + total pages ────────────────────────────────────
-        print(f"  [alerts/contract] Scanning ESI contracts (region {region_id})…")
+        # ── Fetch contract pages ───────────────────────────────────────────────
+        print(f"  [alerts/contract] Scanning ESI contracts (region {region_id}, up to {max_pages} pages)…")
         first_page, total_pages = _fetch_contract_page(session, region_id, 1)
         total_pages = min(total_pages, max_pages)
 
         all_contracts = [c for c in first_page if c.get("type") == "item_exchange"]
-
-        # Fetch remaining pages concurrently
         if total_pages > 1:
             with ThreadPoolExecutor(max_workers=8) as pool:
                 futures = {pool.submit(_fetch_contract_page, session, region_id, p): p
@@ -295,27 +235,29 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
                         c for c in page_data if c.get("type") == "item_exchange"
                     )
 
-        # Only look at tiny-volume contracts (BPs have volume ~0.01)
+        # Blueprints have tiny volume — skip obviously non-BP contracts
         candidates = [c for c in all_contracts if c.get("volume", 999) <= 1000]
         print(f"  [alerts/contract] {len(candidates)} candidate contracts from {total_pages} pages.")
 
-        # ── Fetch items concurrently ───────────────────────────────────────────
-        matched: list[dict] = []  # {contract, type_id, me, te, is_bpc}
-
+        # ── Match contracts to wanted BPOs ────────────────────────────────────
         def check_contract(contract):
             items = _fetch_contract_items(session, contract["contract_id"])
             for item in items:
                 tid = item.get("type_id")
-                if tid in wanted_bp_ids and item.get("is_included", True):
+                if (
+                    tid in wanted_bp_ids
+                    and item.get("is_included", True)
+                    and not item.get("is_blueprint_copy", False)  # BPOs only
+                ):
                     return {
                         "contract": contract,
                         "type_id":  tid,
                         "me":       item.get("material_efficiency", 0),
                         "te":       item.get("time_efficiency", 0),
-                        "is_bpc":   item.get("is_blueprint_copy", False),
                     }
             return None
 
+        matched: list[dict] = []
         with ThreadPoolExecutor(max_workers=12) as pool:
             futures = [pool.submit(check_contract, c) for c in candidates]
             for fut in as_completed(futures):
@@ -324,67 +266,182 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
                     matched.append(result)
 
         if not matched:
-            print("  [alerts/contract] No matching BPOs found in contracts.")
+            print("  [alerts/contract] No matching BPO contracts found.")
             status["contract_deals_found"] = 0
             return
 
-        # ── Group by blueprint_id to find median price ────────────────────────
-        by_bpid: dict[int, list[float]] = {}
-        for m in matched:
-            bpid  = m["type_id"]
-            price = m["contract"]["price"]
-            if not m["is_bpc"]:   # BPOs only for median calculation
-                by_bpid.setdefault(bpid, []).append(price)
-
-        cheap_threshold = CONFIG["CHEAP_THRESHOLD"]
+        # ── Evaluate each match ───────────────────────────────────────────────
         deals_found = 0
+        for m in matched:
+            contract   = m["contract"]
+            bpid       = m["type_id"]
+            price      = contract.get("price", 0)
+            calc_row   = bpid_to_calc.get(bpid, {})
+            name       = calc_row.get("name", "Unknown")
+            roi        = calc_row.get("roi", 0)
+            net_profit = calc_row.get("net_profit", 0)
+            isk_per_hr = calc_row.get("isk_per_hour", 0)
+            me         = m["me"]
+            te         = m["te"]
 
-        for bpid, prices_list in by_bpid.items():
-            if len(prices_list) < 2:
-                # Only one listing — can't determine "cheap" without a reference
+            if net_profit <= 0:
                 continue
 
-            median_price = statistics.median(prices_list)
-            calc_row     = bpid_to_calc.get(bpid, {})
-            name         = calc_row.get("name", f"Type {bpid}")
+            breakeven_runs = _math.ceil(price / net_profit)
+            if breakeven_runs > breakeven_max:
+                continue  # too many runs to recoup purchase cost
 
-            for price in prices_list:
-                ratio = price / median_price if median_price > 0 else 1.0
-                if ratio > cheap_threshold:
-                    continue  # not cheap enough
+            # Alert key per contract so each listing fires once
+            alert_key = f"bpo|{contract['contract_id']}"
+            if not _should_alert(alert_key):
+                continue
 
-                alert_key = f"contract|{bpid}|{int(price)}"
-                if not _should_alert(alert_key):
-                    continue
-
-                deals_found += 1
-                discount_pct = (1.0 - ratio) * 100
-                roi          = calc_row.get("roi", 0)
-                net_profit   = calc_row.get("net_profit", 0)
-
-                msg = (
-                    f"🔵 <b>Cheap BPO Contract Alert</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📦 <b>{name}</b>\n"
-                    f"💸 Contract price: <b>{_fmt_isk(price)} ISK</b>\n"
-                    f"📊 Median market:  <b>{_fmt_isk(median_price)} ISK</b>\n"
-                    f"🏷️ Discount: <b>{discount_pct:.0f}% off</b>\n"
-                    f"💰 Blueprint ROI: <b>{roi:.1f}%</b>\n"
-                    f"🪙 Mfg profit/run: <b>{_fmt_isk(net_profit)} ISK</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔎 Search Contracts in-game for: <i>{name}</i>"
-                )
-                if _tg_send(msg):
-                    status["alerts_sent"] += 1
-                    status["last_alert_sent"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    print(f"  [alerts/contract] Alert sent: {name} @ {_fmt_isk(price)} ISK ({discount_pct:.0f}% off median)")
+            deals_found += 1
+            iph_line = f"\nISK/hr: {_fmt_isk(isk_per_hr)}" if isk_per_hr else ""
+            msg = (
+                f"<b>BPO CONTRACT: {name}</b>\n"
+                f"Price: {_fmt_isk(price)}  |  ME{me} TE{te}\n"
+                f"ROI: {roi:.1f}%  |  Profit: {_fmt_isk(net_profit)}/run"
+                f"{iph_line}\n"
+                f"Breakeven: {breakeven_runs} runs"
+            )
+            if _tg_send(msg):
+                status["alerts_sent"] += 1
+                status["last_alert_sent"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                print(f"  [alerts/contract] Alert sent: {name} @ {_fmt_isk(price)} — {roi:.1f}% ROI, {breakeven_runs} runs breakeven")
 
         status["contract_deals_found"] = deals_found
-        print(f"  [alerts/contract] Scan complete. {deals_found} deal alert(s) sent.")
+        print(f"  [alerts/contract] Scan complete. {deals_found} new deal alert(s) sent.")
 
     except Exception as e:
         status["last_error"] = str(e)
         print(f"  [alerts/contract] Error: {e}")
+
+
+# ─── Job completion scan ─────────────────────────────────────────────────────
+
+def _run_job_scan():
+    """
+    Poll industry jobs for all characters.
+    Sends Telegram alerts:
+      - ~5 minutes before a job finishes  (end_ts - now <= 300s, status "active")
+      - When a job is complete and ready to deliver  (status "ready")
+    """
+    try:
+        from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor, as_completed as _ac
+        from datetime import datetime, timezone
+        import requests as _req
+
+        char_records = load_characters()
+        auth_headers = get_all_auth_headers()
+        if not auth_headers:
+            return
+
+        ACTIVITY_NAMES = {
+            1: "Manufacturing", 3: "TE Research", 4: "ME Research",
+            5: "Copying", 8: "Invention", 9: "Reactions", 11: "Reaction",
+        }
+
+        def _fetch(cid, headers):
+            char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            jobs = []
+            try:
+                r = _req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/industry/jobs/",
+                    headers=headers, params={"include_completed": False}, timeout=15,
+                )
+                if r.ok:
+                    for j in r.json():
+                        j["_char_name"] = char_name
+                        jobs.append(j)
+            except Exception as e:
+                print(f"  [alerts/jobs] Fetch failed for {char_name}: {e}")
+            return jobs
+
+        all_jobs = []
+        seen_ids: set = set()
+        with ThreadPoolExecutor(max_workers=max(1, len(auth_headers))) as pool:
+            futures = [pool.submit(_fetch, cid, h) for cid, h in auth_headers]
+            for f in _ac(futures):
+                for j in f.result():
+                    jid = j.get("job_id")
+                    if jid and jid not in seen_ids:
+                        seen_ids.add(jid)
+                        all_jobs.append(j)
+
+        if not all_jobs:
+            return
+
+        # Bulk-resolve product names
+        product_ids = list({j.get("product_type_id") for j in all_jobs if j.get("product_type_id")})
+        names: dict = {}
+        if product_ids:
+            try:
+                for i in range(0, len(product_ids), 1000):
+                    nr = _req.post(
+                        "https://esi.evetech.net/latest/universe/names/",
+                        json=product_ids[i:i+1000], timeout=10
+                    )
+                    if nr.ok:
+                        for item in nr.json():
+                            names[item["id"]] = item["name"]
+            except Exception:
+                pass
+
+        now = time.time()
+
+        for j in all_jobs:
+            jid       = j.get("job_id")
+            pid       = j.get("product_type_id")
+            runs      = j.get("runs", 1)
+            jstatus   = j.get("status", "")
+            act       = ACTIVITY_NAMES.get(j.get("activity_id"), "Job")
+            char_name = j.get("_char_name", "?")
+            name      = names.get(pid, f"Type {pid}") if pid else "Unknown"
+
+            # Parse ISO end_date → unix timestamp
+            end_ts = 0
+            end_str = j.get("end_date", "")
+            if end_str:
+                try:
+                    dt = datetime.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                    end_ts = dt.timestamp()
+                except Exception:
+                    pass
+
+            secs_left = end_ts - now
+
+            # ── 5-minute warning ─────────────────────────────────────────────
+            if 0 < secs_left <= 300 and jid not in _warned_5min:
+                _warned_5min.add(jid)
+                mins = max(1, int(secs_left / 60))
+                msg = (
+                    f"\u23f1 <b>{act} finishing soon!</b>\n"
+                    f"{name}  \u00d7{runs}\n"
+                    f"<i>{char_name}</i>  \u2022  ~{mins} min left"
+                )
+                if _tg_send(msg):
+                    status["alerts_sent"] += 1
+                    status["last_alert_sent"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    print(f"  [alerts/jobs] 5-min warning: {name} x{runs} ({char_name})")
+
+            # ── Completion ───────────────────────────────────────────────────
+            if jstatus == "ready" and jid not in _warned_done:
+                _warned_done.add(jid)
+                msg = (
+                    f"\u2705 <b>{act} complete!</b>\n"
+                    f"{name}  \u00d7{runs}\n"
+                    f"<i>{char_name}</i>  \u2022  Ready to deliver"
+                )
+                if _tg_send(msg):
+                    status["alerts_sent"] += 1
+                    status["last_alert_sent"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    print(f"  [alerts/jobs] Completed: {name} x{runs} ({char_name})")
+
+    except Exception as e:
+        status["last_error"] = str(e)
+        print(f"  [alerts/jobs] Error: {e}")
 
 
 # ─── Background loop ──────────────────────────────────────────────────────────
@@ -399,26 +456,15 @@ def start_alert_scanner(calc_cache: dict, calc_cache_ttl: int):
     """
     status["running"] = True
 
-    # Send a startup message so you know it's live
     _tg_send(
-        "🚀 <b>CREST Alert Scanner started</b>\n"
-        f"ROI threshold: {CONFIG['ROI_THRESHOLD']}%  |  "
-        f"Cheap contract: ≤{int(CONFIG['CHEAP_THRESHOLD']*100)}% of median\n"
-        f"ROI scan every {CONFIG['ROI_SCAN_INTERVAL']//60} min  |  "
-        f"Contract scan every {CONFIG['CONTRACT_SCAN_INTERVAL']//60} min"
+        f"<b>BP alert scanner started</b>\n"
+        f"ROI &gt;= {CONFIG['ROI_THRESHOLD']}%  |  "
+        f"Breakeven &lt;= {CONFIG['BREAKEVEN_MAX_RUNS']} runs  |  "
+        f"Scan every {CONFIG['CONTRACT_SCAN_INTERVAL']//60} min"
     )
 
-    def roi_loop():
-        # Stagger: wait 2 min before first run so prewarm calc cache has time to populate
-        time.sleep(120)
-        while True:
-            print("  [alerts/roi] Running ROI scan…")
-            _run_roi_scan(calc_cache, calc_cache_ttl)
-            status["last_roi_scan"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            time.sleep(CONFIG["ROI_SCAN_INTERVAL"])
-
     def contract_loop():
-        # Stagger: wait 3 min before first run
+        # Wait 3 min on first run so the calc cache has time to warm up
         time.sleep(180)
         while True:
             print("  [alerts/contract] Running contract scan…")
@@ -426,8 +472,19 @@ def start_alert_scanner(calc_cache: dict, calc_cache_ttl: int):
             status["last_contract_scan"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             time.sleep(CONFIG["CONTRACT_SCAN_INTERVAL"])
 
-    threading.Thread(target=roi_loop,      daemon=True, name="alert-roi").start()
+    def job_loop():
+        # Short initial delay so ESI tokens are ready
+        time.sleep(30)
+        while True:
+            _run_job_scan()
+            status["last_job_scan"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            time.sleep(CONFIG["JOB_SCAN_INTERVAL"])
+
     threading.Thread(target=contract_loop, daemon=True, name="alert-contract").start()
+    threading.Thread(target=job_loop,     daemon=True, name="alert-jobs").start()
     print("  [alerts] Background alert scanner started.")
     print(f"  [alerts] ROI threshold: {CONFIG['ROI_THRESHOLD']}%  |  "
-          f"Contract cheap threshold: ≤{int(CONFIG['CHEAP_THRESHOLD']*100)}% of median")
+          f"Breakeven max: {CONFIG['BREAKEVEN_MAX_RUNS']} runs  |  "
+          f"Scan every {CONFIG['CONTRACT_SCAN_INTERVAL']//60} min")
+    print(f"  [alerts] Job monitor: 5-min warning + completion notice  |  "
+          f"Polling every {CONFIG['JOB_SCAN_INTERVAL']}s")

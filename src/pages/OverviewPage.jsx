@@ -6,6 +6,7 @@ import ManufacturingJobs from '../components/ManufacturingJobs';
 import OrdersSection from '../components/OrdersSection';
 import TopPerformersPanel from '../components/TopPerformersPanel';
 import EvePanel from '../components/EvePanel';
+import OverviewFooter from '../components/OverviewFooter';
 
 const D = 1; // divider thickness px
 
@@ -62,6 +63,9 @@ export default memo(function OverviewPage({ plexData, walletHistory, plexLoading
           </EvePanel>
         </div>
       </div>
+
+      {/* Footer strip */}
+      <OverviewFooter />
 
     </div>
   );

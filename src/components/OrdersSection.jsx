@@ -22,6 +22,7 @@ function OrderTable({ orders, isBuy, multiChar }) {
           <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>PRICE</th>
           <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>QTY</th>
           <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>TOTAL</th>
+          {!isBuy && <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>POS</th>}
           {isBuy && <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>ESCROW</th>}
         </tr>
       </thead>
@@ -54,6 +55,22 @@ function OrderTable({ orders, isBuy, multiChar }) {
               <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: isBuy ? '#4da6ff' : 'var(--accent)' }}>
                 {fmtISK(total)}
               </td>
+              {!isBuy && (() => {
+                const pos = o.market_position;
+                const color = pos === 0   ? '#4cff91'
+                            : pos === null ? 'var(--dim)'
+                            : pos <= 3    ? '#ffcc00'
+                            : '#ff6644';
+                const label = pos === null ? '—'
+                            : pos === 0   ? '#1'
+                            : `+${pos}`;
+                return (
+                  <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600, color }}
+                    title={pos === 0 ? 'Lowest price — top of book' : pos === null ? 'No market data' : `${pos} cheaper listing${pos === 1 ? '' : 's'} ahead`}>
+                    {label}
+                  </td>
+                );
+              })()}
               {isBuy && (
                 <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>
                   {fmtISK(o.escrow)}

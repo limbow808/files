@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import EveText from './EveText';
+import Loader from './shared/Loader';
 
 /*
  * BootScreen — full-black HUD initialization overlay.
@@ -59,6 +60,13 @@ export default function BootScreen({ onBooted }) {
             />
           </span>
         </button>
+
+        {/* Loader shown while initializing */}
+        {phase > 0 && (
+          <div style={{ marginTop: 32, display: 'flex', justifyContent: 'center' }}>
+            <Loader size="lg" label="INITIALIZING SYSTEMS" />
+          </div>
+        )}
 
         {/* Corner brackets — only visible on hover */}
         <span className="boot-corner boot-corner-tl" />
