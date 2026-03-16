@@ -327,10 +327,6 @@ export default function ManufacturingJobs() {
           />
         )}
       </div>
-
-      {allMfg && !loading && visibleJobs.length > 0 && (
-        <SummaryBar jobs={visibleJobs} />
-      )}
     </div>
   );
 }
