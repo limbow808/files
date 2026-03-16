@@ -34,7 +34,7 @@ function TechBadge({ tech }) {
   );
 }
 
-const COL_W = { rank: 24, name: 0, tech: 28, own: 78, roi: 56, profit: 78, vol: 60, iskhr: 72 };
+const COL_W = { rank: 24, name: 0, roi: 56, profit: 78 };
 
 function HeaderRow() {
   const th = (label, align = 'right', extra = {}) => (
@@ -54,12 +54,8 @@ function HeaderRow() {
     }}>
       <span style={{ width: COL_W.rank, flexShrink: 0 }} />
       <span style={{ flex: 1, minWidth: 0 }}>{th('#  ITEM', 'left')}</span>
-      <span style={{ width: COL_W.tech,   flexShrink: 0, textAlign: 'right' }}>{th('TECH')}</span>
-      <span style={{ width: COL_W.own,    flexShrink: 0, textAlign: 'center' }}>{th('OWNED BY', 'center')}</span>
       <span style={{ width: COL_W.roi,    flexShrink: 0, textAlign: 'right' }}>{th('ROI')}</span>
       <span style={{ width: COL_W.profit, flexShrink: 0, textAlign: 'right' }}>{th('PROFIT/RUN')}</span>
-      <span style={{ width: COL_W.vol,    flexShrink: 0, textAlign: 'right' }}>{th('VOL/DAY')}</span>
-      <span style={{ width: COL_W.iskhr,  flexShrink: 0, textAlign: 'right' }}>{th('ISK/HR')}</span>
     </div>
   );
 }
@@ -84,25 +80,18 @@ function ItemRow({ item, rank }) {
         letterSpacing: 1,
       }}>{rank}</span>
 
-      {/* Name */}
+      {/* Name + ownership badges */}
       <span style={{
         flex: 1, minWidth: 0,
-        fontFamily: 'var(--mono)', fontSize: 11,
-        color: 'var(--text)',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        display: 'flex', alignItems: 'center', gap: 4,
+        overflow: 'hidden',
         paddingRight: 6,
-      }} title={item.name}>{item.name}</span>
-
-      {/* Tech */}
-      <span style={{ width: COL_W.tech, flexShrink: 0, textAlign: 'right' }}>
-        <TechBadge tech={item.tech} />
-      </span>
-
-      {/* Ownership badges */}
-      <span style={{
-        width: COL_W.own, flexShrink: 0,
-        display: 'flex', justifyContent: 'center', gap: 3,
-      }}>
+      }} title={item.name}>
+        <span style={{
+          fontFamily: 'var(--mono)', fontSize: 11,
+          color: 'var(--text)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{item.name}</span>
         {(item.ownership || []).map(o => <OwnBadge key={o} kind={o} />)}
       </span>
 
@@ -117,18 +106,6 @@ function ItemRow({ item, rank }) {
         width: COL_W.profit, flexShrink: 0, textAlign: 'right',
         fontFamily: 'var(--mono)', fontSize: 11, color: profClr,
       }}>{fmtISK(item.net_profit)}</span>
-
-      {/* Volume */}
-      <span style={{
-        width: COL_W.vol, flexShrink: 0, textAlign: 'right',
-        fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text)',
-      }}>{item.avg_daily_volume != null ? `${Math.round(item.avg_daily_volume)}/d` : '—'}</span>
-
-      {/* ISK/hr */}
-      <span style={{
-        width: COL_W.iskhr, flexShrink: 0, textAlign: 'right',
-        fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)',
-      }}>{fmtISK(item.isk_per_hour)}</span>
     </div>
   );
 }
