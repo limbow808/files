@@ -1887,8 +1887,9 @@ def api_bpo_market_scan_stream():
                              "pages_scanned": int, "contracts_checked": int}
         {"type":"error",     "msg": str}
     """
-    region_id = int(request.args.get("region_id", 10000002))
-    max_pages  = min(int(request.args.get("max_pages", 20)), 40)
+    from flask import request as _req
+    region_id = int(_req.args.get("region_id", 10000002))
+    max_pages  = min(int(_req.args.get("max_pages", 20)), 40)
 
     def _sse(data):
         return f"data: {json.dumps(data)}\n\n"
