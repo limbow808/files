@@ -21,7 +21,7 @@ function OrderTable({ orders, isBuy, multiChar }) {
           <th style={{ textAlign: 'left',  padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>ITEM</th>
           <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>PRICE</th>
           <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>QTY</th>
-          <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>TOTAL</th>
+          <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>ISK</th>
           {!isBuy && <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>POS</th>}
           {isBuy && <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400 }}>ESCROW</th>}
         </tr>
@@ -101,22 +101,23 @@ export default function OrdersSection() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
-      {/* Header */}
-      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 14 }}>
-        <div style={{ display: 'flex' }}>
+      {/* Header — 26 px tall */}
+      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 10, height: 26, minHeight: 26, flexShrink: 0, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', height: '100%', flexShrink: 0 }}>
           {['sell', 'buy'].map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={`tab-btn${tab === t ? ' active' : ''}`}
+              style={{ fontSize: 9, letterSpacing: 1, padding: '0 10px', height: '100%', whiteSpace: 'nowrap' }}
             >
-              {t === 'sell' ? `◈ Sell Orders (${sell.length})` : `◈ Buy Orders (${buy.length})`}
+              {t === 'sell' ? `Sell (${sell.length})` : `Buy (${buy.length})`}
             </button>
           ))}
         </div>
-        <div style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
+        <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {tab === 'sell'
-            ? `TOTAL VALUE  ${fmtISK(sellTotal)} ISK`
+            ? `>TOTAL ${fmtISK(sellTotal)} ISK` 
             : `ESCROW  ${fmtISK(buyEscrow)} ISK`}
         </div>
       </div>

@@ -23,7 +23,7 @@ export default memo(function OverviewPage({ plexData, walletHistory, plexLoading
       {/* Body — two columns */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
 
-        {/* Left column — MFG Jobs on top, Orders + Minerals below */}
+        {/* Left column — MFG Jobs on top, TopPerformers below */}
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
           <EvePanel scan={true} corners={false} style={{ flex: 3, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -32,17 +32,17 @@ export default memo(function OverviewPage({ plexData, walletHistory, plexLoading
 
           <div style={{ height: D, flexShrink: 0, background: 'var(--border)' }} />
 
-          {/* Bottom-left — Orders */}
+          {/* Bottom-left — Top Performers */}
           <div style={{ flex: 2, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
             <EvePanel scan={true} corners={false} style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-              <OrdersSection />
+              <TopPerformersPanel refreshKey={refreshKey} />
             </EvePanel>
           </div>
         </div>
 
         <div style={{ width: D, flexShrink: 0, background: 'var(--border)' }} />
 
-        {/* Right column — full height: PLEX on top, TopPerformers fills the rest */}
+        {/* Right column — full height: PLEX on top, Orders fills the rest */}
         <div style={{ width: 340, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <EvePanel scan={true} corners={false} style={{ flexShrink: 0, overflow: 'hidden' }}>
             <PlexSection plexData={plexData} walletHistory={walletHistory} loading={plexLoading} error={plexError} />
@@ -51,7 +51,7 @@ export default memo(function OverviewPage({ plexData, walletHistory, plexLoading
           <div style={{ height: D, flexShrink: 0, background: 'var(--border)' }} />
 
           <EvePanel scan={true} corners={false} style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <TopPerformersPanel refreshKey={refreshKey} />
+            <OrdersSection />
           </EvePanel>
         </div>
       </div>
