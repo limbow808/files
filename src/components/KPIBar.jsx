@@ -2,9 +2,13 @@ import { useApi } from '../hooks/useApi';
 import { fmtISK } from '../utils/fmt';
 
 export default function KPIBar({ plexData, walletHistory }) {
-  const { data: jobsData } = useApi('/api/industry/jobs');
+  const { data: jobsData }      = useApi('/api/industry/jobs');
+  const { data: sellHistData }  = useApi('/api/sell_history');
+  const { data: fillRateData }  = useApi('/api/sell_history/fill_rate');
+  const { data: inventoryData } = useApi('/api/unrealized_value');
+  const { data: bpUtilData }    = useApi('/api/bp_utilization');
 
-  const jobs = jobsData?.jobs || [];
+  const jobs    = jobsData?.jobs || [];
   const mfgJobs = jobs.filter(j => j.activity === 'Manufacturing' || j.activity === 'Reaction');
 
   // ISK / Day
@@ -22,22 +26,27 @@ export default function KPIBar({ plexData, walletHistory }) {
   const walletChange = dayAgoEntry ? currentBal - dayAgoEntry.balance : null;
 
   // Jobs stats
-  const _now         = Math.floor(Date.now() / 1000);
-  const activeJobs   = jobs.filter(j => (j.end_ts - _now) > 0).length;
-  const revenue      = mfgJobs.reduce((s, j) => s + (j.sell_total ?? 0), 0);
-  const profitSum    = mfgJobs.every(j => j.profit != null)
+  const profitSum  = mfgJobs.every(j => j.profit != null)
     ? mfgJobs.reduce((s, j) => s + (j.profit ?? 0), 0) : null;
-  const withMargin   = mfgJobs.filter(j => j.margin_pct != null);
-  const avgMargin    = withMargin.length
+  const withMargin = mfgJobs.filter(j => j.margin_pct != null);
+  const avgMargin  = withMargin.length
     ? withMargin.reduce((s, j) => s + j.margin_pct, 0) / withMargin.length : null;
 
+  // Sell history metrics
+  const avgSellDays = sellHistData?.overall?.avg_days_to_sell ?? null;
+  const fillRate    = fillRateData?.rate_pct ?? null;
+  const inventory   = inventoryData?.total_isk ?? null;
+  const bpUtil      = bpUtilData?.rate_pct ?? null;
+
   const stats = [
-    { label: 'ISK / DAY',      value: fmtISK(iskPerDay),                                      color: 'var(--text)' },
-    { label: 'WALLET Δ 24H',   value: walletChange != null ? fmtISK(walletChange) : '—',      color: walletChange > 0 ? '#4cff91' : walletChange < 0 ? '#ff3b3b' : 'var(--text)' },
-    { label: 'EST. PROFIT',    value: profitSum != null ? fmtISK(profitSum) : '—',             color: profitSum > 0 ? '#4cff91' : profitSum < 0 ? '#ff3b3b' : 'var(--text)' },
-    { label: 'EST. REVENUE',   value: revenue > 0 ? fmtISK(revenue) : '—',                    color: 'var(--accent)' },
-    { label: 'AVG MARGIN',     value: avgMargin != null ? `${avgMargin.toFixed(1)}%` : '—',    color: avgMargin > 0 ? '#4cff91' : avgMargin < 0 ? '#ff3b3b' : 'var(--text)' },
-    { label: 'ACTIVE JOBS',    value: `${activeJobs}`,                                         color: 'var(--text)' },
+    { label: 'ISK / DAY',    value: fmtISK(iskPerDay),                                      color: 'var(--text)' },
+    { label: 'WALLET Δ 24H', value: walletChange != null ? fmtISK(walletChange) : '—',      color: walletChange > 0 ? '#4cff91' : walletChange < 0 ? '#ff3b3b' : 'var(--text)' },
+    { label: 'EST. PROFIT',  value: profitSum != null ? fmtISK(profitSum) : '—',             color: profitSum > 0 ? '#4cff91' : profitSum < 0 ? '#ff3b3b' : 'var(--text)' },
+    { label: 'AVG MARGIN',   value: avgMargin != null ? `${avgMargin.toFixed(1)}%` : '—',    color: avgMargin > 0 ? '#4cff91' : avgMargin < 0 ? '#ff3b3b' : 'var(--text)' },
+    { label: 'AVG SELL',     value: avgSellDays != null ? `${avgSellDays.toFixed(1)}d` : '—', color: avgSellDays != null && avgSellDays <= 3 ? '#4cff91' : avgSellDays != null && avgSellDays >= 14 ? '#ff6644' : 'var(--text)' },
+    { label: 'FILL RATE',    value: fillRate != null ? `${fillRate.toFixed(1)}%` : '—',      color: fillRate != null && fillRate >= 80 ? '#4cff91' : fillRate != null && fillRate < 50 ? '#ff6644' : 'var(--text)' },
+    { label: 'INVENTORY',    value: inventory != null ? fmtISK(inventory) : '—',             color: 'var(--accent)' },
+    { label: 'BP UTIL',      value: bpUtil != null ? `${bpUtil.toFixed(0)}%` : '—',          color: bpUtil != null && bpUtil >= 70 ? '#4cff91' : bpUtil != null && bpUtil < 30 ? '#ff6644' : 'var(--text)' },
   ];
 
   return (
@@ -51,12 +60,12 @@ export default function KPIBar({ plexData, walletHistory }) {
         <div key={s.label} style={{
           flex: 1,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          padding: '0 8px',
+          padding: '0 4px',
           borderRight: i < stats.length - 1 ? '1px solid var(--border)' : 'none',
           height: '100%',
         }}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: s.color, letterSpacing: 0.5, lineHeight: 1 }}>{s.value}</span>
-          <span style={{ fontSize: 8, color: 'var(--dim)', letterSpacing: 1.5, marginTop: 3, lineHeight: 1 }}>{s.label}</span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: s.color, letterSpacing: 0.5, lineHeight: 1 }}>{s.value}</span>
+          <span style={{ fontSize: 7.5, color: 'var(--dim)', letterSpacing: 1.2, marginTop: 3, lineHeight: 1 }}>{s.label}</span>
         </div>
       ))}
     </div>

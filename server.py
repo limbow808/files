@@ -727,6 +727,18 @@ def api_calculator():
             result["isk_per_hour"] = (profit / duration_h) if duration_h > 0 else None
             result["isk_per_m3"]   = (profit / result["volume"]) if result.get("volume", 0) > 0 else 0
 
+            # Break-even sell price: minimum price per unit at which net profit = 0
+            # Formula: P * output_qty * (1 − fee_rate) = material_cost + job_cost
+            #          fee_rate = (sales_tax + broker_fee) / gross_revenue
+            _gross = result.get("gross_revenue", 0)
+            _fees  = result.get("sales_tax", 0) + result.get("broker_fee", 0)
+            _oqty  = result.get("output_qty", 1) or 1
+            _costs = result.get("material_cost", 0) + result.get("job_cost", 0)
+            _fee_frac = (_fees / _gross) if _gross > 0 else 0
+            result["break_even_price"] = round(
+                _costs / (_oqty * (1.0 - _fee_frac)), 2
+            ) if _fee_frac < 1.0 else None
+
             # Annotate which facility/system was used
             result["resolved_sci"]      = sci
             result["facility_label"]    = facility_cfg["label"]
@@ -1996,17 +2008,22 @@ def api_bpo_market_scan_stream():
                     except Exception:
                         return page, []
 
+                # Collect all pages first, then yield — yielding inside
+                # a ThreadPoolExecutor context breaks Flask SSE streaming.
+                page_results = []
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     futures = {pool.submit(fetch_page, p): p
                                for p in range(2, total_pages + 1)}
                     for fut in as_completed(futures):
-                        pg, page_data = fut.result()
-                        all_contracts.extend(
-                            c for c in page_data if c.get("type") == "item_exchange"
-                        )
-                        yield _sse({"type": "contracts", "page": pg,
-                                    "total_pages": total_pages,
-                                    "contracts": len(all_contracts)})
+                        page_results.append(fut.result())
+
+                for pg, page_data in page_results:
+                    all_contracts.extend(
+                        c for c in page_data if c.get("type") == "item_exchange"
+                    )
+                    yield _sse({"type": "contracts", "page": pg,
+                                "total_pages": total_pages,
+                                "contracts": len(all_contracts)})
 
             contracts_checked = len(all_contracts)
             bp_candidates = [c for c in all_contracts if c.get("volume", 999) <= 1000]
@@ -2045,17 +2062,23 @@ def api_bpo_market_scan_stream():
             done_count  = 0
             REPORT_EVERY = max(1, len(bp_candidates) // 40)  # ~40 progress ticks
 
+            # Collect all futures first, then yield — yielding inside
+            # a ThreadPoolExecutor context breaks Flask SSE streaming.
+            scan_futures = []
             with ThreadPoolExecutor(max_workers=12) as pool:
-                futures_list = [pool.submit(fetch_items, c) for c in bp_candidates]
-                for fut in as_completed(futures_list):
-                    done_count += 1
-                    match = fut.result()
-                    if match:
-                        raw_results.append(match)
-                    if done_count % REPORT_EVERY == 0 or done_count == len(bp_candidates):
-                        yield _sse({"type": "scanning", "done": done_count,
-                                    "total": len(bp_candidates),
-                                    "matched": len(raw_results)})
+                scan_futures = list(as_completed(
+                    [pool.submit(fetch_items, c) for c in bp_candidates]
+                ))
+
+            for fut in scan_futures:
+                done_count += 1
+                match = fut.result()
+                if match:
+                    raw_results.append(match)
+                if done_count % REPORT_EVERY == 0 or done_count == len(bp_candidates):
+                    yield _sse({"type": "scanning", "done": done_count,
+                                "total": len(bp_candidates),
+                                "matched": len(raw_results)})
 
             # ── 5. Build result rows (same logic as blocking endpoint) ────
             results = []
@@ -2433,6 +2456,7 @@ def api_assets():
                         headers=headers, params={"page": page}, timeout=15
                     )
                     if not resp.ok:
+                        print(f"  [assets] ESI {resp.status_code} for {char_name} page {page}: {resp.text[:200]}")
                         break
                     page_items = resp.json()
                     if not page_items:
@@ -3188,20 +3212,27 @@ def api_orders():
         sell.sort(key=lambda x: x["price"] * x["volume_remain"], reverse=True)
         buy.sort(key=lambda x: x["escrow"], reverse=True)
 
-        # ── Enrich sell orders with market position from Jita cache ────────────
-        # market_position = number of cheaper sell orders for the same item
-        # (0 means the player is #1 in the order book)
+        # ── Enrich sell orders with market position + competitor count ─────────
+        # market_position   = cheaper sell orders ahead (0 = best price)
+        # competitor_count  = ALL sell listings for the type (supply depth)
         try:
             import sqlite3 as _sq
             db_path = os.path.join(_HERE, "market_cache.db")
             if os.path.exists(db_path):
                 conn = _sq.connect(db_path)
                 for o in sell:
-                    row = conn.execute(
+                    tid   = o["type_id"]
+                    price = o["price"]
+                    cheaper_row = conn.execute(
                         "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0 AND price < ?",
-                        (o["type_id"], o["price"]),
+                        (tid, price),
                     ).fetchone()
-                    o["market_position"] = int(row[0]) if row else None
+                    total_row = conn.execute(
+                        "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0",
+                        (tid,),
+                    ).fetchone()
+                    o["market_position"]  = int(cheaper_row[0]) if cheaper_row else None
+                    o["competitor_count"] = int(total_row[0])   if total_row   else 0
                 conn.close()
         except Exception as _e:
             print(f"  [orders] market_position lookup failed: {_e}")
@@ -3750,6 +3781,154 @@ def api_sell_history():
         return jsonify(stats)
     except Exception as e:
         return jsonify({"error": str(e), "overall": {}, "by_item": {}}), 200
+
+
+@app.route("/api/sell_history/fill_rate", methods=["GET"])
+def api_sell_history_fill_rate():
+    """
+    Return 7-day sell-order fill rate.
+    Response: { fulfilled_7d, live_7d, total_7d, rate_pct }
+    """
+    try:
+        from database import get_fill_rate_7d
+        return jsonify(get_fill_rate_7d())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
+
+
+@app.route("/api/unrealized_value", methods=["GET"])
+def api_unrealized_value():
+    """
+    Return the total ISK value of all character assets at current Jita sell prices.
+    Auto-fetches assets from ESI if the cache is cold.
+    Response: { total_isk, item_count, items: [{type_id, name, qty, sell_price, total_isk}] }
+    """
+    global _ASSETS_CACHE, _ASSETS_CACHE_TS
+    try:
+        # Auto-populate asset cache if cold or stale
+        if not _ASSETS_CACHE or (time.time() - _ASSETS_CACHE_TS) >= _ASSETS_TTL:
+            from characters import get_all_auth_headers, load_characters as _lc_uv
+            from concurrent.futures import ThreadPoolExecutor as _TPE_uv, as_completed as _ac_uv
+            from collections import defaultdict as _dd_uv
+            _char_records_uv = _lc_uv()
+            _auth_headers_uv = get_all_auth_headers()
+
+            def _fetch_uv(cid, hdrs):
+                _cname = _char_records_uv.get(cid, {}).get("character_name", f"Char {cid}")
+                _items, _page = [], 1
+                while True:
+                    try:
+                        _r = requests.get(
+                            f"https://esi.evetech.net/latest/characters/{cid}/assets/",
+                            headers=hdrs, params={"page": _page}, timeout=15,
+                        )
+                        if not _r.ok:
+                            print(f"  [assets] ESI {_r.status_code} for {_cname} page {_page}: {_r.text[:200]}")
+                            break
+                        _pg = _r.json()
+                        if not _pg:
+                            break
+                        _items.extend(_pg)
+                        if len(_pg) < 1000:
+                            break
+                        _page += 1
+                    except Exception as _e:
+                        print(f"  [assets] fetch failed for {_cname}: {_e}")
+                        break
+                return _items
+
+            _inv = _dd_uv(int)
+            if _auth_headers_uv:
+                with _TPE_uv(max_workers=max(1, len(_auth_headers_uv))) as _pool:
+                    for _f in _ac_uv([_pool.submit(_fetch_uv, c, h) for c, h in _auth_headers_uv]):
+                        for _it in _f.result():
+                            _inv[_it["type_id"]] += _it["quantity"]
+
+            _ASSETS_CACHE = {"assets": dict(_inv), "names": {}, "cached_at": int(time.time())}
+            _ASSETS_CACHE_TS = time.time()
+
+        from pricer import get_prices_bulk
+
+        assets = _ASSETS_CACHE.get("assets", {})   # { int_type_id: qty }
+        names  = _ASSETS_CACHE.get("names", {})    # { str_type_id: name }
+
+        type_ids = [tid for tid, qty in assets.items() if qty > 0]
+        prices   = get_prices_bulk(type_ids)
+
+        total_isk = 0.0
+        items     = []
+        for tid, qty in assets.items():
+            if qty <= 0:
+                continue
+            p    = prices.get(tid, {})
+            sell = p.get("sell") or 0
+            if sell <= 0:
+                continue
+            val = sell * qty
+            total_isk += val
+            items.append({
+                "type_id":    tid,
+                "name":       names.get(str(tid), f"Type {tid}"),
+                "qty":        qty,
+                "sell_price": sell,
+                "total_isk":  round(val, 0),
+            })
+
+        items.sort(key=lambda x: x["total_isk"], reverse=True)
+        return jsonify({
+            "total_isk":  round(total_isk, 0),
+            "item_count": len(items),
+            "items":      items[:50],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
+
+
+@app.route("/api/bp_utilization", methods=["GET"])
+def api_bp_utilization():
+    """
+    Return blueprint utilization rate: how many owned BPs generated at least one
+    manufacturing job in the last 30 days.
+    Response: { owned, active_30d, rate_pct }
+    """
+    try:
+        import sqlite3 as _sq
+        from database import get_craft_log
+
+        # Total owned blueprints — ESI cache if warm, otherwise static corp BPO list
+        owned_bp_ids = {bp["type_id"] for bp in _ESI_BP_CACHE.get("blueprints", [])}
+        if not owned_bp_ids:
+            owned_bp_ids = set(CORP_BPO_TYPE_IDS)
+        owned_count = len(owned_bp_ids)
+
+        if owned_count == 0:
+            return jsonify({"owned": 0, "active_30d": 0, "rate_pct": None})
+
+        # Active product type_ids from craft_log in last 30 days
+        log_rows     = get_craft_log(days=30)
+        active_pids  = {r["product_type_id"] for r in log_rows if r.get("product_type_id")}
+
+        # Map product_type_id → blueprint_id via crest.db
+        active_count = 0
+        if active_pids:
+            conn = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+            ph   = ",".join("?" * len(active_pids))
+            rows = conn.execute(
+                f"SELECT blueprint_id FROM blueprints WHERE output_id IN ({ph})",
+                list(active_pids),
+            ).fetchall()
+            conn.close()
+            active_bp_ids = {r[0] for r in rows}
+            active_count  = len(active_bp_ids & owned_bp_ids)
+
+        rate_pct = round(active_count / owned_count * 100, 1) if owned_count > 0 else None
+        return jsonify({
+            "owned":      owned_count,
+            "active_30d": active_count,
+            "rate_pct":   rate_pct,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
 
 
 @app.route("/api/alerts/status", methods=["GET"])

@@ -5,7 +5,7 @@ import CharTag from './CharTag';
 import { charColor } from '../utils/charColors';
 import { LoadingState } from './ui';
 
-function OrderTable({ orders, isBuy, multiChar }) {
+function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
   if (!orders.length) {
     return (
       <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 1, textAlign: 'center' }}>
@@ -32,6 +32,8 @@ function OrderTable({ orders, isBuy, multiChar }) {
           const total   = o.price * o.volume_remain;
           const fillColor = filled >= 75 ? '#00cc66' : filled >= 25 ? 'var(--text)' : 'var(--dim)';
           const cColor  = o.character_id ? charColor(o.character_id) : 'var(--dim)';
+          const hist    = !isBuy && sellHistByTypeId ? sellHistByTypeId[o.type_id] : null;
+          const avgDays = hist?.avg_days_to_sell ?? null;
           return (
             <tr key={o.order_id} className="eve-row-reveal" style={{ borderBottom: '1px solid #0d0d0d', animationDelay: `${idx * 25}ms` }}>
               <td style={{ padding: '5px 8px', textAlign: 'left' }}>
@@ -39,6 +41,22 @@ function OrderTable({ orders, isBuy, multiChar }) {
                 <div style={{ height: 2, background: '#111', marginTop: 2, width: 60 }}>
                   <div style={{ height: '100%', width: `${filled}%`, background: isBuy ? '#4da6ff' : 'var(--accent)' }} />
                 </div>
+                {!isBuy && (
+                  <div style={{ display: 'flex', gap: 6, marginTop: 3, alignItems: 'center' }}>
+                    {avgDays != null && (
+                      <span style={{ fontSize: 9, color: avgDays <= 3 ? '#4cff91' : avgDays >= 14 ? '#ff6644' : 'var(--dim)', letterSpacing: 0.5 }}
+                        title={`Avg sell time: ${avgDays.toFixed(1)} days`}>
+                        {avgDays.toFixed(1)}d
+                      </span>
+                    )}
+                    {o.competitor_count > 0 && (
+                      <span style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 0.5 }}
+                        title={`${o.competitor_count} total sell listings in Jita`}>
+                        {o.competitor_count} listed
+                      </span>
+                    )}
+                  </div>
+                )}
                 {multiChar && o.character_name && (
                   <div style={{ marginTop: 3 }}>
                     <CharTag name={o.character_name} color={cColor} />
@@ -86,10 +104,17 @@ function OrderTable({ orders, isBuy, multiChar }) {
 
 export default function OrdersSection() {
   const { data, loading, error } = useApi('/api/orders');
+  const { data: sellHistData }   = useApi('/api/sell_history');
   const [tab, setTab] = useState('sell');
 
   const sell = data?.sell || [];
   const buy  = data?.buy  || [];
+
+  // Build type_id → sell-history lookup for row annotations
+  const sellHistByTypeId = {};
+  for (const stat of Object.values(sellHistData?.by_item || {})) {
+    if (stat.type_id != null) sellHistByTypeId[stat.type_id] = stat;
+  }
 
   // Detect multi-character
   const allOrders = [...sell, ...buy];
@@ -132,7 +157,12 @@ export default function OrdersSection() {
         {loading && !data ? (
           <LoadingState label="FETCHING ORDERS" sub="ESI · MARKET" />
         ) : (
-          <OrderTable orders={tab === 'sell' ? sell : buy} isBuy={tab === 'buy'} multiChar={multiChar} />
+          <OrderTable
+            orders={tab === 'sell' ? sell : buy}
+            isBuy={tab === 'buy'}
+            multiChar={multiChar}
+            sellHistByTypeId={sellHistByTypeId}
+          />
         )}
       </div>
     </div>

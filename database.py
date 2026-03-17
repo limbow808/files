@@ -272,6 +272,53 @@ def get_avg_days_to_sell_by_type() -> Dict[int, float]:
     return {r["type_id"]: r["avg_days"] for r in cur.fetchall() if r["avg_days"] is not None}
 
 
+def get_fill_rate_7d() -> Dict[str, Any]:
+    """
+    Return 7-day sell-order fill rate.
+
+    Counts orders whose ESI 'issued' date falls in the past 7 days and that
+    are already fulfilled (in sell_order_history), vs. orders placed in the
+    same window that are still live (in open_orders via first_seen_ts).
+
+    Returns:
+        {
+            "fulfilled_7d": int,   – orders completed in the window
+            "live_7d":      int,   – orders still open from the window
+            "total_7d":     int,   – fulfilled_7d + live_7d
+            "rate_pct":     float  – percentage filled, or null if no data
+        }
+    """
+    init_db()
+    conn = _get_conn()
+    cur  = conn.cursor()
+
+    cutoff_ts  = int(time.time()) - 7 * 86400
+    cutoff_iso = datetime.fromtimestamp(cutoff_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Orders issued in last 7 days that have since been fulfilled
+    cur.execute(
+        "SELECT COUNT(*) AS n FROM sell_order_history WHERE issued >= ?",
+        (cutoff_iso,),
+    )
+    fulfilled_7d = cur.fetchone()["n"] or 0
+
+    # Orders first seen in last 7 days that are still live
+    cur.execute(
+        "SELECT COUNT(*) AS n FROM open_orders WHERE first_seen_ts >= ?",
+        (cutoff_ts,),
+    )
+    live_7d = cur.fetchone()["n"] or 0
+
+    total = fulfilled_7d + live_7d
+    rate_pct = round(fulfilled_7d / total * 100, 1) if total > 0 else None
+    return {
+        "fulfilled_7d": fulfilled_7d,
+        "live_7d":      live_7d,
+        "total_7d":     total,
+        "rate_pct":     rate_pct,
+    }
+
+
 def _ensure_wallet_table(conn) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS wallet_snapshots (
