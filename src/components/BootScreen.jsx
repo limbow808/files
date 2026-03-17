@@ -30,9 +30,24 @@ export default function BootScreen({ onBooted }) {
       try {
         const res = await fetch('/api/ping', { signal: AbortSignal.timeout(1500) });
         if (res.ok) {
-          pollingRef.current = false;
-          // Brief pause so the scramble is visible, then reveal
-          setTimeout(() => onBooted(), 400);
+          // Flask is alive — now wait for the prewarm cache to be ready
+          setStatus('> WARMING UP');
+          const pollReady = async () => {
+            if (!pollingRef.current) return;
+            try {
+              const rr = await fetch('/api/ready', { signal: AbortSignal.timeout(2000) });
+              if (rr.ok) {
+                const rd = await rr.json();
+                if (rd.ready) {
+                  pollingRef.current = false;
+                  setTimeout(() => onBooted(), 400);
+                  return;
+                }
+              }
+            } catch (_) {}
+            setTimeout(pollReady, 1500);
+          };
+          setTimeout(pollReady, 600);
           return;
         }
       } catch (_) {}

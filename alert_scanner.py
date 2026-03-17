@@ -226,7 +226,7 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
 
         all_contracts = [c for c in first_page if c.get("type") == "item_exchange"]
         if total_pages > 1:
-            with ThreadPoolExecutor(max_workers=8) as pool:
+            with ThreadPoolExecutor(max_workers=4) as pool:
                 futures = {pool.submit(_fetch_contract_page, session, region_id, p): p
                            for p in range(2, total_pages + 1)}
                 for fut in as_completed(futures):
@@ -258,7 +258,7 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
             return None
 
         matched: list[dict] = []
-        with ThreadPoolExecutor(max_workers=12) as pool:
+        with ThreadPoolExecutor(max_workers=6) as pool:
             futures = [pool.submit(check_contract, c) for c in candidates]
             for fut in as_completed(futures):
                 result = fut.result()
@@ -446,13 +446,15 @@ def _run_job_scan():
 
 # ─── Background loop ──────────────────────────────────────────────────────────
 
-def start_alert_scanner(calc_cache: dict, calc_cache_ttl: int):
+def start_alert_scanner(calc_cache: dict, calc_cache_ttl: int, warmup_event=None):
     """
     Start the background alert scanner threads.
     Call this once from server.py __main__ after the other threads are started.
 
     calc_cache     — pass server.py's _calc_cache dict directly (shared reference)
     calc_cache_ttl — pass server.py's CALC_CACHE_TTL constant
+    warmup_event   — optional threading.Event; contract scan waits on it before
+                     firing its first scan (avoids CPU burst while server is booting)
     """
     status["running"] = True
 
@@ -464,8 +466,13 @@ def start_alert_scanner(calc_cache: dict, calc_cache_ttl: int):
     )
 
     def contract_loop():
-        # Wait 3 min on first run so the calc cache has time to warm up
-        time.sleep(180)
+        # Wait until the server prewarm is complete before the first scan.
+        # This prevents a large burst of HTTP threads competing with startup.
+        # Falls back to a 3-min sleep if no event was passed (e.g. direct invocation).
+        if warmup_event is not None:
+            warmup_event.wait(timeout=300)
+        else:
+            time.sleep(180)
         while True:
             print("  [alerts/contract] Running contract scan…")
             _run_contract_scan(calc_cache, calc_cache_ttl)

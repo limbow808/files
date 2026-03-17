@@ -32,8 +32,13 @@ JITA_STATION_ID  = 60003760   # Jita 4-4 Caldari Navy Assembly Plant
 ESI_BASE         = "https://esi.evetech.net/latest"
 
 CACHE_DB         = os.path.join(os.path.dirname(__file__), "market_cache.db")
-CACHE_TTL        = 300        # Refresh market dump every 5 minutes
+CACHE_TTL        = 300        # Refresh market dump every 5 minutes (during normal operation)
+STARTUP_TTL      = 1800       # On the first call after a restart, reuse data up to 30 min old
 HISTORY_TTL      = 21600      # Refresh volume history every 6 hours (was 1 hour — data doesn't change that fast)
+
+# Set to True after the first successful _ensure_orders_fresh() call so subsequent
+# requests use the shorter CACHE_TTL rather than the lenient STARTUP_TTL.
+_startup_done: bool = False
 
 # ─── DB setup ─────────────────────────────────────────────────────────────────
 def _get_conn() -> sqlite3.Connection:
@@ -71,8 +76,8 @@ def _init_db():
 
 
 # ─── Bulk order dump ──────────────────────────────────────────────────────────
-def _orders_are_fresh() -> bool:
-    """Check if our cached order dump is still within TTL."""
+def _orders_are_fresh(ttl: int = CACHE_TTL) -> bool:
+    """Check if our cached order dump is still within `ttl` seconds."""
     conn = _get_conn()
     cur  = conn.cursor()
     cur.execute("SELECT value FROM market_meta WHERE key='orders_fetched_at'")
@@ -80,7 +85,22 @@ def _orders_are_fresh() -> bool:
     conn.close()
     if not row:
         return False
-    return (time.time() - float(row["value"])) < CACHE_TTL
+    return (time.time() - float(row["value"])) < ttl
+
+
+def get_market_age() -> float:
+    """Return seconds since the last market dump was fetched (or float('inf') if never)."""
+    try:
+        conn = _get_conn()
+        cur  = conn.cursor()
+        cur.execute("SELECT value FROM market_meta WHERE key='orders_fetched_at'")
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return float("inf")
+        return time.time() - float(row["value"])
+    except Exception:
+        return float("inf")
 
 
 def _fetch_all_orders():
@@ -145,10 +165,18 @@ def _fetch_all_orders():
 
 
 def _ensure_orders_fresh():
-    """Refresh the order dump if it's stale or missing."""
+    """Refresh the order dump if it's stale or missing.
+
+    Uses STARTUP_TTL (30 min) on the very first call after a server restart so that
+    a short-lived process restart does not immediately hammer ESI again.  After that
+    first call, falls back to CACHE_TTL (5 min) for live-data accuracy.
+    """
+    global _startup_done
     _init_db()
-    if not _orders_are_fresh():
+    ttl = CACHE_TTL if _startup_done else STARTUP_TTL
+    if not _orders_are_fresh(ttl):
         _fetch_all_orders()
+    _startup_done = True
 
 
 # ─── Price lookup ─────────────────────────────────────────────────────────────

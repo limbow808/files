@@ -88,6 +88,15 @@ CALC_CACHE_TTL = 1800  # 30 minutes
 
 # ── Skill name cache (type_id → skill name, loaded once from Fuzzwork CSV) ───
 _skill_id_names: dict[int, str] = {}
+_SKILL_NAMES_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skill_names.json")
+_SKILL_NAMES_MAX_AGE = 7 * 86400  # re-download after 7 days
+
+# ── Warmup state ─────────────────────────────────────────────────────────────
+# _server_ready: True once the prewarm scan+calculator caches are populated.
+# _warmup_done:  Event set at the same moment — used by alert_scanner to delay
+#                its first contract scan until the server is fully warm.
+_server_ready: bool         = False
+_warmup_done: threading.Event = threading.Event()
 
 
 def _calc_cache_key(system: str, facility: str) -> str:
@@ -203,6 +212,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 @app.route("/api/ping", methods=["GET"])
 def ping():
     return jsonify({"ok": True})
+
+
+@app.route("/api/ready", methods=["GET"])
+def api_ready():
+    """Return whether the prewarm scan+calculator caches are populated."""
+    age: float | None = None
+    try:
+        from pricer import get_market_age as _gma
+        raw = _gma()
+        age = round(raw, 1) if raw != float("inf") else None
+    except Exception:
+        pass
+    return jsonify({"ready": _server_ready, "market_age_seconds": age})
 
 
 @app.route("/", methods=["GET"])
@@ -3737,39 +3759,77 @@ def api_alerts_status():
 
 
 if __name__ == "__main__":
-    # Pre-warm the scan cache in the background so the first dashboard load is instant
+    # Pre-warm the scan cache in the background so the first dashboard load is instant.
+    # Two sub-tasks run concurrently so neither blocks the other:
+    #   1. Skill names  — loaded from disk cache (instant) or downloaded once from Fuzzwork
+    #   2. Scan warmup  — hits /api/scan and /api/calculator to populate the in-memory caches
+    # When both finish, _server_ready is set to True and _warmup_done is signalled
+    # so the alert scanner knows it can start its first contract scan.
     def _prewarm():
-        print("  [prewarm] Background scan starting...")
-        try:
-            # Pre-load skill name mapping (25MB bz2 download, only once)
-            global _skill_id_names
-            if not _skill_id_names:
-                try:
-                    import bz2 as _bz2, urllib.request as _ur
-                    _req = _ur.Request(
-                        "https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2",
-                        headers={"User-Agent": "CREST-Server/1.0"}
-                    )
-                    with _ur.urlopen(_req, timeout=30) as _r:
-                        _raw = _bz2.decompress(_r.read())
-                    for _line in _raw.decode("utf-8").splitlines()[1:]:
-                        _parts = _line.split(",")
-                        try:
-                            _skill_id_names[int(_parts[0])] = _parts[2]
-                        except (ValueError, IndexError):
-                            pass
-                    print(f"  [prewarm] Skill names loaded ({len(_skill_id_names)} types)")
-                except Exception as _e:
-                    print(f"  [prewarm] Skill names download failed: {_e}")
-            with app.app_context():
-                client = app.test_client()
-                client.get("/api/scan")
-                client.get("/api/calculator?system=Korsiki&facility=large")
-            print("  [prewarm] Cache ready.")
-        except Exception as e:
-            print(f"  [prewarm] Failed: {e}")
+        global _skill_id_names, _server_ready
 
-    threading.Thread(target=_prewarm, daemon=True).start()
+        # ── Sub-task 1: skill names ───────────────────────────────────────────
+        def _load_skill_names():
+            global _skill_id_names
+            # Try loading from the on-disk cache first (avoid network on every restart)
+            if (os.path.exists(_SKILL_NAMES_PATH) and
+                    time.time() - os.path.getmtime(_SKILL_NAMES_PATH) < _SKILL_NAMES_MAX_AGE):
+                try:
+                    with open(_SKILL_NAMES_PATH, "r", encoding="utf-8") as _f:
+                        _skill_id_names = {int(k): v for k, v in json.load(_f).items()}
+                    print(f"  [prewarm] Skill names loaded from cache ({len(_skill_id_names)} types)")
+                    return
+                except Exception as _e:
+                    print(f"  [prewarm] Skill name cache read failed, re-downloading: {_e}")
+            # Cache missing or stale — download from Fuzzwork and save for next time
+            try:
+                import bz2 as _bz2, urllib.request as _ur
+                _req = _ur.Request(
+                    "https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2",
+                    headers={"User-Agent": "CREST-Server/1.0"}
+                )
+                with _ur.urlopen(_req, timeout=30) as _r:
+                    _raw = _bz2.decompress(_r.read())
+                _tmp: dict[int, str] = {}
+                for _line in _raw.decode("utf-8").splitlines()[1:]:
+                    _parts = _line.split(",")
+                    try:
+                        _tmp[int(_parts[0])] = _parts[2]
+                    except (ValueError, IndexError):
+                        pass
+                _skill_id_names = _tmp
+                with open(_SKILL_NAMES_PATH, "w", encoding="utf-8") as _f:
+                    json.dump({str(k): v for k, v in _tmp.items()}, _f)
+                print(f"  [prewarm] Skill names downloaded and cached ({len(_skill_id_names)} types)")
+            except Exception as _e:
+                print(f"  [prewarm] Skill names download failed: {_e}")
+
+        # ── Sub-task 2: scan + calculator cache warmup ────────────────────────
+        def _warmup_caches():
+            try:
+                with app.app_context():
+                    client = app.test_client()
+                    client.get("/api/scan")
+                    client.get("/api/calculator?system=Korsiki&facility=large")
+                print("  [prewarm] Scan cache ready.")
+            except Exception as _e:
+                print(f"  [prewarm] Scan warmup failed: {_e}")
+
+        print("  [prewarm] Background warmup starting (skill names + scan cache in parallel)...")
+        _skill_t   = threading.Thread(target=_load_skill_names, daemon=True)
+        _warmup_t  = threading.Thread(target=_warmup_caches,    daemon=True)
+        _skill_t.start()
+        _warmup_t.start()
+        # Scan warmup MUST complete before we signal ready.
+        # Skill download is capped at 60 s so a slow network never blocks indefinitely.
+        _skill_t.join(timeout=60)
+        _warmup_t.join()
+
+        _server_ready = True
+        _warmup_done.set()
+        print("  [prewarm] Server ready — /api/ready will return true.")
+
+    threading.Thread(target=_prewarm, daemon=True, name="prewarm").start()
 
     # Periodic wealth snapshot — records wallet balance every 2 hours
     def _wealth_snapshot_loop():
@@ -3789,7 +3849,8 @@ if __name__ == "__main__":
     threading.Thread(target=_wealth_snapshot_loop, daemon=True).start()
 
     # Background alert scanner — Telegram notifications for high-ROI BPs and cheap contracts
-    _alert_scanner.start_alert_scanner(_calc_cache, CALC_CACHE_TTL)
+    # Pass _warmup_done so the contract scan waits until the cache is hot before firing.
+    _alert_scanner.start_alert_scanner(_calc_cache, CALC_CACHE_TTL, warmup_event=_warmup_done)
 
     print()
     print("  ╔══════════════════════════════════════════════════╗")

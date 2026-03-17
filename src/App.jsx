@@ -33,12 +33,27 @@ export default function App() {
   const online = !scanError;
   const backendAlive = !pingError;
 
-  // Auto-boot as soon as ping succeeds — don't wait for the slow scan
+  // Once Flask is alive, poll /api/ready until the prewarm cache is populated,
+  // then auto-boot.  This ensures tables never load into a cold-cache state.
   useEffect(() => {
-    if (backendAlive && !pingLoading && !booted) {
-      setBooted(true);
-      setBootAnim('booted');
-    }
+    if (!backendAlive || pingLoading || booted) return;
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const res = await fetch(`${API}/api/ready`, { signal: AbortSignal.timeout(2000) });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.ready) {
+            if (!cancelled) { setBooted(true); setBootAnim('booted'); }
+            return;
+          }
+        }
+      } catch (_) {}
+      setTimeout(poll, 1500);
+    };
+    poll();
+    return () => { cancelled = true; };
   }, [backendAlive, pingLoading, booted]);
 
   useEffect(() => {

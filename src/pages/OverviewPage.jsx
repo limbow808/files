@@ -1,7 +1,6 @@
 import { memo } from 'react';
 import KPIBar from '../components/KPIBar';
 import PlexSection from '../components/PlexSection';
-import MineralsSection from '../components/MineralsSection';
 import ManufacturingJobs from '../components/ManufacturingJobs';
 import OrdersSection from '../components/OrdersSection';
 import TopPerformersPanel from '../components/TopPerformersPanel';
@@ -33,17 +32,10 @@ export default memo(function OverviewPage({ plexData, walletHistory, plexLoading
 
           <div style={{ height: D, flexShrink: 0, background: 'var(--border)' }} />
 
-          {/* Bottom-left — Orders and Minerals side by side */}
-          {/* Orders gets calc(50% + 170.5px) so the divider lands at the true page center */}
+          {/* Bottom-left — Orders */}
           <div style={{ flex: 2, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
-            <EvePanel scan={true} corners={false} style={{ flex: '0 0 calc(50% + 170.5px)', minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-              <OrdersSection />
-            </EvePanel>
-
-            <div style={{ width: D, flexShrink: 0, background: 'var(--border)' }} />
-
             <EvePanel scan={true} corners={false} style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-              <MineralsSection />
+              <OrdersSection />
             </EvePanel>
           </div>
         </div>
