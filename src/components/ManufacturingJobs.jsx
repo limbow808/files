@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, Fragment } from 'react';
+import { useGlobalTick } from '../hooks/useGlobalTick';
 import { useApi } from '../hooks/useApi';
 import CharTag from './CharTag';
 import { charColor, seedCharColors } from '../utils/charColors';
@@ -48,28 +49,23 @@ function JobRow({ j, idx, multiChar }) {
   const progressRef  = useRef(null);
   const nameRef      = useRef(null);
 
-  useEffect(() => {
-    const tick = () => {
-      const secsLeft = Math.max(0, j.end_ts - Math.floor(Date.now() / 1000));
-      if (countdownRef.current) {
-        countdownRef.current.textContent = fmtCountdown(secsLeft);
-        countdownRef.current.style.color =
-          secsLeft <= 0 ? '#00cc66' : secsLeft < 3600 ? 'var(--accent)' : 'var(--text)';
-      }
-      if (progressRef.current) {
-        const totalSecs = j.total_secs || 86400;
-        const pct = totalSecs > 0 ? Math.max(0, Math.min(100, (1 - secsLeft / totalSecs) * 100)) : 100;
-        progressRef.current.style.width = `${pct}%`;
-        progressRef.current.style.background = secsLeft <= 0 ? '#00cc66' : secsLeft < 3600 ? 'var(--accent)' : '#4da6ff';
-      }
-      if (nameRef.current) {
-        nameRef.current.style.color = secsLeft <= 0 ? '#00cc66' : 'var(--text)';
-      }
-    };
-    tick();
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [j.end_ts, j.total_secs]);
+  useGlobalTick(() => {
+    const secsLeft = Math.max(0, j.end_ts - Math.floor(Date.now() / 1000));
+    if (countdownRef.current) {
+      countdownRef.current.textContent = fmtCountdown(secsLeft);
+      countdownRef.current.style.color =
+        secsLeft <= 0 ? '#00cc66' : secsLeft < 3600 ? 'var(--accent)' : 'var(--text)';
+    }
+    if (progressRef.current) {
+      const totalSecs = j.total_secs || 86400;
+      const pct = totalSecs > 0 ? Math.max(0, Math.min(100, (1 - secsLeft / totalSecs) * 100)) : 100;
+      progressRef.current.style.width = `${pct}%`;
+      progressRef.current.style.background = secsLeft <= 0 ? '#00cc66' : secsLeft < 3600 ? 'var(--accent)' : '#4da6ff';
+    }
+    if (nameRef.current) {
+      nameRef.current.style.color = secsLeft <= 0 ? '#00cc66' : 'var(--text)';
+    }
+  });
 
   const aColor   = ACTIVITY_COLORS[j.activity] || 'var(--text)';
   const cColor   = j.character_id ? charColor(j.character_id) : 'var(--dim)';

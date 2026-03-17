@@ -113,7 +113,7 @@ def _fetch_all_orders():
             except Exception:
                 return []
 
-        with ThreadPoolExecutor(max_workers=20) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
             futures = {pool.submit(_fetch_page, p): p for p in range(2, total_pages + 1)}
             done = 0
             for f in as_completed(futures):

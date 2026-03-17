@@ -67,7 +67,7 @@ CONFIG = {
     "CONTRACT_SCAN_INTERVAL":  900,    # 15 minutes — fast enough to snipe new listings
 
     # How often to check industry job timers (seconds)
-    "JOB_SCAN_INTERVAL":       60,     # 1 minute
+    "JOB_SCAN_INTERVAL":       300,    # 5 minutes
 
     # Max ESI contract pages to scan (each page = 1000 contracts)
     "MAX_PAGES":               20,
