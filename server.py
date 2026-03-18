@@ -1,5 +1,5 @@
 """
-server.py - CREST Flask API Server
+server.py - CREST Quart API Server
 ====================================
 Exposes CREST data over HTTP for the React dashboard.
 
@@ -13,13 +13,14 @@ Endpoints:
     GET /api/minerals - Return Jita mineral prices
 """
 
-from flask import Flask, jsonify, send_file, send_from_directory, Response, stream_with_context
-from flask_cors import CORS
+from quart import Quart, jsonify, send_file, send_from_directory, Response, request
+from quart_cors import cors
+import asyncio
 import time
 import json
 import os
 import threading
-import requests
+import esi_client as _esi
 
 from blueprints import load_blueprints, MINERALS
 from calculator import calculate_all
@@ -30,8 +31,7 @@ from database import (
 )
 import alert_scanner as _alert_scanner
 
-app = Flask(__name__)
-CORS(app)  # Allow React dev server (localhost:3000 / file://) to call the API
+app = cors(Quart(__name__))  # Allow React dev server (localhost:3000 / file://) to call the API
 
 # ── Corp BPO static fallback ──────────────────────────────────────────────────
 # Loaded once at startup from src/corp_BPOs (tab-separated, col 0 = BP name).
@@ -577,15 +577,15 @@ def api_calculator():
       sell_loc  - sell location: 'jita', 'amarr', 'dodixie', 'rens', 'hek'
       buy_loc   - buy location: same options
     """
-    from flask import request as flask_request
+    pass  # request already imported at top
     try:
         from pricer import get_prices_bulk
 
         # ── Parse query params ────────────────────────────────────────────────
-        system_param   = flask_request.args.get("system", "").strip()
-        facility_param = flask_request.args.get("facility", "station").strip().lower()
-        sell_loc       = flask_request.args.get("sell_loc", "jita").strip().lower()
-        buy_loc        = flask_request.args.get("buy_loc",  "jita").strip().lower()
+        system_param   = request.args.get("system", "").strip()
+        facility_param = request.args.get("facility", "station").strip().lower()
+        sell_loc       = request.args.get("sell_loc", "jita").strip().lower()
+        buy_loc        = request.args.get("buy_loc",  "jita").strip().lower()
 
         # ── Return from cache if fresh ────────────────────────────────────────
         cache_key = _calc_cache_key(system_param, facility_param)
@@ -1227,16 +1227,16 @@ def api_calculator_progress():
     Query params must match those sent to /api/calculator (system, facility).
     Client connects before or during the calculation; events arrive in real time.
     """
-    from flask import request as freq
-    system_param   = freq.args.get("system",   "").strip()
-    facility_param = freq.args.get("facility", "station").strip().lower()
+    pass  # request already imported at top
+    system_param   = request.args.get("system",   "").strip()
+    facility_param = request.args.get("facility", "station").strip().lower()
     cache_key = _calc_cache_key(system_param, facility_param)
 
     # If already cached, immediately send a "done" event and close
     if _calc_is_fresh(cache_key):
         def instant():
             yield f"data: {json.dumps({'stage':'done','msg':'Ready','done':1,'total':1})}\n\n"
-        return Response(stream_with_context(instant()), mimetype="text/event-stream",
+        return Response(instant(), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     q = _subscribe_progress(cache_key)
@@ -1255,7 +1255,7 @@ def api_calculator_progress():
         finally:
             _unsubscribe_progress(cache_key, q)
 
-    return Response(stream_with_context(generate()), mimetype="text/event-stream",
+    return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
@@ -1391,8 +1391,8 @@ def api_systems_search():
     Search for solar systems by name prefix and return SCI for each.
     Query param: q=<search string>
     """
-    from flask import request as freq
-    q = freq.args.get("q", "").strip()
+    pass  # request already imported at top
+    q = request.args.get("q", "").strip()
     if not q or len(q) < 2:
         return jsonify([])
 
@@ -1429,8 +1429,8 @@ def api_sci():
     Returns { system_name, system_id, cost_index, cached_at } for the given system.
     Returns 404 { error: "System not found" } if the name doesn't match.
     """
-    from flask import request as freq
-    system_name = freq.args.get("system_name", "").strip()
+    pass  # request already imported at top
+    system_name = request.args.get("system_name", "").strip()
     if not system_name:
         return jsonify({"error": "system_name is required"}), 400
 
@@ -1593,12 +1593,12 @@ def api_blueprints_bp_finder():
     try:
         import sqlite3 as _sq
 
-        from flask import request as _freq
-        system   = _freq.args.get("system",   "Korsiki")
-        facility = _freq.args.get("facility", "large")
-        sell_loc = _freq.args.get("sell_loc", "jita")
-        buy_loc  = _freq.args.get("buy_loc",  "jita")
-        limit    = int(_freq.args.get("limit", 50))
+        pass  # request already imported at top
+        system   = request.args.get("system",   "Korsiki")
+        facility = request.args.get("facility", "large")
+        sell_loc = request.args.get("sell_loc", "jita")
+        buy_loc  = request.args.get("buy_loc",  "jita")
+        limit    = int(request.args.get("limit", 50))
 
         # --- Get calc results (reuse cache if fresh, else use any cached key) ---
         cache_key = _calc_cache_key(system, facility)
@@ -1699,13 +1699,13 @@ def api_bpo_market_scan():
     """
     try:
         import sqlite3 as _sq, math
-        from flask import request as _freq
+        pass  # request already imported at top
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        region_id  = int(_freq.args.get("region_id", 10000002))
-        system     = _freq.args.get("system",   "Korsiki")
-        facility   = _freq.args.get("facility", "large")
-        max_pages  = min(int(_freq.args.get("max_pages", 20)), 40)
+        region_id  = int(request.args.get("region_id", 10000002))
+        system     = request.args.get("system",   "Korsiki")
+        facility   = request.args.get("facility", "large")
+        max_pages  = min(int(request.args.get("max_pages", 20)), 40)
 
         # ── 1. Get calc results from cache ─────────────────────────────────────
         cache_key = _calc_cache_key(system, facility)
@@ -2007,7 +2007,7 @@ def api_bpo_market_scan_stream():
                              "pages_scanned": int, "contracts_checked": int}
         {"type":"error",     "msg": str}
     """
-    from flask import request as _req
+    pass  # request already imported at top
     region_id = int(_req.args.get("region_id", 10000002))
     max_pages  = min(int(_req.args.get("max_pages", 20)), 40)
 
@@ -2307,7 +2307,7 @@ def api_bpo_market_scan_stream():
                 yield ": keepalive\n\n"
 
     return Response(
-        stream_with_context(generate()),
+        generate(),
         mimetype="text/event-stream",
         headers={
             "Cache-Control":    "no-cache",
@@ -2327,8 +2327,8 @@ def api_ui_open_ingame():
         from characters import get_all_auth_headers
         import requests as _ureq
 
-        from flask import request as _freq2
-        body     = _freq2.get_json(force=True, silent=True) or {}
+        pass  # request already imported at top2
+        body     = request.get_json(force=True, silent=True) or {}
         type_id  = int(body.get("type_id", 0))
         window   = body.get("window", "market")
 
@@ -2417,8 +2417,8 @@ def api_blueprints_esi():
     """
     global _ESI_BP_CACHE, _ESI_BP_CACHE_TS
     try:
-        from flask import request as flask_request
-        force = flask_request.args.get("force", "0") == "1"
+        pass  # request already imported at top
+        force = request.args.get("force", "0") == "1"
         if not force and _ESI_BP_CACHE and (time.time() - _ESI_BP_CACHE_TS) < _ESI_BP_TTL:
             return jsonify(_ESI_BP_CACHE)
 
@@ -2574,8 +2574,8 @@ def api_assets():
     """
     global _ASSETS_CACHE, _ASSETS_CACHE_TS
     try:
-        from flask import request as flask_request
-        force = flask_request.args.get("force", "0") == "1"
+        pass  # request already imported at top
+        force = request.args.get("force", "0") == "1"
         if not force and _ASSETS_CACHE and (time.time() - _ASSETS_CACHE_TS) < _ASSETS_TTL:
             return jsonify(_ASSETS_CACHE)
 
@@ -2695,8 +2695,8 @@ def api_industry_jobs():
     """
     global _ESI_JOBS_CACHE, _ESI_JOBS_CACHE_TS
     try:
-        from flask import request as flask_request
-        force = flask_request.args.get("force", "0") == "1"
+        pass  # request already imported at top
+        force = request.args.get("force", "0") == "1"
         if not force and _ESI_JOBS_CACHE and (time.time() - _ESI_JOBS_CACHE_TS) < _ESI_JOBS_TTL:
             # Update seconds_remaining in-place for cached results
             now_ts = int(time.time())
@@ -2942,14 +2942,14 @@ def api_craft_log():
     material cost + est profit, upsert into craft_log, and return all rows.
     """
     try:
-        from flask import request as flask_request
+        pass  # request already imported at top
         from characters import get_all_auth_headers, load_characters
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import requests as req
         from datetime import datetime, timezone
 
-        days = int(flask_request.args.get("days", 90))
-        force = flask_request.args.get("force", "0") == "1"
+        days = int(request.args.get("days", 90))
+        force = request.args.get("force", "0") == "1"
 
         # Only re-fetch from ESI when forced (expensive); otherwise just return DB
         if force:
@@ -3092,8 +3092,8 @@ def api_craft_log():
 def api_craft_stats():
     """Return aggregated craft profitability stats from the local DB."""
     try:
-        from flask import request as flask_request
-        days = int(flask_request.args.get("days", 90))
+        pass  # request already imported at top
+        days = int(request.args.get("days", 90))
         return jsonify(get_craft_stats(days=days))
     except Exception as e:
         return jsonify({"error": str(e)}), 200
@@ -3153,8 +3153,8 @@ def api_queue_summary():
     """
     global _QUEUE_SUMMARY_CACHE, _QUEUE_SUMMARY_CACHE_TS
     try:
-        from flask import request as flask_request
-        force = flask_request.args.get("force", "0") == "1"
+        pass  # request already imported at top
+        force = request.args.get("force", "0") == "1"
         if not force and _QUEUE_SUMMARY_CACHE and (time.time() - _QUEUE_SUMMARY_CACHE_TS) < _QUEUE_SUMMARY_TTL:
             # Return cached stats but always recompute running_jobs+free_slots
             # from the live jobs cache so the footer never shows stale counts.
@@ -3291,8 +3291,8 @@ def api_orders():
     """
     global _ESI_ORDERS_CACHE, _ESI_ORDERS_CACHE_TS
     try:
-        from flask import request as flask_request
-        force = flask_request.args.get("force", "0") == "1"
+        pass  # request already imported at top
+        force = request.args.get("force", "0") == "1"
         if not force and _ESI_ORDERS_CACHE and (time.time() - _ESI_ORDERS_CACHE_TS) < _ESI_ORDERS_TTL:
             return jsonify(_ESI_ORDERS_CACHE)
 
@@ -3692,9 +3692,9 @@ def api_shopping_optimal_sources():
         "hub_jumps": {"Jita": 2, "Amarr": 6, ...}
     }
     """
-    from flask import request as freq
+    pass  # request already imported at top
     try:
-        body          = freq.get_json(force=True) or {}
+        body          = request.get_json(force=True) or {}
         items         = body.get("items", [])          # [{type_id, name, quantity}]
         player_system = str(body.get("player_system", "")).strip()
 
@@ -4108,117 +4108,150 @@ def api_alerts_status():
     return jsonify(_alert_scanner.status)
 
 
-if __name__ == "__main__":
-    # Pre-warm the scan cache in the background so the first dashboard load is instant.
-    # Two sub-tasks run concurrently so neither blocks the other:
-    #   1. Skill names  — loaded from disk cache (instant) or downloaded once from Fuzzwork
-    #   2. Scan warmup  — hits /api/scan and /api/calculator to populate the in-memory caches
-    # When both finish, _server_ready is set to True and _warmup_done is signalled
-    # so the alert scanner knows it can start its first contract scan.
-    def _prewarm():
-        global _skill_id_names, _server_ready
-
-        # ── Sub-task 1: skill names ───────────────────────────────────────────
-        def _load_skill_names():
-            global _skill_id_names
-            # Try loading from the on-disk cache first (avoid network on every restart)
-            if (os.path.exists(_SKILL_NAMES_PATH) and
-                    time.time() - os.path.getmtime(_SKILL_NAMES_PATH) < _SKILL_NAMES_MAX_AGE):
-                try:
-                    with open(_SKILL_NAMES_PATH, "r", encoding="utf-8") as _f:
-                        _skill_id_names = {int(k): v for k, v in json.load(_f).items()}
-                    print(f"  [prewarm] Skill names loaded from cache ({len(_skill_id_names)} types)")
-                    return
-                except Exception as _e:
-                    print(f"  [prewarm] Skill name cache read failed, re-downloading: {_e}")
-            # Cache missing or stale — download from Fuzzwork and save for next time
-            try:
-                import bz2 as _bz2, urllib.request as _ur
-                _req = _ur.Request(
-                    "https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2",
-                    headers={"User-Agent": "CREST-Server/1.0"}
-                )
-                with _ur.urlopen(_req, timeout=30) as _r:
-                    _raw = _bz2.decompress(_r.read())
-                _tmp: dict[int, str] = {}
-                for _line in _raw.decode("utf-8").splitlines()[1:]:
-                    _parts = _line.split(",")
-                    try:
-                        _tmp[int(_parts[0])] = _parts[2]
-                    except (ValueError, IndexError):
-                        pass
-                _skill_id_names = _tmp
-                with open(_SKILL_NAMES_PATH, "w", encoding="utf-8") as _f:
-                    json.dump({str(k): v for k, v in _tmp.items()}, _f)
-                print(f"  [prewarm] Skill names downloaded and cached ({len(_skill_id_names)} types)")
-            except Exception as _e:
-                print(f"  [prewarm] Skill names download failed: {_e}")
-
-        # ── Sub-task 2: scan + calculator cache warmup ────────────────────────
-        def _warmup_scan():
-            """Phase 1 — fast, blocks the server-ready signal."""
-            try:
-                with app.app_context():
-                    client = app.test_client()
-                    client.get("/api/scan")
-                print("  [prewarm] Scan cache ready.")
-            except Exception as _e:
-                print(f"  [prewarm] Scan warmup failed: {_e}")
-
-        def _warmup_calculator():
-            """Phase 2 — heavy; runs AFTER server is marked ready so boot screen clears first."""
-            try:
-                with app.app_context():
-                    client = app.test_client()
-                    client.get("/api/calculator?system=Korsiki&facility=large")
-                print("  [prewarm] Calculator cache ready.")
-            except Exception as _e:
-                print(f"  [prewarm] Calculator warmup failed: {_e}")
-
-        print("  [prewarm] Background warmup starting (skill names + scan cache in parallel)...")
-        _skill_t   = threading.Thread(target=_load_skill_names, daemon=True)
-        _scan_t    = threading.Thread(target=_warmup_scan,      daemon=True)
-        _skill_t.start()
-        _scan_t.start()
-        # Signal ready after scan + skill names only.
-        # Calculator is heavy (~30s) — running it before signalling ready caused
-        # the boot screen black-screen hang. It now pre-warms in the background
-        # after the UI has loaded, and the dedup lock prevents double-computation
-        # if the user opens the Calculator tab while warmup is still running.
-        _skill_t.join(timeout=60)
-        _scan_t.join()
-
-        _server_ready = True
-        _warmup_done.set()
-        print("  [prewarm] Server ready — /api/ready will return true.")
-        threading.Thread(target=_warmup_calculator, daemon=True, name="calc-prewarm").start()
-
-    threading.Thread(target=_prewarm, daemon=True, name="prewarm").start()
-
-    # Periodic wealth snapshot — records wallet balance every 2 hours
-    def _wealth_snapshot_loop():
-        import time as _time
-        # Wait 60s before first run so auth tokens can be ready
-        _time.sleep(60)
-        while True:
-            try:
-                balance = _get_wallet()
-                if balance and balance > 0:
-                    record_wealth_snapshot(balance)
-                    print(f"  [snapshot] Wealth recorded: {balance:,.0f} ISK")
-            except Exception as e:
-                print(f"  [snapshot] Failed: {e}")
-            _time.sleep(7200)  # sleep 2 hours between snapshots
-
-    threading.Thread(target=_wealth_snapshot_loop, daemon=True).start()
-
-    # Background alert scanner — Telegram notifications for high-ROI BPs and cheap contracts
-    # Pass _warmup_done so the contract scan waits until the cache is hot before firing.
+@app.before_serving
+async def _startup():
+    """
+    Quart before_serving hook — runs once when Hypercorn starts accepting connections.
+    Launches all background tasks onto the running event loop.
+    """
+    await _esi.esi.start()
+    from pricer import orders_refresh_loop
+    asyncio.get_event_loop().create_task(orders_refresh_loop(), name="pricer-refresh")
+    asyncio.get_event_loop().create_task(_prewarm_task(), name="prewarm")
+    asyncio.get_event_loop().create_task(_wealth_snapshot_task(), name="wealth-snapshot")
     _alert_scanner.start_alert_scanner(_calc_cache, CALC_CACHE_TTL, warmup_event=_warmup_done)
 
+
+@app.after_serving
+async def _shutdown():
+    await _esi.esi.close()
+
+
+async def _prewarm_task():
+    global _skill_id_names, _server_ready
+
+    def _load_skill_names():
+        global _skill_id_names
+        if (os.path.exists(_SKILL_NAMES_PATH) and
+                time.time() - os.path.getmtime(_SKILL_NAMES_PATH) < _SKILL_NAMES_MAX_AGE):
+            try:
+                with open(_SKILL_NAMES_PATH, "r", encoding="utf-8") as _f:
+                    _skill_id_names = {int(k): v for k, v in json.load(_f).items()}
+                print(f"  [prewarm] Skill names loaded from cache ({len(_skill_id_names)} types)")
+                return
+            except Exception as _e:
+                print(f"  [prewarm] Skill name cache read failed, re-downloading: {_e}")
+        try:
+            import bz2 as _bz2, urllib.request as _ur
+            _req = _ur.Request(
+                "https://www.fuzzwork.co.uk/dump/latest/invTypes.csv.bz2",
+                headers={"User-Agent": "CREST-Server/1.0"}
+            )
+            with _ur.urlopen(_req, timeout=30) as _r:
+                _raw = _bz2.decompress(_r.read())
+            _tmp: dict[int, str] = {}
+            for _line in _raw.decode("utf-8").splitlines()[1:]:
+                _parts = _line.split(",")
+                try:
+                    _tmp[int(_parts[0])] = _parts[2]
+                except (ValueError, IndexError):
+                    pass
+            _skill_id_names = _tmp
+            with open(_SKILL_NAMES_PATH, "w", encoding="utf-8") as _f:
+                json.dump({str(k): v for k, v in _tmp.items()}, _f)
+            print(f"  [prewarm] Skill names downloaded and cached ({len(_skill_id_names)} types)")
+        except Exception as _e:
+            print(f"  [prewarm] Skill names download failed: {_e}")
+
+    def _warmup_scan_sync():
+        """Directly populate scan cache — no HTTP round-trip needed."""
+        try:
+            from pricer import get_prices_bulk
+            results = calculate_all()
+            all_type_ids = set(MINERALS.values())
+            for r in results:
+                for mat in r.get("material_breakdown", []):
+                    all_type_ids.add(mat["type_id"])
+            prices = get_prices_bulk(list(all_type_ids))
+            for r in results:
+                r.pop("material_breakdown", None)
+            seen, deduped = set(), []
+            for r in results:
+                oid = r.get("output_id")
+                if oid not in seen:
+                    seen.add(oid)
+                    deduped.append(r)
+            global _scan_cache
+            _scan_cache = {
+                "scanned_at": int(time.time()),
+                "results":    deduped[:50],
+                "minerals":   _mineral_prices(prices),
+            }
+            print("  [prewarm] Scan cache ready.")
+        except Exception as _e:
+            print(f"  [prewarm] Scan warmup failed: {_e}")
+
+    def _warmup_calculator_sync():
+        """Directly populate calculator cache for default params."""
+        try:
+            _cache_key = _calc_cache_key("Korsiki", "large")
+            if _calc_is_fresh(_cache_key):
+                return
+            from pricer import get_prices_bulk
+            results = calculate_all()
+            all_type_ids = set()
+            for r in results:
+                for mat in r.get("material_breakdown", []):
+                    all_type_ids.add(mat["type_id"])
+            prices = get_prices_bulk(list(all_type_ids))
+            _calc_cache[_cache_key] = {
+                "generated_at": time.time(),
+                "results":      results,
+                "prices":       prices,
+            }
+            print("  [prewarm] Calculator cache ready.")
+        except Exception as _e:
+            print(f"  [prewarm] Calculator warmup failed: {_e}")
+
+    print("  [prewarm] Background warmup starting (skill names + scan cache in parallel)...")
+    await asyncio.gather(
+        asyncio.to_thread(_load_skill_names),
+        asyncio.to_thread(_warmup_scan_sync),
+    )
+
+    _server_ready = True
+    _warmup_done.set()
+    print("  [prewarm] Server ready — /api/ready will return true.")
+    asyncio.get_event_loop().create_task(
+        asyncio.to_thread(_warmup_calculator_sync), name="calc-prewarm"
+    )
+
+
+async def _wealth_snapshot_task():
+    await asyncio.sleep(60)  # wait for auth tokens to be ready
+    while True:
+        try:
+            balance = _get_wallet()
+            if balance and balance > 0:
+                record_wealth_snapshot(balance)
+                print(f"  [snapshot] Wealth recorded: {balance:,.0f} ISK")
+        except Exception as e:
+            print(f"  [snapshot] Failed: {e}")
+        await asyncio.sleep(7200)
+
+
+if __name__ == "__main__":
+    import hypercorn.asyncio
+    import hypercorn.config
+
+    cfg = hypercorn.config.Config()
+    cfg.bind = ["0.0.0.0:5001"]
+    cfg.use_reloader = False
+
     print()
-    print("  ╔══════════════════════════════════════════════════╗")
-    print("  ║   CREST  ·  API Server  ·  http://localhost:5000  ║")
-    print("  ╚══════════════════════════════════════════════════╝")
+    print("  CREST - API Server - http://localhost:5001")
     print()
-    app.run(host="0.0.0.0", port=5001, debug=False, threaded=True)
+    asyncio.run(hypercorn.asyncio.serve(app, cfg))
+
+
+
