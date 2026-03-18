@@ -158,6 +158,11 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
                   <div>
                     <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2, textTransform: 'uppercase' }}>ISK/HR</div>
                     <div style={{ fontSize: 13, color: 'var(--text)' }}>{fmtISK(item.isk_per_hour)}</div>
+                    <div style={{ fontSize: 9, color: item.avg_sell_days != null && item.avg_sell_days !== 3.0 ? '#00cc66' : 'var(--dim)', letterSpacing: 1 }}>
+                      {item.avg_sell_days != null && item.avg_sell_days !== 3.0
+                        ? `≈${item.avg_sell_days}d sell (personal)`
+                        : '≈3d sell (default)'}
+                    </div>
                   </div>
                 )}
                 {item.isk_per_m3 > 0 && (
@@ -183,8 +188,11 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
                       </div>
                       <div style={{ fontSize: 10, color: 'var(--dim)', lineHeight: 1.6 }}>
                         <div>covers <span style={{ color: 'var(--text)' }}>{fmtVol(item.avg_daily_volume)}/day</span> demand</div>
-                        <div>sells in ~<span style={{ color: 'var(--text)' }}>{rec.days_to_sell}d</span> · {rec.max_per_day}/day capacity</div>
-                      </div>
+                        <div>sells in ~<span style={{ color: 'var(--text)' }}>{rec.days_to_sell}d</span> · {rec.max_per_day}/day capacity</div>                          <div>isk/hr basis: <span style={{ color: item.avg_sell_days != null && item.avg_sell_days !== 3.0 ? '#00cc66' : 'var(--dim)' }}>
+                            {item.avg_sell_days != null && item.avg_sell_days !== 3.0
+                              ? `${item.avg_sell_days}d personal avg`
+                              : '3d default (no history)'}
+                          </span></div>                      </div>
                     </div>
                     {tooSlow && (
                       <div style={{ marginTop: 6, fontSize: 9, color: '#00cc66', letterSpacing: 1 }}>

@@ -77,7 +77,8 @@ def _init_crest(conn: sqlite3.Connection) -> None:
             slot_type     TEXT,
             me_level      INTEGER NOT NULL DEFAULT 0,
             te_level      INTEGER NOT NULL DEFAULT 0,
-            time_seconds  INTEGER NOT NULL DEFAULT 0
+            time_seconds  INTEGER NOT NULL DEFAULT 0,
+            copy_time_secs INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS blueprint_materials (
@@ -104,6 +105,12 @@ def _init_crest(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_skill_bp     ON blueprint_skills(blueprint_id);
     """)
     conn.commit()
+    # Safe migration for existing installations that predate this column
+    try:
+        conn.execute("ALTER TABLE blueprints ADD COLUMN copy_time_secs INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
 
 
 def _load_attributes(sde: sqlite3.Connection) -> tuple[dict, dict, dict]:
@@ -200,6 +207,23 @@ def _load_times(sde: sqlite3.Connection) -> dict[int, int]:
     return times
 
 
+def _load_copy_times(sde: sqlite3.Connection) -> dict[int, int]:
+    """
+    Load copying time (activityID=5) for all blueprints from the SDE.
+    Returns { blueprint_type_id: time_in_seconds }
+    """
+    print("  Loading copy times from industryActivity (activityID=5)...", end="", flush=True)
+    cur = sde.cursor()
+    cur.execute("""
+        SELECT typeID, time
+        FROM   industryActivity
+        WHERE  activityID = 5
+    """)
+    times = {row["typeID"]: row["time"] for row in cur.fetchall()}
+    print(f" {len(times)} entries loaded")
+    return times
+
+
 def _load_skills(sde: sqlite3.Connection) -> dict[int, list[dict]]:
     """
     Load required manufacturing skills for all blueprints from the SDE.
@@ -256,7 +280,10 @@ def seed_from_sde() -> tuple[int, int]:
     # ── 2b. Pre-load manufacturing times ──────────────────────────────────────
     times_by_bp = _load_times(sde)
 
-    # ── 2c. Pre-load skill requirements (keyed by blueprint type id) ──────────
+    # ── 2c. Pre-load copy times (activityID=5) ────────────────────────────────
+    copy_times_by_bp = _load_copy_times(sde)
+
+    # ── 2d. Pre-load skill requirements (keyed by blueprint type id) ──────────
     skills_by_bp = _load_skills(sde)
 
     # ── 3. Query all manufacturable blueprint outputs ─────────────────────────
@@ -294,8 +321,8 @@ def seed_from_sde() -> tuple[int, int]:
         INSERT OR REPLACE INTO blueprints
             (blueprint_id, output_id, output_name, output_qty,
              category, item_group, tech_level, volume_m3,
-             size_class, slot_type, me_level, te_level, time_seconds)
-        VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?)
+             size_class, slot_type, me_level, te_level, time_seconds, copy_time_secs)
+        VALUES (?,?,?,?,?,?,?,?,?,?,0,0,?,?)
     """
     mat_insert = """
         INSERT INTO blueprint_materials
@@ -316,8 +343,9 @@ def seed_from_sde() -> tuple[int, int]:
         tech  = tech_map.get(output_id, 1)
         size  = size_map.get(output_id, "U")
         slot  = slot_map.get(output_id)
-        vol   = row["volume_m3"] or 0.01
+        vol    = row["volume_m3"] or 0.01
         time_s = times_by_bp.get(bp_id, 0)
+        copy_s = copy_times_by_bp.get(bp_id, 0)
 
         # Normalise category string for dashboard filter chips
         raw_cat   = row["category"] or "Other"
@@ -335,6 +363,7 @@ def seed_from_sde() -> tuple[int, int]:
             size,
             slot,
             time_s,
+            copy_s,
         ))
 
         # Insert materials — delete old rows first so re-runs stay clean

@@ -70,7 +70,7 @@ CONFIG = {
     "JOB_SCAN_INTERVAL":       300,    # 5 minutes
 
     # Max ESI contract pages to scan (each page = 1000 contracts)
-    "MAX_PAGES":               20,
+    "MAX_PAGES":               10,   # was 20 — newest BPO listings always appear on pages 1-10
 
     # ESI region to scan contracts in (10000002 = The Forge / Jita)
     "REGION_ID":               10000002,

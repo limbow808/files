@@ -307,12 +307,177 @@ function SupplyBar({ supplyDays, urgency }) {
   );
 }
 
-function QueuePlannerView({ refreshKey }) {
-  const { data: tpData,   loading: tpLoading,   error: tpError }   = useApi(`${API}/api/top-performers`, [refreshKey]);
-  const { data: calcData }                                           = useApi(`${API}/api/calculator`, []);
-  const [expandedId, setExpandedId] = useState(null);
+function fmtAbsTime(ts) {
+  const now = Math.floor(Date.now() / 1000);
+  const secs = (ts || 0) - now;
+  if (secs <= 30) return 'NOW';
+  const d = Math.floor(secs / 86400);
+  const h = Math.floor((secs % 86400) / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (d > 0) return `~${d}d ${h}h`;
+  if (h > 0) return `~${h}h ${m}m`;
+  return `~${m}m`;
+}
 
-  const items   = tpData?.items || [];
+const ACTION_LABELS = {
+  manufacture: { label: 'MFG',      bg: '#ff4700' },
+  copy_first:  { label: 'COPY→MFG', bg: '#ffcc44' },
+};
+
+function PrereqLine({ item }) {
+  const now = Math.floor(Date.now() / 1000);
+
+  if (item.action_type === 'copy_first') {
+    return (
+      <span style={{ fontSize: 9, color: 'rgba(255,204,68,0.85)', letterSpacing: 0.5 }}>
+        → Start copy now · mfg ready {fmtAbsTime(item.manufacture_at)}
+      </span>
+    );
+  }
+
+  const secsAway = (item.start_at || now) - now;
+  if (secsAway > 30) {
+    return (
+      <span style={{ fontSize: 9, color: 'rgba(255,71,0,0.8)', letterSpacing: 0.5 }}>
+        → Slot opens {fmtAbsTime(item.start_at)}
+      </span>
+    );
+  }
+
+  if (!item.mats_ready && item.missing_mats_est_cost > 0) {
+    return (
+      <span style={{ fontSize: 9, color: '#ffcc44', letterSpacing: 0.5 }}>
+        ⚠ BUY MATS · ~{fmtISK(item.missing_mats_est_cost)} needed
+      </span>
+    );
+  }
+
+  if (item.producing_qty > 0) {
+    return (
+      <span style={{ fontSize: 9, color: 'rgba(77,166,255,0.8)', letterSpacing: 0.5 }}>
+        ▶ Already manufacturing ({item.producing_qty} units in flight)
+      </span>
+    );
+  }
+
+  return (
+    <span style={{ fontSize: 9, color: '#4cff91', letterSpacing: 0.5 }}>
+      ✓ Ready to queue
+    </span>
+  );
+}
+
+function QueueActionRow({ item, idx, isOpen, onToggle, calcItem }) {
+  const now       = Math.floor(Date.now() / 1000);
+  const secsAway  = Math.max(0, (item.start_at || now) - now);
+  const isNow     = item.action_type === 'copy_first' || secsAway <= 30;
+  const actInfo   = ACTION_LABELS[item.action_type] || ACTION_LABELS.manufacture;
+  const timeCtx   = isNow ? 'NOW' : fmtAbsTime(item.start_at);
+  const timeColor = isNow ? '#4cff91' : secsAway < 7200 ? 'var(--accent)' : 'var(--dim)';
+  const supplyDays = item.supply_days ?? 0;
+
+  return (
+    <>
+      <div
+        className="eve-row-reveal"
+        style={{
+          display: 'flex', flexDirection: 'column',
+          padding: '7px 10px', borderBottom: '1px solid var(--border)',
+          cursor: 'pointer', background: isOpen ? '#0a0a08' : 'transparent',
+          animationDelay: `${idx * 25}ms`,
+        }}
+        onClick={onToggle}
+      >
+        {/* Main row */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+
+          {/* Priority # + time context */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 34, flexShrink: 0 }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--dim)', fontWeight: 700, lineHeight: 1.1 }}>
+              #{idx + 1}
+            </span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 8, color: timeColor, letterSpacing: 0.3, whiteSpace: 'nowrap' }}>
+              {timeCtx}
+            </span>
+          </div>
+
+          {/* Action badge */}
+          <span style={{
+            display: 'inline-block', fontFamily: 'var(--mono)', fontSize: 8, fontWeight: 700,
+            letterSpacing: 1, padding: '2px 5px', borderRadius: 2, flexShrink: 0,
+            background: actInfo.bg, color: '#000',
+          }}>{actInfo.label}</span>
+
+          {/* Item icon */}
+          {item.output_id && (
+            <img
+              src={`https://images.evetech.net/types/${item.output_id}/icon?size=32`}
+              alt=""
+              style={{ width: 20, height: 20, flexShrink: 0, opacity: 0.85 }}
+              onError={e => { e.target.style.display = 'none'; }}
+            />
+          )}
+
+          {/* Name */}
+          <span style={{
+            fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0,
+          }}>{item.name}</span>
+
+          {/* Runs badge */}
+          {(item.rec_runs || 0) > 1 && (
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)', flexShrink: 0 }}>
+              ×{item.rec_runs}
+            </span>
+          )}
+
+          {/* Ownership badges */}
+          <div style={{ display: 'flex', gap: 3, flexShrink: 0 }}>
+            {(item.ownership || []).map(o => <OwnBadge key={o} kind={o} />)}
+          </div>
+
+          {/* ISK/hr */}
+          <span style={{
+            fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)',
+            flexShrink: 0, minWidth: 58, textAlign: 'right',
+          }}>{fmtISK(item.isk_per_hour)}/hr</span>
+
+          {/* Supply bar */}
+          <SupplyBar supplyDays={supplyDays} urgency={item.urgency} />
+
+          {/* Chevron */}
+          <span style={{ fontSize: 9, color: isOpen ? 'var(--accent)' : 'var(--dim)', flexShrink: 0 }}>
+            {isOpen ? '▲' : '▼'}
+          </span>
+        </div>
+
+        {/* Prereq sub-line */}
+        <div style={{ paddingLeft: 40, marginTop: 3 }}>
+          <PrereqLine item={item} />
+        </div>
+      </div>
+
+      {isOpen && <QueueDetailExpanded item={item} calcItem={calcItem} />}
+    </>
+  );
+}
+
+function DoThisNextView() {
+  const { data: tpData, loading: tpLoading, error: tpError, refetch } =
+    useApi(`${API}/api/top-performers`, []);
+  const { data: calcData } = useApi(`${API}/api/calculator?system=Korsiki&facility=large`, []);
+  const [expandedId,  setExpandedId]  = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(null);
+
+  const items       = tpData?.items       || [];
+  const maxJobs     = tpData?.max_jobs    ?? 1;
+  const runningJobs = tpData?.running_jobs ?? 0;
+  const freeSlots   = tpData?.free_slots   ?? 0;
+
+  useEffect(() => {
+    if (tpData) setLastRefresh(Math.floor(Date.now() / 1000));
+  }, [tpData]);
+
   const calcMap = useMemo(() => {
     const m = {};
     (calcData?.results || []).forEach(r => { m[r.output_id] = r; });
@@ -329,86 +494,67 @@ function QueuePlannerView({ refreshKey }) {
     </div>
   );
 
+  const slotBarColor = freeSlots > 0 ? '#4cff91' : 'var(--accent)';
+  const nowSec = Math.floor(Date.now() / 1000);
+  const minsAgo = lastRefresh != null ? Math.floor((nowSec - lastRefresh) / 60) : null;
+
   return (
-    <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
-      <thead>
-        <tr>
-          <TH align="left">ITEM</TH>
-          <TH>SUPPLY</TH>
-          <TH>ROI</TH>
-          <TH>PROFIT/RUN</TH>
-        </tr>
-      </thead>
-      <tbody>
-        {items.map((item, i) => {
-          const isOpen   = expandedId === item.output_id;
-          const calcItem = calcMap[item.output_id] || null;
-          const roiClr   = roiColor(item.roi);
-          const profClr  = item.net_profit >= 0 ? '#4cff91' : '#ff3b3b';
-          const supplyDays = item.supply_days ?? 0;
-          return (
-            <Fragment key={item.output_id}>
-              <tr
-                className="eve-row-reveal"
-                style={{ animationDelay: `${i * 25}ms`, cursor: 'pointer', background: isOpen ? '#0a0a08' : 'transparent' }}
-                onClick={() => setExpandedId(isOpen ? null : item.output_id)}
-              >
-                <td style={{ padding: '5px 10px', textAlign: 'left', maxWidth: 0, width: '99%' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
-                    {item.output_id && (
-                      <img
-                        src={`https://images.evetech.net/types/${item.output_id}/icon?size=32`}
-                        alt=""
-                        style={{ width: 20, height: 20, flexShrink: 0, opacity: 0.85 }}
-                        onError={e => { e.target.style.display = 'none'; }}
-                      />
-                    )}
-                    <span style={{
-                      fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text)',
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{item.name}</span>
-                    {(item.ownership || []).map(o => <OwnBadge key={o} kind={o} />)}
-                    {item.is_bpo_only && (
-                      <span style={{
-                        display: 'inline-block', padding: '1px 4px', fontSize: 8, letterSpacing: 1,
-                        border: '1px solid rgba(255,204,68,0.5)', background: 'rgba(255,204,68,0.1)',
-                        color: 'rgba(255,204,68,0.8)', borderRadius: 2, lineHeight: 1.6, flexShrink: 0,
-                      }}>BPO</span>
-                    )}
-                    {item.producing_qty > 0 && (
-                      <span style={{
-                        display: 'inline-block', padding: '1px 4px', fontSize: 8, letterSpacing: 1,
-                        border: '1px solid rgba(77,166,255,0.5)', background: 'rgba(77,166,255,0.1)',
-                        color: 'rgba(77,166,255,0.8)', borderRadius: 2, lineHeight: 1.6, flexShrink: 0,
-                      }}>IN PROD</span>
-                    )}
-                    <span style={{ marginLeft: 'auto', fontSize: 9, color: isOpen ? 'var(--accent)' : 'var(--dim)', flexShrink: 0 }}>
-                      {isOpen ? '▲' : '▼'}
-                    </span>
-                  </div>
-                </td>
-                <td style={{ padding: '5px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  <SupplyBar supplyDays={supplyDays} urgency={item.urgency} />
-                </td>
-                <td style={{ padding: '5px 6px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: roiClr, whiteSpace: 'nowrap' }}>
-                  {item.roi != null ? `${item.roi.toFixed(1)}%` : '—'}
-                </td>
-                <td style={{ padding: '5px 10px 5px 6px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: profClr, whiteSpace: 'nowrap' }}>
-                  {fmtISK(item.net_profit)}
-                </td>
-              </tr>
-              {isOpen && (
-                <tr>
-                  <td colSpan={4} style={{ padding: 0 }}>
-                    <QueueDetailExpanded item={item} calcItem={calcItem} />
-                  </td>
-                </tr>
-              )}
-            </Fragment>
-          );
-        })}
-      </tbody>
-    </table>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+
+      {/* Slot status + refresh header */}
+      <div style={{
+        padding: '5px 10px', borderBottom: '1px solid var(--border)', background: '#050505',
+        display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+      }}>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)' }}>SLOTS</span>
+        <div style={{ display: 'flex', gap: 3 }}>
+          {Array.from({ length: Math.max(maxJobs, 1) }).map((_, i) => (
+            <div key={i} style={{
+              width: 10, height: 10, borderRadius: 2,
+              background: i < runningJobs ? '#ff4700' : '#4cff91',
+              border: '1px solid rgba(255,255,255,0.08)',
+            }} title={i < runningJobs ? 'In use' : 'Free'} />
+          ))}
+        </div>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: slotBarColor }}>
+          {freeSlots > 0 ? `${freeSlots} FREE` : 'ALL SLOTS IN USE'}
+        </span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>
+          {runningJobs}/{maxJobs}
+        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+          {minsAgo != null && (
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>
+              {minsAgo === 0 ? 'just now' : `${minsAgo}m ago`}
+            </span>
+          )}
+          <button
+            onClick={refetch}
+            disabled={tpLoading}
+            style={{
+              background: 'transparent', border: '1px solid var(--border)',
+              color: tpLoading ? 'var(--dim)' : 'var(--text)',
+              fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
+              padding: '3px 8px', cursor: tpLoading ? 'default' : 'pointer', borderRadius: 2,
+            }}
+          >{tpLoading ? '⟳ ...' : '⟳ REFRESH'}</button>
+        </div>
+      </div>
+
+      {/* Priority action list */}
+      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+        {items.map((item, idx) => (
+          <QueueActionRow
+            key={item.output_id}
+            item={item}
+            idx={idx}
+            isOpen={expandedId === item.output_id}
+            onToggle={() => setExpandedId(expandedId === item.output_id ? null : item.output_id)}
+            calcItem={calcMap[item.output_id] || null}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -443,7 +589,7 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
         <div style={{ display: 'flex' }}>
           {[
             { key: 'jobs',  label: '◈ Active Jobs'    },
-            { key: 'queue', label: '◈ Queue Planner'  },
+            { key: 'queue', label: '◈ Do This Next'  },
           ].map(({ key, label }) => (
             <button key={key} onClick={() => setView(key)} className={`tab-btn${view === key ? ' active' : ''}`}>
               {label}
@@ -460,7 +606,7 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {view === 'jobs'
           ? <ActiveJobsView data={data} loading={loading} error={error} />
-          : <QueuePlannerView refreshKey={refreshKey} />
+          : <DoThisNextView />
         }
       </div>
     </div>

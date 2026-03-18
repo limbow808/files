@@ -1,10 +1,12 @@
 import { useApi } from '../hooks/useApi';
 import BpFinderPanel from '../components/BpFinderPanel';
-import { useMemo } from 'react';
+import { useState, useMemo, memo } from 'react';
 import { API } from '../App';
 
-export default function BpFinderPage({ refreshKey = 0 }) {
-  const { data: calcData  } = useApi(`${API}/api/calculator`, [refreshKey]);
+function BpFinderPage({ refreshKey = 0 }) {
+  const [listEnabled, setListEnabled] = useState(false);
+  const calcUrl = listEnabled ? `${API}/api/calculator` : null;
+  const { data: calcData, loading: calcLoading } = useApi(calcUrl, [refreshKey, listEnabled]);
   const { data: esiBpData } = useApi(`${API}/api/blueprints/esi`, []);
 
   const esiBpMap = useMemo(() => {
@@ -23,7 +25,12 @@ export default function BpFinderPage({ refreshKey = 0 }) {
       <BpFinderPanel
         calcResults={calcData?.results || []}
         esiBpMap={esiBpMap}
+        listEnabled={listEnabled}
+        listLoading={calcLoading}
+        onLoadList={() => setListEnabled(true)}
       />
     </div>
   );
 }
+
+export default memo(BpFinderPage);

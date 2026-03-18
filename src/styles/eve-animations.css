@@ -51,14 +51,14 @@
    2. WAVE-GLOW TEXT — per-character staggered glow
    ══════════════════════════════════════════════════════════════════════ */
 @keyframes eveWaveGlow {
-  0%, 100% { opacity: 0.25; color: var(--dim);  text-shadow: none; }
-  50%      { opacity: 1;    color: var(--text); text-shadow: 0 0 6px var(--eve-glow-soft); }
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 1;   }
 }
 
 .eve-wave-char {
   display: inline-block;
   animation: eveWaveGlow 1.8s ease-in-out infinite;
-  will-change: opacity, color;
+  will-change: opacity;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -187,7 +187,7 @@
 }
 
 .eve-row-reveal {
-  animation: eveRowReveal 0.35s ease-out both;
+  animation: eveRowReveal 0.18s ease-out both;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -223,8 +223,8 @@
    10. CONNECTION DOT PULSE — enhanced dot animation
    ══════════════════════════════════════════════════════════════════════ */
 @keyframes eveDotPulse {
-  0%, 100% { box-shadow: 0 0 4px currentColor; }
-  50%      { box-shadow: 0 0 10px currentColor, 0 0 20px currentColor; }
+  0%, 100% { transform: scale(1);   opacity: 0.8; }
+  50%      { transform: scale(1.4); opacity: 1;   }
 }
 
 .eve-dot-pulse {
@@ -235,8 +235,8 @@
    11. PROGRESS BAR GLOW — subtle animated glow on progress bars
    ══════════════════════════════════════════════════════════════════════ */
 @keyframes eveBarGlow {
-  0%, 100% { box-shadow: 0 0 4px var(--eve-glow-soft); }
-  50%      { box-shadow: 0 0 8px var(--eve-glow); }
+  0%, 100% { opacity: 0.85; }
+  50%      { opacity: 1;    }
 }
 
 .eve-bar-glow {
@@ -495,9 +495,9 @@
   opacity: 0 !important;
 }
 
-/* ── App reveal: soft opacity fade ── */
+/* ── App reveal: visible immediately, no blocking opacity ── */
 .app-shell.hud-booting {
-  opacity: 0;
+  opacity: 1;
 }
 .app-shell.hud-booted {
   animation: bootAppReveal 1s ease-out forwards;
@@ -508,56 +508,103 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   20. CREST LOADER — floating + cross with sonar ring
+   20. CREST LOADER — scan bar (long fetches) + shimmer text (short loads)
    ══════════════════════════════════════════════════════════════════════ */
 
-/* Arms group: snap-rotate 90° four times per cycle
-   Cycle 2.8s. Each snap ~18% (0.504s), each hold ~20% (0.56s)
-   Steps: 0% hold → 18% snap → 38% hold → 56% snap → 76% hold → 94% snap → 100% */
-@keyframes loaderSnapRotate {
-  0%         { transform: rotate(0deg);   }
-  18%        { transform: rotate(90deg);  }
-  38%        { transform: rotate(90deg);  }
-  56%        { transform: rotate(180deg); }
-  76%        { transform: rotate(180deg); }
-  94%        { transform: rotate(270deg); }
-  100%       { transform: rotate(270deg); }
+/* Bar sweep: glow segment slides across the indeterminate track */
+@keyframes crestBarSweep {
+  0%   { left: -55%; }
+  100% { left: 120%; }
 }
 
-/* Sonar ring: expand from center, fade out */
-@keyframes loaderRing {
-  0%   { transform: translate(-50%, -50%) scale(0.5); opacity: 0.4; }
-  100% { transform: translate(-50%, -50%) scale(1.6); opacity: 0;   }
-}
-
-/* Label cursor blink */
-@keyframes loaderCursorBlink {
+/* Bar label cursor blink */
+@keyframes crestBarCursor {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
 }
 
-/* Label fade in sync with rotation (gentle breath) */
-@keyframes loaderLabelBreath {
-  0%, 100% { opacity: 0.7; }
-  50%       { opacity: 1;   }
+/* Shimmer: highlight sweeps across text left→right */
+@keyframes crestTextShimmer {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
 }
 
-.crest-loader__arms {
-  animation: loaderSnapRotate 2.8s cubic-bezier(0.77, 0, 0.175, 1) infinite;
+/* ── Bar loader ─────────────────────────────────────────────────────── */
+.crest-bar-loader {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
 }
 
-.crest-loader__ring {
-  animation: loaderRing 2.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+.crest-bar-loader__header {
+  display: flex;
+  align-items: center;
+  gap: 3px;
 }
 
-.crest-loader__label {
+.crest-bar-loader__label {
   font-family: var(--mono), monospace;
-  color: #666660;
-  letter-spacing: 0.25em;
+  color: var(--accent);
+  letter-spacing: 0.3em;
   text-transform: uppercase;
-  animation: loaderLabelBreath 2.8s ease-in-out infinite;
 }
 
-.crest-loader__cursor {
-  animation: loaderCursorBlink 1s step-end infinite;
+.crest-bar-loader__cursor {
+  font-family: var(--mono), monospace;
+  font-size: 0.9em;
+  color: var(--accent);
+  animation: crestBarCursor 1s step-end infinite;
+}
+
+.crest-bar-loader__track {
+  position: relative;
+  height: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.crest-bar-loader__sweep {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 50%;
+  left: -55%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 71, 0, 0.25) 20%,
+    rgba(255, 71, 0, 0.85) 48%,
+    #ff6a28 50%,
+    rgba(255, 71, 0, 0.85) 52%,
+    rgba(255, 71, 0, 0.25) 80%,
+    transparent 100%
+  );
+  animation: crestBarSweep 1.9s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* ── Shimmer text loader ─────────────────────────────────────────────── */
+.crest-shimmer-loader {
+  display: inline-block;
+  font-family: var(--mono), monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.25em;
+  user-select: none;
+}
+
+.crest-shimmer-loader__text {
+  background: linear-gradient(
+    90deg,
+    #3a3a36 0%,
+    #3a3a36 32%,
+    #b0b09a 44%,
+    #e8e8d8 50%,
+    #b0b09a 56%,
+    #3a3a36 68%,
+    #3a3a36 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: crestTextShimmer 2.2s linear infinite;
 }

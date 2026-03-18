@@ -11,10 +11,11 @@ import { useState, useEffect, useCallback } from 'react';
  */
 export function useApi(url, deps = []) {
   const [data,    setData]    = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!!url);
   const [error,   setError]   = useState(false);
 
   const fetchData = useCallback(async () => {
+    if (!url) { setData(null); setLoading(false); return; }
     setLoading(true);
     setError(false);
     try {

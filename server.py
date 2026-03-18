@@ -86,6 +86,12 @@ def _scan_is_fresh() -> bool:
 _calc_cache: dict = {}
 CALC_CACHE_TTL = 1800  # 30 minutes
 
+# Dedup guard — prevents duplicate full-compute runs for the same cache key.
+# If a thread is already computing key X, new arrivals wait for it instead of
+# spawning a parallel compute (which is what maxed the CPU on page load).
+_calc_computing:      set            = set()
+_calc_computing_lock: threading.Lock = threading.Lock()
+
 # ── Skill name cache (type_id → skill name, loaded once from Fuzzwork CSV) ───
 _skill_id_names: dict[int, str] = {}
 _SKILL_NAMES_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skill_names.json")
@@ -586,6 +592,23 @@ def api_calculator():
         if _calc_is_fresh(cache_key):
             return jsonify(_calc_cache[cache_key])
 
+        # ── Dedup: if another thread is already computing this key, wait ──────
+        with _calc_computing_lock:
+            already_running = cache_key in _calc_computing
+            if not already_running:
+                _calc_computing.add(cache_key)
+        if already_running:
+            deadline = time.time() + 300
+            while cache_key in _calc_computing and not _calc_is_fresh(cache_key):
+                if time.time() > deadline:
+                    break
+                time.sleep(0.5)
+            if _calc_is_fresh(cache_key):
+                return jsonify(_calc_cache[cache_key])
+            # Timed out or failed — become the new worker
+            with _calc_computing_lock:
+                _calc_computing.add(cache_key)
+
         # ── Resolve SCI for the requested system ──────────────────────────────
         sci = _resolve_sci(system_param)
 
@@ -863,6 +886,11 @@ def api_calculator():
             "facility":     facility_cfg,
         }
         _calc_cache[cache_key] = payload
+        # Evict oldest entries — keep only the 8 most-recently-computed keys
+        if len(_calc_cache) > 8:
+            oldest_keys = sorted(_calc_cache, key=lambda k: _calc_cache[k].get("generated_at", 0))
+            for _old in oldest_keys[:len(_calc_cache) - 8]:
+                del _calc_cache[_old]
         # Signal done to all SSE subscribers
         _broadcast_progress(cache_key, {"stage": "done", "msg": "Ready", "done": total_bps, "total": total_bps})
         return jsonify(payload)
@@ -871,6 +899,9 @@ def api_calculator():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+    finally:
+        with _calc_computing_lock:
+            _calc_computing.discard(cache_key)
 
 
 @app.route("/api/top-performers", methods=["GET"])
@@ -888,6 +919,24 @@ def api_top_performers():
     ESI orders and industry jobs caches for live signals.
     """
     import math, sqlite3 as _sq
+
+    # ── Auto-refresh ESI blueprint cache if stale ─────────────────────────────
+    # The BP cache is only refreshed when BpFinder is visited; top-performers
+    # reads it directly so needs to ensure it's current.
+    if not _ESI_BP_CACHE or (time.time() - _ESI_BP_CACHE_TS) >= _ESI_BP_TTL:
+        try:
+            api_blueprints_esi()
+        except Exception as _e:
+            print(f"[top-performers] BP cache refresh failed: {_e}")
+
+    # ── Auto-refresh assets cache if stale ───────────────────────────────────
+    # Assets contain BPCs tracked via is_blueprint_copy; refresh so we pick
+    # up BPCs that the ESI blueprints endpoint may not have returned.
+    if not _ASSETS_CACHE or (time.time() - _ASSETS_CACHE_TS) >= _ASSETS_TTL:
+        try:
+            api_assets()
+        except Exception as _e:
+            print(f"[top-performers] Assets cache refresh failed: {_e}")
 
     # ── Find freshest calc cache entry ────────────────────────────────────────
     best_key: str | None = None
@@ -919,6 +968,12 @@ def api_top_performers():
                 personal_bpc_bp_ids.add(tid)
         else:
             corp_bp_ids.add(tid)
+
+    # Also treat any blueprint type found as a BPC in the assets cache as a personal BPC.
+    # This catches BPCs the ESI blueprints endpoint may miss (e.g. location_flag edge cases).
+    for tid in _ASSETS_CACHE.get("bpc_type_ids", []):
+        personal_bpc_bp_ids.add(tid)
+        personal_bpo_bp_ids.discard(tid)  # asset BPCs are never BPOs
 
     corp_bp_ids.update(CORP_BPO_TYPE_IDS)
     personal_bp_ids = personal_bpo_bp_ids | personal_bpc_bp_ids
@@ -952,6 +1007,21 @@ def api_top_performers():
 
     personal_output_ids = personal_bpo_output_ids | personal_bpc_output_ids
     owned_output_ids    = personal_output_ids | corp_output_ids
+
+    # ── Load copy times (blueprinting activityID=5) ─────────────────────────────────
+    copy_time_by_output: dict[int, int] = {}
+    if owned_output_ids:
+        try:
+            _ct_db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+            _ct_ph = ",".join("?" * len(owned_output_ids))
+            for _ct_row in _ct_db.execute(
+                f"SELECT output_id, copy_time_secs FROM blueprints WHERE output_id IN ({_ct_ph})",
+                list(owned_output_ids),
+            ).fetchall():
+                copy_time_by_output[_ct_row[0]] = int(_ct_row[1] or 0)
+            _ct_db.close()
+        except Exception:
+            pass  # Column not yet seeded — frontend uses 68400s fallback
 
     # ── Live signal 1: sell order inventory (supply coverage) ─────────────────
     # Aggregate volume_remain per type_id across all open sell orders
@@ -1006,12 +1076,11 @@ def api_top_performers():
             urgency = urgency * max(0.2, 1.0 - days_in_flight / URGENCY_HORIZON_DAYS)
 
         # ── BPO copy penalty ─────────────────────────────────────────────────
-        # If only BPO available (no BPC in hand), manufacturing requires a copy first.
-        # Copy takes time + ISK that doesn't appear in the calc estimate.
-        is_bpo_only = (out_id in personal_bpo_output_ids and out_id not in personal_bpc_output_ids)
-        is_corp_bp  = out_id in corp_output_ids
-        # Corp BPs are BPOs but assumed always copyable/ready via corp hanger → no penalty
-        copy_penalty = BPO_COPY_PENALTY if (is_bpo_only and not is_corp_bp) else 1.0
+        # needs_copy = no personal BPC in hand — must copy before manufacturing,
+        # regardless of whether the BPO is personal or from corp.
+        needs_copy  = out_id not in personal_bpc_output_ids
+        is_corp_bp  = out_id in corp_output_ids and out_id not in personal_output_ids
+        copy_penalty = BPO_COPY_PENALTY if needs_copy else 1.0
 
         # ── Capital lock penalty: penalise very slow-selling items ────────────
         days_to_sell = 0
@@ -1030,6 +1099,21 @@ def api_top_performers():
         if out_id in corp_output_ids:
             ownership.append("corp")
 
+        # ── Material shortfall vs hangar inventory ───────────────────────────
+        _assets  = _ASSETS_CACHE.get("assets", {})
+        _rec_r   = r.get("recommended_runs")
+        rec_runs = int(_rec_r.get("runs", 1)) if isinstance(_rec_r, dict) else 1
+        duration_secs = int(r.get("duration", 0) or 0)
+        mats_ready            = True
+        missing_mats_est_cost = 0.0
+        for _m in r.get("material_breakdown", []):
+            _needed = (_m.get("quantity") or 0) * rec_runs
+            _have   = _assets.get(_m["type_id"], _assets.get(str(_m["type_id"]), 0)) or 0
+            if _have < _needed:
+                mats_ready = False
+                _unit = (_m.get("line_cost") or 0) / max(1, _m.get("quantity") or 1)
+                missing_mats_est_cost += _unit * (_needed - _have)
+
         candidates.append({
             "name":              r["name"],
             "output_id":         out_id,
@@ -1040,21 +1124,53 @@ def api_top_performers():
             "isk_per_hour":      round(r.get("isk_per_hour", 0)),
             "avg_daily_volume":  round(vol, 1),
             "recommended_runs":  r.get("recommended_runs"),
+            "rec_runs":          rec_runs,
+            "duration_secs":     duration_secs,
             "ownership":         ownership,
             # ── live signals exposed to frontend ──
             "supply_qty":        sell_qty,
             "supply_days":       round(supply_days, 1),
             "producing_qty":     producing_qty,
-            "is_bpo_only":       is_bpo_only and not is_corp_bp,
+            "is_bpo_only":       needs_copy and not is_corp_bp,
             "urgency":           round(urgency, 2),
+            "needs_copy":        needs_copy,
+            "copy_time_secs":    copy_time_by_output.get(out_id, 0) if needs_copy else 0,
+            "mats_ready":        mats_ready,
+            "missing_mats_est_cost": round(missing_mats_est_cost),
             "_score":            score,
         })
 
     candidates.sort(key=lambda x: x["_score"], reverse=True)
 
+    # ── Slot timeline from active ESI manufacturing jobs ──────────────────────
+    mfg_end_times = sorted(
+        int(j["end_ts"]) for j in _ESI_JOBS_CACHE.get("jobs", [])
+        if j.get("activity_id") in (1, 9, 11) and j.get("end_ts", 0) > now_ts
+    )
+    running_mfg  = len(mfg_end_times)
+    max_jobs     = _get_max_jobs(running_fallback=running_mfg)
+    free_slots   = max(0, max_jobs - running_mfg)
+    slot_free_at = mfg_end_times[:max_jobs]
+
+    # ── Assign action_type + start_at per ranked item ─────────────────────────
     items = []
+    mfg_queue_pos = 0
     for r in candidates[:20]:
         r.pop("_score", None)
+        if r.get("needs_copy"):
+            r["action_type"]    = "copy_first"
+            r["start_at"]       = now_ts
+            r["manufacture_at"] = now_ts + (r.get("copy_time_secs") or 68400)
+        else:
+            r["action_type"] = "manufacture"
+            if mfg_queue_pos < free_slots:
+                r["start_at"] = now_ts
+            elif (mfg_queue_pos - free_slots) < len(slot_free_at):
+                r["start_at"] = int(slot_free_at[mfg_queue_pos - free_slots])
+            else:
+                r["start_at"] = now_ts
+            r["manufacture_at"] = r["start_at"]
+            mfg_queue_pos += 1
         items.append(r)
 
     return jsonify({
@@ -1062,6 +1178,10 @@ def api_top_performers():
         "generated_at": int(best_ts),
         "total_owned":  len(candidates),
         "cache_key":    best_key,
+        "max_jobs":     max_jobs,
+        "running_jobs": running_mfg,
+        "free_slots":   free_slots,
+        "slot_free_at": slot_free_at,
     })
 
 
@@ -2248,6 +2368,11 @@ _ESI_JOBS_TTL             = 120   # 2 min
 _QUEUE_SUMMARY_CACHE:    dict  = {}
 _QUEUE_SUMMARY_CACHE_TS: float = 0
 _QUEUE_SUMMARY_TTL             = 120  # 2 min
+
+# max_jobs (character skill fetch) cached longer — skills barely change
+_MAX_JOBS_CACHE:    int   = 0
+_MAX_JOBS_CACHE_TS: float = 0.0
+_MAX_JOBS_TTL             = 1800  # 30 min
 _TYPE_VOLUME_CACHE: dict       = {}   # type_id → packaged volume m³, persistent until restart
 
 _ESI_ORDERS_CACHE:    dict  = {}
@@ -2489,11 +2614,15 @@ def api_assets():
         from collections import defaultdict
         inventory: dict = defaultdict(int)
 
+        bpc_type_ids: set = set()  # blueprint type_ids that exist as BPCs in character assets
+
         with ThreadPoolExecutor(max_workers=max(1, len(auth_headers))) as pool:
             futures = [pool.submit(_fetch_char_assets, cid, h) for cid, h in auth_headers]
             for f in as_completed(futures):
                 for item in f.result():
                     inventory[item["type_id"]] += item["quantity"]
+                    if item.get("is_blueprint_copy"):
+                        bpc_type_ids.add(item["type_id"])
 
         type_ids = list(inventory.keys())
         names: dict = {}
@@ -2532,6 +2661,7 @@ def api_assets():
         _ASSETS_CACHE = {
             "assets":    dict(inventory),
             "names":     {str(k): v for k, v in names.items()},
+            "bpc_type_ids": list(bpc_type_ids),
             "cached_at": int(time.time()),
         }
         _ASSETS_CACHE_TS = time.time()
@@ -2969,6 +3099,49 @@ def api_craft_stats():
         return jsonify({"error": str(e)}), 200
 
 
+# ── Shared max manufacturing slots (cached 30 min, used by queue-summary + top-performers) ──
+def _get_max_jobs(running_fallback: int = 0) -> int:
+    """Return sum of manufacturing slots across all characters, refreshed every 30 min."""
+    global _MAX_JOBS_CACHE, _MAX_JOBS_CACHE_TS
+    if _MAX_JOBS_CACHE > 0 and (time.time() - _MAX_JOBS_CACHE_TS) < _MAX_JOBS_TTL:
+        return _MAX_JOBS_CACHE
+    MASS_PROD     = 3387
+    ADV_MASS_PROD = 24625
+    max_jobs = 0
+    try:
+        import requests as _req
+        from characters import get_all_auth_headers
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fetch_slots(cid, headers):
+            try:
+                r = _req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/skills/",
+                    headers=headers, timeout=10,
+                )
+                if not r.ok:
+                    return 1
+                skill_map = {s["skill_id"]: s["trained_skill_level"] for s in r.json().get("skills", [])}
+                return 1 + skill_map.get(MASS_PROD, 0) + skill_map.get(ADV_MASS_PROD, 0)
+            except Exception:
+                return 1
+
+        auth_headers = get_all_auth_headers()
+        if auth_headers:
+            with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+                for slots in pool.map(lambda x: _fetch_slots(*x), auth_headers):
+                    max_jobs += slots
+        else:
+            max_jobs = max(1, running_fallback + 1)
+    except Exception:
+        max_jobs = max(1, running_fallback + 1)
+
+    if max_jobs > 0:
+        _MAX_JOBS_CACHE    = max_jobs
+        _MAX_JOBS_CACHE_TS = time.time()
+    return max_jobs
+
+
 # ── Queue Summary (footer stats) ───────────────────────────────────────────────
 @app.route("/api/queue-summary", methods=["GET"])
 def api_queue_summary():
@@ -2983,7 +3156,16 @@ def api_queue_summary():
         from flask import request as flask_request
         force = flask_request.args.get("force", "0") == "1"
         if not force and _QUEUE_SUMMARY_CACHE and (time.time() - _QUEUE_SUMMARY_CACHE_TS) < _QUEUE_SUMMARY_TTL:
-            return jsonify(_QUEUE_SUMMARY_CACHE)
+            # Return cached stats but always recompute running_jobs+free_slots
+            # from the live jobs cache so the footer never shows stale counts.
+            now_ts       = int(time.time())
+            jobs         = _ESI_JOBS_CACHE.get("jobs", [])
+            running_jobs = sum(1 for j in jobs if j.get("end_ts", 0) > now_ts)
+            max_j        = _QUEUE_SUMMARY_CACHE.get("max_jobs", 1)
+            patched      = dict(_QUEUE_SUMMARY_CACHE)
+            patched["running_jobs"] = running_jobs
+            patched["free_slots"]   = max(0, max_j - running_jobs)
+            return jsonify(patched)
 
         import requests as req
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2994,35 +3176,8 @@ def api_queue_summary():
         jobs = _ESI_JOBS_CACHE.get("jobs", [])
         running_jobs = sum(1 for j in jobs if j.get("end_ts", 0) > now_ts)
 
-        # ── 2. Max manufacturing slots (sum across characters) ─────────────────
-        MASS_PROD     = 3387
-        ADV_MASS_PROD = 24625
-        max_jobs = 0
-        try:
-            from characters import get_all_auth_headers
-
-            def _fetch_slots(cid, headers):
-                try:
-                    r = req.get(
-                        f"https://esi.evetech.net/latest/characters/{cid}/skills/",
-                        headers=headers, timeout=10,
-                    )
-                    if not r.ok:
-                        return 1
-                    skill_map = {s["skill_id"]: s["trained_skill_level"] for s in r.json().get("skills", [])}
-                    return 1 + skill_map.get(MASS_PROD, 0) + skill_map.get(ADV_MASS_PROD, 0)
-                except Exception:
-                    return 1
-
-            auth_headers = get_all_auth_headers()
-            if auth_headers:
-                with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
-                    for slots in pool.map(lambda x: _fetch_slots(*x), auth_headers):
-                        max_jobs += slots
-            else:
-                max_jobs = 1
-        except Exception:
-            max_jobs = max(1, running_jobs + 1)
+        # ── 2. Max manufacturing slots (skill-cached, 30 min TTL) ─────────────
+        max_jobs = _get_max_jobs(running_fallback=running_jobs)
 
         # ── 3. Queue planner items (owned BPs, profitable, from calc cache) ────
         best_key = max(
@@ -4000,29 +4155,43 @@ if __name__ == "__main__":
                 print(f"  [prewarm] Skill names download failed: {_e}")
 
         # ── Sub-task 2: scan + calculator cache warmup ────────────────────────
-        def _warmup_caches():
+        def _warmup_scan():
+            """Phase 1 — fast, blocks the server-ready signal."""
             try:
                 with app.app_context():
                     client = app.test_client()
                     client.get("/api/scan")
-                    client.get("/api/calculator?system=Korsiki&facility=large")
                 print("  [prewarm] Scan cache ready.")
             except Exception as _e:
                 print(f"  [prewarm] Scan warmup failed: {_e}")
 
+        def _warmup_calculator():
+            """Phase 2 — heavy; runs AFTER server is marked ready so boot screen clears first."""
+            try:
+                with app.app_context():
+                    client = app.test_client()
+                    client.get("/api/calculator?system=Korsiki&facility=large")
+                print("  [prewarm] Calculator cache ready.")
+            except Exception as _e:
+                print(f"  [prewarm] Calculator warmup failed: {_e}")
+
         print("  [prewarm] Background warmup starting (skill names + scan cache in parallel)...")
         _skill_t   = threading.Thread(target=_load_skill_names, daemon=True)
-        _warmup_t  = threading.Thread(target=_warmup_caches,    daemon=True)
+        _scan_t    = threading.Thread(target=_warmup_scan,      daemon=True)
         _skill_t.start()
-        _warmup_t.start()
-        # Scan warmup MUST complete before we signal ready.
-        # Skill download is capped at 60 s so a slow network never blocks indefinitely.
+        _scan_t.start()
+        # Signal ready after scan + skill names only.
+        # Calculator is heavy (~30s) — running it before signalling ready caused
+        # the boot screen black-screen hang. It now pre-warms in the background
+        # after the UI has loaded, and the dedup lock prevents double-computation
+        # if the user opens the Calculator tab while warmup is still running.
         _skill_t.join(timeout=60)
-        _warmup_t.join()
+        _scan_t.join()
 
         _server_ready = True
         _warmup_done.set()
         print("  [prewarm] Server ready — /api/ready will return true.")
+        threading.Thread(target=_warmup_calculator, daemon=True, name="calc-prewarm").start()
 
     threading.Thread(target=_prewarm, daemon=True, name="prewarm").start()
 

@@ -1,4 +1,4 @@
-import { useState, useRef, Fragment, useMemo } from 'react';
+import { useState, useRef, Fragment, useMemo, useEffect, memo } from 'react';
 import { useApi } from '../hooks/useApi';
 import { useCalcProgress } from '../hooks/useCalcProgress';
 import { fmtISK, fmtVol, fmtDuration, toggleSet, roiTier, makeRoiScale } from '../utils/fmt';
@@ -27,6 +27,14 @@ const FACILITY_OPTIONS = [
 
 const MARKET_HUBS = ['jita', 'amarr', 'dodixie', 'rens', 'hek'];
 
+// Liquidity tier colour for avg_daily_volume
+function liqColor(vol) {
+  if (!vol || vol < 10)  return '#cc2200';
+  if (vol < 100)         return '#cc5500';
+  if (vol < 500)         return '#ccaa00';
+  return 'var(--text)';
+}
+
 const CALC_COLS = [
   { key: 'name',             label: 'ITEM',     get: r => r.name,                                    align: 'left'  },
   { key: 'tech',             label: 'TECH',     get: r => r.tech || '',                              align: 'right' },
@@ -46,7 +54,7 @@ const CALC_COLS = [
   { key: 'isk_per_m3',       label: 'ISK/M³',   get: r => r.isk_per_m3 || 0,                         align: 'right' },
 ];
 
-export default function CalculatorPage({ refreshKey = 0 }) {
+function CalculatorPage({ refreshKey = 0 }) {
   const [bpFilters,   setBpFilters]   = useState(new Set(BP_FILTERS));
   const [typeFilters, setTypeFilters] = useState(new Set(TYPE_FILTERS));
   const [techFilters, setTechFilters] = useState(new Set(TECH_FILTERS));
@@ -67,7 +75,8 @@ export default function CalculatorPage({ refreshKey = 0 }) {
   const [selectedIdx,  setSelectedIdx]  = useState(null);
   const [showEsiBps,   setShowEsiBps]   = useState(false);
   const [checkedIds,   setCheckedIds]   = useState(new Set());
-  const [retryKey,     setRetryKey]     = useState(0);
+  const [retryKey,            setRetryKey]            = useState(0);
+  const [showBadInvestments, setShowBadInvestments] = useState(false);
 
   function toggleCheck(id, e) {
     e.stopPropagation();
@@ -113,51 +122,57 @@ export default function CalculatorPage({ refreshKey = 0 }) {
     else { setSortKey(key); setSortDir(-1); }
   }
 
-  const baseResults = (calcData?.results || []).filter(r => {
-    if (search && !r.name.toLowerCase().includes(search.toLowerCase())) return false;
-    if (!techFilters.has(r.tech     || 'I'))     return false;
-    if (!sizeFilters.has(r.size     || 'U'))     return false;
-    if (!typeFilters.has(r.category || 'Other')) return false;
-
-    // BP ownership filter — classify each result against the ESI BP map
-    const bpEntry  = esiBpMap[r.name?.toLowerCase()] ?? null;
-    const isOwned  = bpEntry?.hasPersonal ?? false;   // personally owned (not just corp)
-    const hasBPO   = bpEntry?.hasBPO  ?? false;
-    const hasBPC   = bpEntry?.hasBPC  ?? false;
-    const hasCorp  = corpBpIds.has(r.output_id);  // corp holds this BP
-
-    // "Not Owned" = neither personally owned nor in the corp hangar
-    const notOwned = !isOwned && !hasCorp;
-
-    // If ALL bp chips are active → show everything (no filtering)
+  const results = useMemo(() => {
     const allBpOn = BP_FILTERS.every(f => bpFilters.has(f));
-    if (!allBpOn) {
-      let passes = false;
-      if (bpFilters.has('Personal')  && isOwned)   passes = true;
-      if (bpFilters.has('Corporate') && hasCorp)    passes = true;
-      if (bpFilters.has('Not Owned') && notOwned)   passes = true;
-      if (bpFilters.has('BPOs')      && hasBPO)     passes = true;
-      if (bpFilters.has('BPCs')      && hasBPC)     passes = true;
-      if (!passes) return false;
-    }
+    const col = CALC_COLS.find(c => c.key === sortKey);
+    const mv  = minVolume ? parseFloat(minVolume) : NaN;
 
-    if (minVolume) {
-      const mv = parseFloat(minVolume);
+    const filtered = (calcData?.results || []).filter(r => {
+      if (search && !r.name.toLowerCase().includes(search.toLowerCase())) return false;
+      if (!techFilters.has(r.tech     || 'I'))     return false;
+      if (!sizeFilters.has(r.size     || 'U'))     return false;
+      if (!typeFilters.has(r.category || 'Other')) return false;
+
+      if (!allBpOn) {
+        const bpEntry  = esiBpMap[r.name?.toLowerCase()] ?? null;
+        const isOwned  = bpEntry?.hasPersonal ?? false;
+        const hasBPO   = bpEntry?.hasBPO  ?? false;
+        const hasBPC   = bpEntry?.hasBPC  ?? false;
+        const hasCorp  = corpBpIds.has(r.output_id);
+        const notOwned = !isOwned && !hasCorp;
+        let passes = false;
+        if (bpFilters.has('Personal')  && isOwned)   passes = true;
+        if (bpFilters.has('Corporate') && hasCorp)    passes = true;
+        if (bpFilters.has('Not Owned') && notOwned)   passes = true;
+        if (bpFilters.has('BPOs')      && hasBPO)     passes = true;
+        if (bpFilters.has('BPCs')      && hasBPC)     passes = true;
+        if (!passes) return false;
+      }
+
       if (!isNaN(mv) && (r.avg_daily_volume || 0) < mv) return false;
+      return true;
+    });
+
+    return [...filtered].sort((a, b) => {
+      const av = col ? col.get(a) : 0;
+      const bv = col ? col.get(b) : 0;
+      if (typeof av === 'string') return sortDir * av.localeCompare(bv);
+      return sortDir * ((av || 0) - (bv || 0));
+    });
+  }, [calcData, search, techFilters, sizeFilters, typeFilters, bpFilters, corpBpIds, esiBpMap, minVolume, sortKey, sortDir]);
+
+  const [goodResults, badResults] = useMemo(() => {
+    const good = [], bad = [];
+    for (const r of results) {
+      ((r.net_profit || 0) > 0 ? good : bad).push(r);
     }
-    return true;
-  });
+    return [good, bad];
+  }, [results]);
 
-  const col     = CALC_COLS.find(c => c.key === sortKey);
-  const results = [...baseResults].sort((a, b) => {
-    const av = col ? col.get(a) : 0;
-    const bv = col ? col.get(b) : 0;
-    if (typeof av === 'string') return sortDir * av.localeCompare(bv);
-    return sortDir * ((av || 0) - (bv || 0));
-  });
+  useEffect(() => setShowBadInvestments(false), [results]);
 
-  // Build dynamic colour scale from the currently visible (filtered) results
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const visibleResults = showBadInvestments ? results : goodResults;
+
   const roiScale = useMemo(() => makeRoiScale(results.map(r => r.roi || 0)), [results]);
 
   const checkedItems = results.filter(r => checkedIds.has(r.output_id));
@@ -312,7 +327,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
           </thead>
           <tbody>
             {loading ? null : (
-              results.map((r, i) => {
+              visibleResults.map((r, i) => {
                 const isSel    = selectedIdx === i;
                 const isChk    = checkedIds.has(r.output_id);
                 const qty      = Math.max(1, parseInt(getOverrideRaw(r.output_id, 'qty',  r.output_qty), 10) || 1);
@@ -361,7 +376,12 @@ export default function CalculatorPage({ refreshKey = 0 }) {
                       <td>{r.me_level ?? '—'}</td>
                       <td>{r.te_level ?? '—'}</td>
                       <td style={{ color: 'var(--dim)' }}>{fmtDuration(r.duration)}</td>
-                      <td style={{ color: 'var(--dim)' }}>{fmtVol(r.avg_daily_volume)}</td>
+                      <td style={{ color: liqColor(r.avg_daily_volume) }}>
+                        {r.avg_daily_volume ? fmtVol(r.avg_daily_volume) : '—'}
+                        {(r.avg_daily_volume || 0) > 0 && (r.avg_daily_volume || 0) < 10 && (
+                          <span style={{ marginLeft: 5, fontSize: 8, letterSpacing: 1, color: '#cc2200', opacity: 0.85 }}>LOW</span>
+                        )}
+                      </td>
                       <td onClick={e => e.stopPropagation()}>
                         <input className="inline-num" type="number" min="1"
                           value={getOverrideRaw(r.output_id, 'qty', r.output_qty)}
@@ -398,6 +418,22 @@ export default function CalculatorPage({ refreshKey = 0 }) {
             </div>
           </div>
         )}
+        {!loading && !showBadInvestments && badResults.length > 0 && (
+          <div
+            onClick={() => setShowBadInvestments(true)}
+            style={{
+              padding: '10px 16px', textAlign: 'center', cursor: 'pointer',
+              borderTop: '1px solid var(--border)', color: 'var(--dim)',
+              fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2,
+              background: '#050505',
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = 'var(--text)'}
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--dim)'}
+          >
+            ▼ SHOW {badResults.length} UNPROFITABLE ITEMS
+          </div>
+        )}
+
         {!loading && !error && results.length === 0 && calcData && (
           <div style={{ padding: '32px 20px', color: 'var(--dim)', textAlign: 'center', letterSpacing: 2, fontSize: 11 }}>
             NO ITEMS MATCH CURRENT FILTERS
@@ -427,7 +463,7 @@ export default function CalculatorPage({ refreshKey = 0 }) {
               </div>
             ) : (
               <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8 }}>
-                <Loader size="md" label="LOADING" />
+                <Loader size="md" variant="shimmer" label="LOADING" />
               </div>
             )}
           </div>
@@ -438,3 +474,5 @@ export default function CalculatorPage({ refreshKey = 0 }) {
     </div>
   );
 }
+
+export default memo(CalculatorPage);

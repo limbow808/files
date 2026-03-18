@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, memo } from 'react';
 import { useApi } from '../hooks/useApi';
 import { fmtISK } from '../utils/fmt';
 import Loader from '../components/shared/Loader';
@@ -20,7 +20,7 @@ function KpiCard({ label, value, sub, color = 'var(--text)' }) {
   );
 }
 
-export default function CraftLogPage() {
+function CraftLogPage() {
   const [days, setDays] = useState(90);
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
@@ -160,7 +160,7 @@ export default function CraftLogPage() {
 
             {statsLoading && !statsData && (
               <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}>
-                <Loader size="md" label="FETCHING STATS" />
+                <Loader size="md" variant="bar" label="FETCHING STATS" />
               </div>
             )}
 
@@ -242,7 +242,7 @@ export default function CraftLogPage() {
 
             {logLoading && !logData && (
               <div style={{ padding: 20, display: 'flex', justifyContent: 'center' }}>
-                <Loader size="md" label="FETCHING LOG" />
+                <Loader size="md" variant="bar" label="FETCHING LOG" />
               </div>
             )}
 
@@ -306,3 +306,5 @@ export default function CraftLogPage() {
     </div>
   );
 }
+
+export default memo(CraftLogPage);

@@ -58,7 +58,7 @@ const LIST_COLS = [
  *   calcResults  - array from /api/calculator (already loaded by parent)
  *   esiBpMap     - { lowercaseName: {hasBPO, hasBPC} } from parent
  */
-export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
+export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEnabled = false, listLoading = false, onLoadList = null }) {
   const [listSortKey,  setListSortKey]  = useState(() => lsGet('bpf_listSort', 'net_profit'));
   const [scanSortKey,  setScanSortKey]  = useState(() => lsGet('bpf_scanSort', 'adj_net_profit'));
   const [region,       setRegion]       = useState(10000002);
@@ -170,7 +170,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
     };
   }, [region]);
 
-  const notReady = calcResults.length === 0;
+  const notReady = !listEnabled;
 
   const filteredScanResults = useMemo(() => {
     if (!scanResults) return [];
@@ -225,12 +225,22 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
                 style={{ fontSize: 10 }}
               >SCAN RESULTS ({scanResults.matched})</button>
             )}
+            {/* Load list button */}
+            {!listEnabled && (
+              <button
+                className="chip active"
+                onClick={onLoadList}
+                title="Load profitable items without an owned blueprint"
+              >
+                LOAD LIST
+              </button>
+            )}
             {/* Scan button */}
             <button
               className="chip"
               onClick={runScan}
-              disabled={scanState === 'scanning' || notReady}
-              title={notReady ? 'Load Calculator data first' : `Scan ESI contracts in ${REGION_OPTIONS.find(r => r.id === region)?.name}`}
+              disabled={scanState === 'scanning'}
+              title={`Scan ESI contracts in ${REGION_OPTIONS.find(r => r.id === region)?.name}`}
               style={{
                 background: scanState === 'scanning' ? 'rgba(255,71,0,0.15)' : undefined,
                 borderColor: scanState === 'scanning' ? 'var(--accent)' : undefined,
@@ -535,9 +545,22 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {} }) {
         )}
 
         {/* ── Normal list (shown when not in scan view) ───────────────────── */}
-        {!scanView && notReady && (
-          <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
-            WAITING FOR MARKET DATA — prices load automatically on the Calculator tab
+        {!scanView && !listEnabled && (
+          <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
+            {listLoading
+              ? 'LOADING CALCULATOR DATA…'
+              : <>
+                  LIST NOT LOADED
+                  <br />
+                  <button
+                    className="btn"
+                    onClick={onLoadList}
+                    style={{ marginTop: 14, fontSize: 11 }}
+                  >
+                    LOAD LIST
+                  </button>
+                </>
+            }
           </div>
         )}
         {!scanView && !notReady && unownedItems.length === 0 && (

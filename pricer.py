@@ -32,7 +32,7 @@ JITA_STATION_ID  = 60003760   # Jita 4-4 Caldari Navy Assembly Plant
 ESI_BASE         = "https://esi.evetech.net/latest"
 
 CACHE_DB         = os.path.join(os.path.dirname(__file__), "market_cache.db")
-CACHE_TTL        = 300        # Refresh market dump every 5 minutes (during normal operation)
+CACHE_TTL        = 600        # Refresh market dump every 10 minutes (was 5 — halves ESI + CPU load)
 STARTUP_TTL      = 1800       # On the first call after a restart, reuse data up to 30 min old
 HISTORY_TTL      = 21600      # Refresh volume history every 6 hours (was 1 hour — data doesn't change that fast)
 
@@ -148,6 +148,7 @@ def _fetch_all_orders():
 
     # Write to DB — replace all existing orders
     conn = _get_conn()
+    conn.execute("PRAGMA journal_mode=WAL")   # WAL allows concurrent reads while we write
     cur  = conn.cursor()
     cur.execute("DELETE FROM market_orders")
     cur.executemany(

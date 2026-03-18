@@ -12,11 +12,14 @@ export const API = '';
 const AUTO_REFRESH_MS = 5 * 60 * 1000;
 
 export default function App() {
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
-  const [activeTab, setActiveTab]   = useState('CREST');
-  const [booted, setBooted]         = useState(false);
-  const [bootAnim, setBootAnim]     = useState(''); // '' | 'booting' | 'booted'
+  const [refreshKey,   setRefreshKey]   = useState(0);
+  const [refreshing,   setRefreshing]   = useState(false);
+  const [activeTab,    setActiveTab]    = useState('CREST');
+  const [booted,       setBooted]       = useState(false);
+  // Lazy mount: only mount a tab's page the first time the user visits it.
+  // After mounting, the page stays in the DOM (display:none when inactive)
+  // so data/state survive tab switches without re-fetching.
+  const [mountedTabs, setMountedTabs] = useState(() => new Set(['CREST']));
   const timerRef = useRef(null);
 
   const { loading: scanLoading, error: scanError, refetch } =
@@ -25,46 +28,37 @@ export default function App() {
     useApi(`${API}/api/plex`,           [refreshKey]);
   const { data: walletRaw } =
     useApi(`${API}/api/wallet/history`, [refreshKey]);
-  // Lightweight ping — resolves as soon as Flask is up, independent of slow scan
+  // Lightweight ping — resolves as soon as Flask is up
   const { loading: pingLoading, error: pingError } =
     useApi(`${API}/api/ping`,           []);
 
   const walletHistory = Array.isArray(walletRaw) ? walletRaw : null;
-  const online = !scanError;
-  const backendAlive = !pingError;
+  const online       = !scanError;
+  const backendAlive = !pingError && !pingLoading;
 
-  // Once Flask is alive, poll /api/ready until the prewarm cache is populated,
-  // then auto-boot.  This ensures tables never load into a cold-cache state.
+  // Boot as soon as ping succeeds — don't wait for /api/ready.
+  // Each component shows its own loading state until its data arrives.
   useEffect(() => {
-    if (!backendAlive || pingLoading || booted) return;
-    let cancelled = false;
-    const poll = async () => {
-      if (cancelled) return;
-      try {
-        const res = await fetch(`${API}/api/ready`, { signal: AbortSignal.timeout(2000) });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.ready) {
-            if (!cancelled) { setBooted(true); setBootAnim('booted'); }
-            return;
-          }
-        }
-      } catch (_) {}
-      setTimeout(poll, 1500);
-    };
-    poll();
-    return () => { cancelled = true; };
-  }, [backendAlive, pingLoading, booted]);
+    if (backendAlive && !booted) setBooted(true);
+  }, [backendAlive, booted]);
 
   useEffect(() => {
     timerRef.current = setInterval(() => setRefreshKey(k => k + 1), AUTO_REFRESH_MS);
     return () => clearInterval(timerRef.current);
   }, []);
 
-  const handleBooted = useCallback(() => {
-    setBooted(true);
-    setBootAnim('booted');
+  // Mount the tab's page on first visit, keep it mounted forever after.
+  const handleTabChange = useCallback((tab) => {
+    setActiveTab(tab);
+    setMountedTabs(prev => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
   }, []);
+
+  const handleBooted = useCallback(() => setBooted(true), []);
 
   async function handleRefresh() {
     setRefreshing(true);
@@ -72,17 +66,22 @@ export default function App() {
     setRefreshing(false);
   }
 
-  // Show boot screen only when backend is confirmed unreachable (ping failed)
-  const showBoot = !booted && !backendAlive && !pingLoading;
+  // Show boot screen only when backend is confirmed unreachable (not just slow to ping)
+  const showBoot = !pingLoading && !!pingError && !booted;
 
   return (
     <>
       {showBoot && <BootScreen onBooted={handleBooted} />}
-      <div className={`app-shell ${!booted ? 'hud-booting' : ''} ${bootAnim === 'booted' ? 'hud-booted' : ''}`}>
-        <Header key={booted ? 'booted' : 'pre'} online={online} activeTab={activeTab} onTabChange={setActiveTab} onRefresh={handleRefresh} refreshing={refreshing || scanLoading} />
-        <div className="app-content" key={booted ? 'content-booted' : 'content-pre'}>
-          {/* All pages stay mounted so their data/state survives tab switches.
-              Inactive pages are hidden with display:none — zero re-fetches. */}
+      <div className={`app-shell${booted ? ' hud-booted' : ' hud-booting'}`}>
+        <Header
+          key={booted ? 'live' : 'pre'}
+          online={online}
+          activeTab={activeTab}
+          onTabChange={handleTabChange}
+          onRefresh={handleRefresh}
+          refreshing={refreshing || scanLoading}
+        />
+        <div className="app-content">
           <div style={{ display: activeTab === 'CREST' ? 'contents' : 'none' }}>
             <OverviewPage
               plexData={plexData}
@@ -92,18 +91,26 @@ export default function App() {
               refreshKey={refreshKey}
             />
           </div>
-          <div style={{ display: activeTab === 'CALCULATOR' ? 'contents' : 'none' }}>
-            <CalculatorPage refreshKey={refreshKey} />
-          </div>
-          <div style={{ display: activeTab === 'CHARACTERS' ? 'contents' : 'none' }}>
-            <CharactersPage />
-          </div>
-          <div style={{ display: activeTab === 'BP FINDER' ? 'contents' : 'none' }}>
-            <BpFinderPage refreshKey={refreshKey} />
-          </div>
-          <div style={{ display: activeTab === 'CRAFT LOG' ? 'contents' : 'none' }}>
-            <CraftLogPage />
-          </div>
+          {mountedTabs.has('CALCULATOR') && (
+            <div style={{ display: activeTab === 'CALCULATOR' ? 'contents' : 'none' }}>
+              <CalculatorPage refreshKey={refreshKey} />
+            </div>
+          )}
+          {mountedTabs.has('CHARACTERS') && (
+            <div style={{ display: activeTab === 'CHARACTERS' ? 'contents' : 'none' }}>
+              <CharactersPage />
+            </div>
+          )}
+          {mountedTabs.has('BP FINDER') && (
+            <div style={{ display: activeTab === 'BP FINDER' ? 'contents' : 'none' }}>
+              <BpFinderPage refreshKey={refreshKey} />
+            </div>
+          )}
+          {mountedTabs.has('CRAFT LOG') && (
+            <div style={{ display: activeTab === 'CRAFT LOG' ? 'contents' : 'none' }}>
+              <CraftLogPage />
+            </div>
+          )}
         </div>
       </div>
     </>

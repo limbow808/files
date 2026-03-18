@@ -219,10 +219,22 @@ def list_characters() -> list[dict]:
     ]
 
 
-def get_character_stats(character_id: str) -> dict:
-    """Fetch live wallet + job stats for a single character (called per-character by frontend)."""
-    chars = load_characters()
+# ── Per-character stats cache (wallet + active jobs, TTL 5 min) ───────────────
+_CHAR_STATS_CACHE: dict = {}   # str(char_id) → {"result": {...}, "ts": float}
+_CHAR_STATS_TTL = 300          # 5 minutes
+
+def get_character_stats(character_id: str, force: bool = False) -> dict:
+    """Fetch wallet + active job count for a single character, cached for 5 min."""
+    import time as _time
     cid = str(character_id)
+
+    # Return cached result if still fresh
+    if not force:
+        cached = _CHAR_STATS_CACHE.get(cid)
+        if cached and (_time.time() - cached["ts"]) < _CHAR_STATS_TTL:
+            return cached["result"]
+
+    chars = load_characters()
     rec = chars.get(cid)
     if not rec:
         return {"error": "not found"}
@@ -255,7 +267,9 @@ def get_character_stats(character_id: str) -> dict:
     except Exception:
         pass
 
-    return {"wallet": wallet, "active_jobs": job_count}
+    result = {"wallet": wallet, "active_jobs": job_count}
+    _CHAR_STATS_CACHE[cid] = {"result": result, "ts": _time.time()}
+    return result
 
 def remove_character(character_id: str) -> bool:
     chars = load_characters()
