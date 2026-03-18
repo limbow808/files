@@ -142,7 +142,7 @@ export default function OrdersSection() {
         </div>
         <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {tab === 'sell'
-            ? `>TOTAL ${fmtISK(sellTotal)} ISK` 
+            ? `TOTAL ${fmtISK(sellTotal)} ISK` 
             : `ESCROW  ${fmtISK(buyEscrow)} ISK`}
         </div>
       </div>

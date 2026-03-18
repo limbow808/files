@@ -588,8 +588,8 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
       <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 14 }}>
         <div style={{ display: 'flex' }}>
           {[
-            { key: 'jobs',  label: '◈ Active Jobs'    },
-            { key: 'queue', label: '◈ Do This Next'  },
+            { key: 'jobs',  label: 'Active Jobs'    },
+            { key: 'queue', label: 'Job Queue'  },
           ].map(({ key, label }) => (
             <button key={key} onClick={() => setView(key)} className={`tab-btn${view === key ? ' active' : ''}`}>
               {label}
