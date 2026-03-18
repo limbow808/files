@@ -2378,6 +2378,7 @@ _TYPE_VOLUME_CACHE: dict       = {}   # type_id → packaged volume m³, persist
 _ESI_ORDERS_CACHE:    dict  = {}
 _ESI_ORDERS_CACHE_TS: float = 0
 _ESI_ORDERS_TTL             = 120   # 2 min
+_LAST_SELL_POS_BY_ORDER: dict[int, int] = {}
 
 
 @app.route("/api/blueprints/corp", methods=["GET"])
@@ -3289,7 +3290,7 @@ def api_orders():
     Also diffs against the previously stored orders to detect fulfilled
     (sold) sell orders and records them in sell_order_history.
     """
-    global _ESI_ORDERS_CACHE, _ESI_ORDERS_CACHE_TS
+    global _ESI_ORDERS_CACHE, _ESI_ORDERS_CACHE_TS, _LAST_SELL_POS_BY_ORDER
     try:
         pass  # request already imported at top
         force = request.args.get("force", "0") == "1"
@@ -3391,6 +3392,7 @@ def api_orders():
             db_path = os.path.join(_HERE, "market_cache.db")
             if os.path.exists(db_path):
                 conn = _sq.connect(db_path)
+                new_pos_by_order: dict[int, int] = {}
                 for o in sell:
                     tid   = o["type_id"]
                     price = o["price"]
@@ -3402,8 +3404,21 @@ def api_orders():
                         "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0",
                         (tid,),
                     ).fetchone()
-                    o["market_position"]  = int(cheaper_row[0]) if cheaper_row else None
+                    pos = int(cheaper_row[0]) if cheaper_row else None
+                    o["market_position"]  = pos
                     o["competitor_count"] = int(total_row[0])   if total_row   else 0
+
+                    oid = o.get("order_id")
+                    prev_pos = _LAST_SELL_POS_BY_ORDER.get(oid) if oid else None
+                    o["market_position_prev"] = prev_pos
+                    if pos is None or prev_pos is None or pos == prev_pos:
+                        o["market_position_trend"] = None
+                    else:
+                        o["market_position_trend"] = "increasing" if pos > prev_pos else "decreasing"
+
+                    if oid and pos is not None:
+                        new_pos_by_order[oid] = pos
+                _LAST_SELL_POS_BY_ORDER = new_pos_by_order
                 conn.close()
         except Exception as _e:
             print(f"  [orders] market_position lookup failed: {_e}")

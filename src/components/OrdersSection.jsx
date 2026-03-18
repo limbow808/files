@@ -18,12 +18,12 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
     <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
       <thead>
         <tr>
-          <th style={{ textAlign: 'left',  padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '42%' }}>ITEM</th>
-          <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '18%' }}>PRICE</th>
-          <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '20%' }}>QTY</th>
-          <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '13%' }}>ISK</th>
-          {!isBuy && <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '7%' }}>POS</th>}
-          {isBuy && <th style={{ textAlign: 'right', padding: '5px 8px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '7%' }}>ESCROW</th>}
+          <th style={{ textAlign: 'left',  padding: '4px 6px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '40%' }}>ITEM</th>
+          <th style={{ textAlign: 'right', padding: '4px 6px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '18%' }}>PRICE</th>
+          <th style={{ textAlign: 'right', padding: '4px 6px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '19%' }}>QTY</th>
+          <th style={{ textAlign: 'right', padding: '4px 6px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '13%' }}>ISK</th>
+          {!isBuy && <th style={{ textAlign: 'right', padding: '4px 12px 4px 6px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '10%' }}>POS</th>}
+          {isBuy && <th style={{ textAlign: 'right', padding: '4px 12px 4px 6px', fontSize: 9, color: 'var(--dim)', letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400, width: '10%' }}>ESCROW</th>}
         </tr>
       </thead>
       <tbody>
@@ -36,7 +36,7 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
           const avgDays = hist?.avg_days_to_sell ?? null;
           return (
             <tr key={o.order_id} className="eve-row-reveal" style={{ borderBottom: '1px solid #0d0d0d', animationDelay: `${idx * 25}ms` }}>
-              <td style={{ padding: '5px 8px', textAlign: 'left' }}>
+              <td style={{ padding: '4px 6px', textAlign: 'left' }}>
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={o.type_name}>{o.type_name}</div>
                 <div style={{ height: 2, background: '#111', marginTop: 2, width: 60 }}>
                   <div style={{ height: '100%', width: `${filled}%`, background: isBuy ? '#4da6ff' : 'var(--accent)' }} />
@@ -63,18 +63,19 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
                   </div>
                 )}
               </td>
-              <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11 }}>
+              <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11 }}>
                 {fmtISK(o.price)}
               </td>
-              <td style={{ padding: '5px 8px', textAlign: 'right', fontSize: 11, color: fillColor }}>
+              <td style={{ padding: '4px 6px', textAlign: 'right', fontSize: 11, color: fillColor }}>
                 {new Intl.NumberFormat('en-US').format(o.volume_remain)}
                 <span style={{ color: 'var(--dim)', fontSize: 10 }}> / {new Intl.NumberFormat('en-US').format(o.volume_total)}</span>
               </td>
-              <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: isBuy ? '#4da6ff' : 'var(--accent)' }}>
+              <td style={{ padding: '4px 6px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: isBuy ? '#4da6ff' : 'var(--accent)' }}>
                 {fmtISK(total)}
               </td>
               {!isBuy && (() => {
                 const pos = o.market_position;
+                const trend = o.market_position_trend;
                 const color = pos === 0   ? '#4cff91'
                             : pos === null ? 'var(--dim)'
                             : pos <= 3    ? '#ffcc00'
@@ -82,15 +83,18 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
                 const label = pos === null ? '—'
                             : pos === 0   ? '#1'
                             : `+${pos}`;
+                const trendGlyph = trend === 'increasing' ? '▲' : trend === 'decreasing' ? '▼' : '';
+                const trendColor = trend === 'decreasing' ? '#4cff91' : trend === 'increasing' ? '#ff6644' : 'var(--dim)';
                 return (
-                  <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600, color }}
+                  <td style={{ padding: '4px 12px 4px 6px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600, color, whiteSpace: 'nowrap' }}
                     title={pos === 0 ? 'Lowest price — top of book' : pos === null ? 'No market data' : `${pos} cheaper listing${pos === 1 ? '' : 's'} ahead`}>
                     {label}
+                    {trendGlyph && <span style={{ marginLeft: 4, color: trendColor, fontSize: 10 }}>{trendGlyph}</span>}
                   </td>
                 );
               })()}
               {isBuy && (
-                <td style={{ padding: '5px 8px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>
+                <td style={{ padding: '4px 12px 4px 6px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>
                   {fmtISK(o.escrow)}
                 </td>
               )}
@@ -153,7 +157,7 @@ export default function OrdersSection() {
         </div>
       )}
 
-      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, paddingRight: 6 }}>
         {loading && !data ? (
           <LoadingState label="FETCHING ORDERS" sub="ESI · MARKET" />
         ) : (
