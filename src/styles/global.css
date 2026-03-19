@@ -79,9 +79,9 @@ a, a:hover, button, button:hover { text-decoration: none; }
   justify-content: space-between;
   padding: 6px 14px;
   border-bottom: 1px solid var(--border);
-  background: #030303;
+  background: var(--bg2);
 }
-.panel-title { font-family: var(--mono); font-size: 11px; letter-spacing: 3px; color: var(--text); text-transform: uppercase; opacity: 0.6; }
+.panel-title { font-family: var(--mono); font-size: 11px; letter-spacing: 0px; color: var(--text); text-transform: uppercase; opacity: 0.6; }
 
 /* ── Table ──────────────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; }
@@ -222,7 +222,7 @@ tr.row-selected td { color: #000; }
 .btn {
   font-family: var(--mono);
   font-size: 11px;
-  letter-spacing: 2px;
+  letter-spacing: 0px;
   font-weight: 300;
   text-transform: uppercase;
   background: transparent;
@@ -271,8 +271,8 @@ tr.row-selected td { color: #000; }
 }
 .nav-tab {
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 2.5px;
+  font-size: 14px;
+  letter-spacing: 0px;
   text-transform: uppercase;
   font-weight: 500;
   padding: 0 22px;
@@ -313,11 +313,11 @@ tr.row-selected td { color: #000; }
 /* ── Panel tab buttons (Sell/Buy, Minerals/Ores, etc.) ───────────── */
 .tab-btn {
   font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 1.5px;
+  font-size: 15px;
+  letter-spacing: 0px;
   text-transform: uppercase;
-  font-weight: 300;
-  padding: 5px 14px;
+  font-weight: 500;
+  padding: 10px;
   background: none;
   border: none;
   color: #B0B0B0;
@@ -570,7 +570,7 @@ tr.row-selected td { color: #000; }
   display: flex;
   align-items: stretch;
   gap: 0;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 2px solid #1a1a1a;
   flex-shrink: 0;
   flex-wrap: wrap;
 }
@@ -581,16 +581,16 @@ tr.row-selected td { color: #000; }
   min-width: 130px;
 }
 .sb-kpi-label {
-  font-size: 8px;
-  letter-spacing: 2px;
+  font-size: 10px;
+  letter-spacing: 0px;
   color: var(--dim);
   text-transform: uppercase;
   margin-bottom: 4px;
 }
 .sb-kpi-val {
   font-family: var(--mono);
-  font-size: 14px;
-  letter-spacing: 1px;
+  font-size: 20px;
+  letter-spacing: 0px;
   color: var(--text);
 }
 

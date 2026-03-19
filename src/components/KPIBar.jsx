@@ -53,9 +53,9 @@ export default function KPIBar({ plexData, walletHistory }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center',
-      height: 60, flexShrink: 0,
+      height: 80, flexShrink: 0,
       borderBottom: '1px solid var(--border)',
-      background: 'var(--bg)',
+      background: 'var(--bg2)',
     }}>
       {stats.map((s, i) => (
         <Fragment key={s.label}>
@@ -65,8 +65,8 @@ export default function KPIBar({ plexData, walletHistory }) {
             padding: '0 4px',
             height: '100%',
           }}>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 300, color: s.color, letterSpacing: 0.5, lineHeight: 1 }}>{s.value}</span>
-            <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1.2, marginTop: 4, lineHeight: 1 }}>{s.label}</span>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 400, color: s.color, letterSpacing: 0, lineHeight: 1 }}>{s.value}</span>
+            <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 0, marginTop: 4, lineHeight: 1 }}>{s.label}</span>
           </div>
           {i < stats.length - 1 && (
             <div style={{ width: 5, height: 5, background: '#252525', flexShrink: 0, alignSelf: 'center' }} />

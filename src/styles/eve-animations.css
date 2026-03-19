@@ -244,69 +244,6 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════════
-   12. NAV TAB — line-build underline from center
-   ══════════════════════════════════════════════════════════════════════ */
-.nav-tab {
-  position: relative;
-  overflow: hidden;
-}
-
-/* Accent underline that grows from center */
-.nav-tab::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 50%;
-  width: 0;
-  height: 2px;
-  background: var(--accent);
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-              left  0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.nav-tab:hover::after {
-  width: 100%;
-  left: 0;
-}
-
-/* Active tab keeps the line visible */
-.nav-tab.active::after {
-  width: 100%;
-  left: 0;
-  background: var(--accent);
-}
-
-/* ══════════════════════════════════════════════════════════════════════
-   13. TAB BUTTONS (panel tabs) — same line-build treatment
-   ══════════════════════════════════════════════════════════════════════ */
-.tab-btn {
-  position: relative;
-  overflow: hidden;
-}
-
-.tab-btn::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 50%;
-  width: 0;
-  height: 2px;
-  background: var(--accent);
-  transition: width 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              left  0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.tab-btn:hover::after {
-  width: 100%;
-  left: 0;
-}
-
-.tab-btn.active::after {
-  width: 100%;
-  left: 0;
-}
-
-/* ══════════════════════════════════════════════════════════════════════
    14. BUTTONS — line-build border on hover
    ══════════════════════════════════════════════════════════════════════ */
 .btn {

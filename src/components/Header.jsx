@@ -10,7 +10,7 @@ export default memo(function Header({ online, activeTab, onTabChange, onRefresh,
       {/* Left: EVE clock only */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 14 }}>
         <div className="clock-text" style={{ color: 'var(--text2)', fontSize: 11, letterSpacing: 1.5, fontWeight: 300 }}>
-          EVE <EveText text={clock} scramble={false} wave={false} />
+        <EveText text={clock} scramble={false} wave={false} />
         </div>
       </div>
 

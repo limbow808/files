@@ -237,7 +237,7 @@ function PlexChart({ walletHistory, balance, target }) {
           position: 'absolute',
           left: Math.min(hover.x + 8, dims.w - 140),
           top: Math.max(0, hover.y - 56),
-          background: '#0a0a0a',
+          background: 'var(--bg2)',
           border: '1px solid var(--accent)',
           padding: '5px 9px',
           fontFamily: 'var(--mono)',
@@ -312,7 +312,7 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
           <span style={{ color: projOk ? '#00cc66' : 'var(--text)' }}>{pct.toFixed(1)}% OF TARGET</span>
           <span>{fmtISK(target)} ISK</span>
         </div>
-        <div style={{ height: 6, background: '#0a0a0a', border: '1px solid var(--border)', marginBottom: 5 }}>
+        <div style={{ height: 6, background: 'var(--bg2)', border: '1px solid var(--border)', marginBottom: 5 }}>
           <div className="eve-bar-glow" style={{ height: '100%', width: `${pct}%`, background: projOk ? '#00cc66' : 'var(--accent)', transition: 'width 0.8s ease' }} />
         </div>
         <div style={{ fontSize: 10, color: projOk ? '#00cc66' : 'var(--accent)', letterSpacing: 1, marginBottom: 8, textAlign: 'right' }}>

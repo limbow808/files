@@ -74,7 +74,7 @@ function JobRow({ j, idx, multiChar }) {
 
   return (
     <tr className="eve-row-reveal" style={{ position: 'relative', animationDelay: `${idx * 30}ms` }}>
-      <td style={{ padding: '5px 6px 5px 10px', textAlign: 'left', maxWidth: 0, width: '99%' }}>
+      <td style={{ padding: '10px', textAlign: 'left', maxWidth: 0, width: '99%', background: 'var(--bg2)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
           {(j.product_type_id || j.blueprint_type_id) && (
             <img
@@ -86,11 +86,11 @@ function JobRow({ j, idx, multiChar }) {
           )}
           <div style={{ display: 'flex', alignItems: 'baseline', gap: 5, overflow: 'hidden', flex: 1, minWidth: 0 }}>
           <span ref={nameRef} style={{
-            fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5,
+            fontFamily: 'var(--mono)', fontSize: 14, letterSpacing: 0.5,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
           }}>{j.product_name}</span>
           {j.runs > 1 && (
-            <span style={{ fontSize: 10, color: 'var(--dim)', flexShrink: 0 }}>×{j.runs}</span>
+            <span style={{ fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>×{j.runs}</span>
           )}
           </div>
         </div>
@@ -100,22 +100,22 @@ function JobRow({ j, idx, multiChar }) {
         </div>
       </td>
       {/* TYPE badge */}
-      <td style={{ padding: '5px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+      <td style={{ padding: '5px 6px', textAlign: 'left', whiteSpace: 'nowrap', background: 'var(--bg2)' }}>
         <span style={{
-          fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
+          fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 0,
           color: '#000', background: aColor,
-          padding: '2px 6px', borderRadius: 2, fontWeight: 700,
+          padding: '2px 6px', borderRadius: 2, fontWeight: 500,
           display: 'inline-block', minWidth: 44, textAlign: 'center',
         }}>{shortAct}</span>
       </td>
       {multiChar && (
-        <td style={{ padding: '5px 6px', textAlign: 'right', whiteSpace: 'nowrap' }}>
+        <td style={{ padding: '5px 6px', textAlign: 'left', whiteSpace: 'nowrap', fontSize: 11, background: 'var(--bg2)' }}>
           <CharTag name={j.character_name} color={cColor} />
         </td>
       )}
       <td ref={countdownRef} style={{
         padding: '5px 10px 5px 6px', textAlign: 'right',
-        fontFamily: 'var(--mono)', fontSize: 11, whiteSpace: 'nowrap',
+        fontFamily: 'var(--mono)', fontSize: 12, whiteSpace: 'nowrap', background: 'var(--bg2)',
       }} />
     </tr>
   );
@@ -123,9 +123,9 @@ function JobRow({ j, idx, multiChar }) {
 
 const TH = ({ children, align = 'right' }) => (
   <th style={{
-    textAlign: align, padding: '5px 6px', fontSize: 9, color: 'var(--dim)',
-    letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 400,
-    whiteSpace: 'nowrap',
+    textAlign: align, padding: '8px', fontSize: 11, color: 'var(--dim)',
+    letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 300,
+    whiteSpace: 'nowrap', background: 'var(--bg2)',
   }}>{children}</th>
 );
 
@@ -160,8 +160,8 @@ function ActiveJobsView({ data, loading, error }) {
       <thead>
         <tr>
           <TH align="left">ITEM</TH>
-          <TH>TYPE</TH>
-          {multiChar && <TH>CHAR</TH>}
+          <TH align="left">TYPE</TH>
+          {multiChar && <TH align="left">CHAR</TH>}
           <TH>REMAINING</TH>
         </tr>
       </thead>
@@ -587,11 +587,11 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Header: two tab buttons */}
-      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 14, borderBottom: 'none' }}>
-        <div style={{ display: 'flex' }}>
+      <div className="panel-hdr" style={{ gap: 0, background: 'var(--bg2)', padding: 0, paddingRight: 14, borderBottom: 'none', fontWeight: 500, alignItems: 'stretch' }}>
+        <div style={{ display: 'flex', alignItems: 'stretch' }}>
           {[
             { key: 'jobs',  label: 'Active Jobs'    },
-            { key: 'queue', label: 'Job Queue'  },
+            { key: 'queue', label: 'Queue Planner'  },
             { key: 'top',   label: 'Top Performers' },
           ].map(({ key, label }) => (
             <button key={key} onClick={() => setView(key)} className={`tab-btn${view === key ? ' active' : ''}`}>
@@ -600,7 +600,7 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
           ))}
         </div>
         {view === 'jobs' && (
-          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1 }}>
+          <span style={{ fontSize: 14, color: 'var(--dim)', letterSpacing: 1, alignSelf: 'center' }}>
             {loading ? '' : `${activeCount} ACTIVE · ${completeCount} READY`}
           </span>
         )}
