@@ -1,0 +1,19 @@
+
+main colors:
+background: #0d0d0d
+secondary background: #121212
+primary text #E0E0E0
+secondary text #B0B0B0
+secondary button squares: #b0b0b0
+green: #4cff91
+blue: #4da6ff
+accent: #ff4700
+borders/deviders: #444444
+main deviders: #b0b0b0
+
+font:
+- Space Grotesk (in fonts folder)
+
+buttons: 
+- buttons have a solid square around them and be in bg black text. when hovering over them the text glitch appears and the square turns from the accent color to #E0E0E0. remove current underline animation
+

@@ -20,7 +20,7 @@ export default function CharTag({ name, color, style = {} }) {
       userSelect: 'none',
       ...style,
     }}>
-      <span className="circle" style={{
+      <span style={{
         width: 6, height: 6,
         background: color,
         flexShrink: 0,

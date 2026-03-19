@@ -3,7 +3,6 @@ import KPIBar from '../components/KPIBar';
 import PlexSection from '../components/PlexSection';
 import ManufacturingJobs from '../components/ManufacturingJobs';
 import OrdersSection from '../components/OrdersSection';
-import TopPerformersPanel from '../components/TopPerformersPanel';
 import EvePanel from '../components/EvePanel';
 import OverviewFooter from '../components/OverviewFooter';
 
@@ -11,8 +10,8 @@ const D = 1; // divider thickness px
 
 // ── Layout ─────────────────────────────────────────────────────────────────────
 // KPI bar
-// Body: Left col (flex 1): MFG Jobs (top) | Orders + Minerals (bottom)
-//       Right col (340px): PLEX (top) | TopPerformers (fills to bottom)
+// Body: Left col (flex 1): MFG Jobs full height (Top Performers is a tab inside)
+//       Right col (340px): PLEX (top) | Orders (fills rest)
 export default memo(function OverviewPage({ plexData, walletHistory, plexLoading, plexError, refreshKey = 0 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
@@ -23,21 +22,11 @@ export default memo(function OverviewPage({ plexData, walletHistory, plexLoading
       {/* Body — two columns */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
 
-        {/* Left column — MFG Jobs on top, TopPerformers below */}
+        {/* Left column — MFG Jobs full height */}
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-          <EvePanel scan={true} corners={false} style={{ flex: 3, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <ManufacturingJobs />
+          <EvePanel scan={true} corners={false} style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <ManufacturingJobs refreshKey={refreshKey} />
           </EvePanel>
-
-          <div style={{ height: D, flexShrink: 0, background: 'var(--border)' }} />
-
-          {/* Bottom-left — Top Performers */}
-          <div style={{ flex: 2, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
-            <EvePanel scan={true} corners={false} style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-              <TopPerformersPanel refreshKey={refreshKey} />
-            </EvePanel>
-          </div>
         </div>
 
         <div style={{ width: D, flexShrink: 0, background: 'var(--border)' }} />

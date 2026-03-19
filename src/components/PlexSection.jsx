@@ -219,13 +219,13 @@ function PlexChart({ walletHistory, balance, target }) {
     return (
       <div ref={containerRef} style={{
         width: '100%', height: 160, display: 'flex', alignItems: 'center',
-        color: '#555544', fontSize: 10, letterSpacing: 2, background: '#050505', border: '1px solid #111', paddingLeft: 12,
+        color: '#555544', fontSize: 10, letterSpacing: 2, background: 'var(--bg2)', border: '1px solid #1a1a1a', paddingLeft: 12,
       }}>COLLECTING DATA…</div>
     );
   }
 
   return (
-    <div ref={containerRef} style={{ width: '100%', height: 160, position: 'relative', background: '#030303', border: '1px solid #111' }}>
+    <div ref={containerRef} style={{ width: '100%', height: 160, position: 'relative', background: 'var(--bg2)', border: '1px solid #1a1a1a' }}>
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', display: 'block' }}
@@ -323,7 +323,7 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
       {/* Stats grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1, background: 'var(--border)', flexShrink: 0 }}>
         {stats.map(([label, val]) => (
-          <div key={label} style={{ background: '#050505', padding: '8px 10px' }}>
+          <div key={label} style={{ background: 'var(--bg2)', padding: '8px 10px' }}>
             <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>{label}</div>
             <div style={{ fontSize: 12, color: 'var(--text)' }}>{loading && !plexData ? '—' : val}</div>
           </div>

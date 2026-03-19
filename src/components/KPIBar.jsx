@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import { useApi } from '../hooks/useApi';
 import { fmtISK } from '../utils/fmt';
 
@@ -52,21 +53,25 @@ export default function KPIBar({ plexData, walletHistory }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center',
-      height: 38, flexShrink: 0,
+      height: 60, flexShrink: 0,
       borderBottom: '1px solid var(--border)',
-      background: '#0a0a08',
+      background: 'var(--bg)',
     }}>
       {stats.map((s, i) => (
-        <div key={s.label} style={{
-          flex: 1,
-          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          padding: '0 4px',
-          borderRight: i < stats.length - 1 ? '1px solid var(--border)' : 'none',
-          height: '100%',
-        }}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: s.color, letterSpacing: 0.5, lineHeight: 1 }}>{s.value}</span>
-          <span style={{ fontSize: 7.5, color: 'var(--dim)', letterSpacing: 1.2, marginTop: 3, lineHeight: 1 }}>{s.label}</span>
-        </div>
+        <Fragment key={s.label}>
+          <div style={{
+            flex: 1,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            padding: '0 4px',
+            height: '100%',
+          }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 20, fontWeight: 300, color: s.color, letterSpacing: 0.5, lineHeight: 1 }}>{s.value}</span>
+            <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 1.2, marginTop: 4, lineHeight: 1 }}>{s.label}</span>
+          </div>
+          {i < stats.length - 1 && (
+            <div style={{ width: 5, height: 5, background: '#252525', flexShrink: 0, alignSelf: 'center' }} />
+          )}
+        </Fragment>
       ))}
     </div>
   );

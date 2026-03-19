@@ -1,13 +1,25 @@
-/* ── Google Fonts loaded via index.html ─────────────────────────────── */
+/* ── Space Grotesk — local variable font ─────────────────── */
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('../../fonts/Space_Grotesk/SpaceGrotesk-VariableFont_wght.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
 
 /* ── Design tokens ─────────────────────────────────────────────── */
 :root {
-  --bg:      #000000;
-  --text:    #c8c8b7;
+  --bg:      #0d0d0d;
+  --bg2:     #121212;
+  --text:    #E0E0E0;
+  --text2:   #B0B0B0;
   --accent:  #ff4700;
-  --border:  #333333;
-  --dim:     #555544;
-  --mono:    'Share Tech Mono', monospace;
+  --border:  #444444;
+  --border2: #B0B0B0;
+  --dim:     #B0B0B0;
+  --green:   #4cff91;
+  --blue:    #4da6ff;
+  --mono:    'Space Grotesk', sans-serif;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -19,7 +31,12 @@ html, body, #root {
   color: var(--text);
   font-family: var(--mono);
   font-size: 13px;
+  font-weight: 300;
+  -webkit-font-smoothing: antialiased;
 }
+
+/* Never underline interactive elements */
+a, a:hover, button, button:hover { text-decoration: none; }
 
 /* No rounded corners globally — except explicit pill/circle elements */
 *:not(.pill):not(.circle) { border-radius: 0 !important; }
@@ -38,11 +55,11 @@ html, body, #root {
   justify-content: space-between;
   padding: 0;
   border-bottom: 1px solid var(--border);
-  background: #000;
+  background: var(--bg);
   position: sticky;
   top: 0;
   z-index: 100;
-  min-height: 32px;
+  min-height: 40px;
 }
 .logo-text  { font-family: var(--mono); font-size: 14px; font-weight: 700; color: var(--text); letter-spacing: 3px; }
 .header-logo-center {
@@ -192,30 +209,54 @@ tr.row-selected td { color: #000; }
 }
 .error-banner span { color: var(--text); font-family: var(--mono); font-size: 14px; font-weight: 700; letter-spacing: 2px; }
 
+@keyframes crestBtnGlitch {
+  0%   { transform: translate(0,0) skewX(0); }
+  20%  { transform: translate(-2px,1px) skewX(-2deg); }
+  40%  { transform: translate(2px,-1px) skewX(2deg); }
+  60%  { transform: translate(-1px,0) skewX(0); }
+  80%  { transform: translate(1px,-1px) skewX(-1deg); }
+  100% { transform: translate(0,0) skewX(0); }
+}
+
 /* ── Buttons ─────────────────────────────────────────────────────── */
 .btn {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
   letter-spacing: 2px;
-  font-weight: 600;
+  font-weight: 300;
   text-transform: uppercase;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text);
-  padding: 6px 16px;
+  border: 1px solid var(--border2);
+  color: var(--text2);
+  padding: 5px 14px;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  transition: border-color 0.12s, color 0.12s;
+  position: relative;
 }
-.btn:hover  { border-color: var(--text); color: #000; background: var(--text); }
-.btn:active { background: #aaa; border-color: #aaa; color: #000; }
+.btn:hover  {
+  border-color: #E0E0E0;
+  color: #E0E0E0;
+  animation: crestBtnGlitch 0.18s steps(2) 1;
+}
+.btn:active { opacity: 0.7; }
 .btn:disabled { opacity: 0.3; cursor: not-allowed; }
-.btn.btn-primary { border-color: var(--accent); background: var(--accent); color: #000; }
-.btn.btn-primary:hover { background: var(--text); border-color: var(--text); color: #000; }
+.btn.btn-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #000;
+}
+.btn.btn-primary:hover {
+  border-color: #E0E0E0;
+  background: #E0E0E0;
+  color: #000;
+  animation: crestBtnGlitch 0.18s steps(2) 1;
+}
 
 /* ── Connection dot ──────────────────────────────────────────────── */
-.dot { width: 8px; height: 8px; display: inline-block; border-radius: 50% !important; margin-right: 6px; vertical-align: middle; }
-.dot-green { background: #00ff88; box-shadow: 0 0 6px #00ff88; }
-.dot-red   { background: #ff4444; box-shadow: 0 0 6px rgba(255,68,68,0.5); animation: pulse 1s infinite; }
+.dot { width: 7px; height: 7px; display: inline-block; border-radius: 50% !important; margin-right: 6px; vertical-align: middle; flex-shrink: 0; }
+.dot-green { background: #4cff91; box-shadow: 0 0 5px #4cff91; }
+.dot-gray  { background: #555; }
+.dot-red   { background: #ff4444; box-shadow: 0 0 5px rgba(255,68,68,0.5); animation: pulse 1s infinite; }
 
 /* ── Hangar badge ────────────────────────────────────────────────── */
 .badge-ok   { color: #00cc66; }
@@ -231,20 +272,43 @@ tr.row-selected td { color: #000; }
 .nav-tab {
   font-family: var(--mono);
   font-size: 11px;
-  letter-spacing: 2px;
+  letter-spacing: 2.5px;
   text-transform: uppercase;
-  padding: 0 20px;
+  font-weight: 500;
+  padding: 0 22px;
   background: transparent;
   border: none;
-  border-right: 1px solid var(--border);
-  border-bottom: none;
   color: var(--dim);
   cursor: pointer;
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.12s, background 0.12s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+/* Reserve space for the indicator square so inactive tabs don't shift */
+.nav-tab::before {
+  content: '';
+  width: 0;
+  height: 5px;
+  flex-shrink: 0;
+  background: transparent;
+  transition: width 0.1s, margin-right 0.1s;
 }
 .nav-tab:hover { color: var(--text); }
-.nav-tab.active { color: #000; background: var(--accent); }
-.nav-tab.active:hover { background: var(--text); color: #000; }
+/* Active: small black square left of text, both centered in orange bg */
+.nav-tab.active {
+  color: #000;
+  background: var(--accent);
+}
+.nav-tab.active::before {
+  width: 5px;
+  height: 5px;
+  background: #000;
+  margin-right: 8px;
+}
+.nav-tab.active:hover { background: #E0E0E0; color: #000; }
+.nav-tab.active:hover::before { background: #000; }
 
 /* ── Panel tab buttons (Sell/Buy, Minerals/Ores, etc.) ───────────── */
 .tab-btn {
@@ -252,17 +316,20 @@ tr.row-selected td { color: #000; }
   font-size: 11px;
   letter-spacing: 1.5px;
   text-transform: uppercase;
+  font-weight: 300;
   padding: 5px 14px;
   background: none;
   border: none;
-  border-bottom: none;
-  color: var(--dim);
+  color: #B0B0B0;
   cursor: pointer;
   transition: color 0.12s, background 0.12s;
 }
-.tab-btn:hover { color: var(--text); background: rgba(200,200,183,0.06); }
-.tab-btn.active { background: var(--accent); color: #000; }
-.tab-btn.active:hover { background: var(--text); color: #000; }
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active {
+  background: #b0b0b0;
+  color: #121212;
+}
+.tab-btn.active:hover { background: #c8c8c8; color: #121212; }
 
 /* ── App layout ────────────────────────────────────────────────── */
 .app-shell {
@@ -459,12 +526,12 @@ tr.row-selected td { color: #000; }
   padding: 0 18px;
   align-self: stretch;
   border: none;
-  border-left: 1px solid var(--border);
   background: transparent;
   color: var(--text);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
   font-family: var(--mono);
+  font-weight: 300;
 }
 .header-scan-btn:hover:not(:disabled) {
   background: rgba(255,255,255,0.06);
@@ -472,7 +539,6 @@ tr.row-selected td { color: #000; }
 .header-scan-btn:disabled { cursor: not-allowed; }
 .header-scan-btn--active {
   background: rgba(255, 71, 0, 0.12);
-  border-left-color: var(--accent);
   animation: scan-pulse 1.2s ease-in-out infinite;
 }
 @keyframes scan-pulse {

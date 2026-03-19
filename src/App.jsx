@@ -14,12 +14,12 @@ const AUTO_REFRESH_MS = 5 * 60 * 1000;
 export default function App() {
   const [refreshKey,   setRefreshKey]   = useState(0);
   const [refreshing,   setRefreshing]   = useState(false);
-  const [activeTab,    setActiveTab]    = useState('CREST');
+  const [activeTab,    setActiveTab]    = useState('OVERVIEW');
   const [booted,       setBooted]       = useState(false);
   // Lazy mount: only mount a tab's page the first time the user visits it.
   // After mounting, the page stays in the DOM (display:none when inactive)
   // so data/state survive tab switches without re-fetching.
-  const [mountedTabs, setMountedTabs] = useState(() => new Set(['CREST']));
+  const [mountedTabs, setMountedTabs] = useState(() => new Set(['OVERVIEW']));
   const timerRef = useRef(null);
 
   const { loading: scanLoading, error: scanError, refetch } =
@@ -82,7 +82,7 @@ export default function App() {
           refreshing={refreshing || scanLoading}
         />
         <div className="app-content">
-          <div style={{ display: activeTab === 'CREST' ? 'contents' : 'none' }}>
+          <div style={{ display: activeTab === 'OVERVIEW' ? 'contents' : 'none' }}>
             <OverviewPage
               plexData={plexData}
               walletHistory={walletHistory}
@@ -106,8 +106,8 @@ export default function App() {
               <BpFinderPage refreshKey={refreshKey} />
             </div>
           )}
-          {mountedTabs.has('CRAFT LOG') && (
-            <div style={{ display: activeTab === 'CRAFT LOG' ? 'contents' : 'none' }}>
+          {mountedTabs.has('REVENUE') && (
+            <div style={{ display: activeTab === 'REVENUE' ? 'contents' : 'none' }}>
               <CraftLogPage />
             </div>
           )}

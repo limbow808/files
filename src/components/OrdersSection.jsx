@@ -35,10 +35,11 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
           const hist    = !isBuy && sellHistByTypeId ? sellHistByTypeId[o.type_id] : null;
           const avgDays = hist?.avg_days_to_sell ?? null;
           return (
-            <tr key={o.order_id} className="eve-row-reveal" style={{ borderBottom: '1px solid #0d0d0d', animationDelay: `${idx * 25}ms` }}>
+            <tr key={o.order_id} className="eve-row-reveal" style={{ position: 'relative', borderBottom: '1px solid var(--border)', animationDelay: `${idx * 25}ms` }}>
               <td style={{ padding: '4px 6px', textAlign: 'left' }}>
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={o.type_name}>{o.type_name}</div>
-                <div style={{ height: 2, background: '#111', marginTop: 2, width: 60 }}>
+                {/* Full-row fill bar — positioned relative to <tr> */}
+                <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 2, background: '#1a1a1a', pointerEvents: 'none', zIndex: 0 }}>
                   <div style={{ height: '100%', width: `${filled}%`, background: isBuy ? '#4da6ff' : 'var(--accent)' }} />
                 </div>
                 {!isBuy && (
@@ -131,7 +132,7 @@ export default function OrdersSection() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Header — 26 px tall */}
-      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 10, height: 26, minHeight: 26, flexShrink: 0, overflow: 'hidden' }}>
+      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 10, height: 26, minHeight: 26, flexShrink: 0, overflow: 'hidden', borderBottom: 'none' }}>
         <div style={{ display: 'flex', height: '100%', flexShrink: 0 }}>
           {['sell', 'buy'].map(t => (
             <button

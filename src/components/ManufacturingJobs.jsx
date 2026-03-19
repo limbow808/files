@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo, Fragment } from 'react';
 import { useGlobalTick } from '../hooks/useGlobalTick';
 import { useApi } from '../hooks/useApi';
 import CharTag from './CharTag';
+import TopPerformersPanel from './TopPerformersPanel';
 import { charColor, seedCharColors } from '../utils/charColors';
 import { fmtISK, fmtDuration, roiColor } from '../utils/fmt';
 import { LoadingState } from './ui';
@@ -72,7 +73,7 @@ function JobRow({ j, idx, multiChar }) {
   const shortAct = ACTIVITY_SHORT[j.activity] || j.activity.slice(0, 4).toUpperCase();
 
   return (
-    <tr className="eve-row-reveal" style={{ animationDelay: `${idx * 30}ms` }}>
+    <tr className="eve-row-reveal" style={{ position: 'relative', animationDelay: `${idx * 30}ms` }}>
       <td style={{ padding: '5px 6px 5px 10px', textAlign: 'left', maxWidth: 0, width: '99%' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
           {(j.product_type_id || j.blueprint_type_id) && (
@@ -93,7 +94,8 @@ function JobRow({ j, idx, multiChar }) {
           )}
           </div>
         </div>
-        <div style={{ height: 2, background: '#111', width: '100%', marginTop: 3 }}>
+        {/* Full-row progress bar — absolutely positioned, uses <tr> as containing block */}
+        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 2, background: '#0d0d0d', pointerEvents: 'none', zIndex: 0 }}>
           <div ref={progressRef} style={{ height: '100%', transition: 'width 1s linear' }} />
         </div>
       </td>
@@ -585,11 +587,12 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       {/* Header: two tab buttons */}
-      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 14 }}>
+      <div className="panel-hdr" style={{ gap: 0, padding: 0, paddingRight: 14, borderBottom: 'none' }}>
         <div style={{ display: 'flex' }}>
           {[
             { key: 'jobs',  label: 'Active Jobs'    },
             { key: 'queue', label: 'Job Queue'  },
+            { key: 'top',   label: 'Top Performers' },
           ].map(({ key, label }) => (
             <button key={key} onClick={() => setView(key)} className={`tab-btn${view === key ? ' active' : ''}`}>
               {label}
@@ -604,9 +607,11 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-        {view === 'jobs'
-          ? <ActiveJobsView data={data} loading={loading} error={error} />
-          : <DoThisNextView />
+        {view === 'top'
+          ? <TopPerformersPanel />
+          : view === 'jobs'
+            ? <ActiveJobsView data={data} loading={loading} error={error} />
+            : <DoThisNextView />
         }
       </div>
     </div>
