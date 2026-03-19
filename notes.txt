@@ -17,3 +17,5 @@ font:
 buttons: 
 - buttons have a solid square around them and be in bg black text. when hovering over them the text glitch appears and the square turns from the accent color to #E0E0E0. remove current underline animation
 
+Queue Planner:
+ needs mats cost of recommended amount of runs. replace isk/hr with this in the table.

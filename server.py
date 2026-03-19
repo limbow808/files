@@ -2007,9 +2007,8 @@ def api_bpo_market_scan_stream():
                              "pages_scanned": int, "contracts_checked": int}
         {"type":"error",     "msg": str}
     """
-    pass  # request already imported at top
-    region_id = int(_req.args.get("region_id", 10000002))
-    max_pages  = min(int(_req.args.get("max_pages", 20)), 40)
+    region_id = int(request.args.get("region_id", 10000002))
+    max_pages  = min(int(request.args.get("max_pages", 20)), 40)
 
     def _sse(data):
         return f"data: {json.dumps(data)}\n\n"
@@ -4207,22 +4206,114 @@ async def _prewarm_task():
             print(f"  [prewarm] Scan warmup failed: {_e}")
 
     def _warmup_calculator_sync():
-        """Directly populate calculator cache for default params."""
+        """Directly populate calculator cache for default params (Korsiki / Large Eng. Complex).
+
+        Mirrors the full api_calculator pipeline so the cached result includes all
+        derived fields (roi, me_level, category, break_even_price, …) and is
+        indistinguishable from a user-triggered calculation.
+        """
         try:
             _cache_key = _calc_cache_key("Korsiki", "large")
             if _calc_is_fresh(_cache_key):
                 return
+
+            from calculator import calculate_profit, CONFIG
             from pricer import get_prices_bulk
-            results = calculate_all()
-            all_type_ids = set()
-            for r in results:
-                for mat in r.get("material_breakdown", []):
+
+            _all_blueprints = load_blueprints()
+
+            sci          = _resolve_sci("Korsiki")
+            facility_cfg = _facility_config("large")
+
+            all_type_ids: set = set()
+            output_ids:   set = set()
+            for bp in _all_blueprints:
+                output_ids.add(bp["output_id"])
+                all_type_ids.add(bp["output_id"])
+                for mat in bp["materials"]:
                     all_type_ids.add(mat["type_id"])
-            prices = get_prices_bulk(list(all_type_ids))
+            all_type_ids.update(MINERALS.values())
+            from invention import _all_datacore_type_ids
+            all_type_ids.update(_all_datacore_type_ids())
+
+            prices = get_prices_bulk(list(all_type_ids), history_ids=list(output_ids))
+
+            _sell_days: dict = {}
+            try:
+                from database import get_avg_days_to_sell_by_type
+                _sell_days = get_avg_days_to_sell_by_type()
+            except Exception:
+                pass
+
+            cfg_override = {
+                **CONFIG,
+                "system_cost_index":           sci,
+                "structure_me_bonus":          facility_cfg["me_bonus"],
+                "job_cost_structure_discount": facility_cfg["job_discount"],
+                "sales_tax":                   facility_cfg["sales_tax"],
+            }
+
+            results = []
+            for bp in _all_blueprints:
+                result = calculate_profit(bp, prices, config_override=cfg_override,
+                                          invention_prices=prices,
+                                          sell_days_by_type=_sell_days)
+                if not result:
+                    continue
+
+                # Blueprint metadata (mirrors api_calculator)
+                result["me_level"]        = bp.get("me_level", 0)
+                result["te_level"]        = bp.get("te_level", 0)
+                result["category"]        = _normalize_category(bp.get("category", "Other"))
+                result["tech"]            = bp.get("tech", "I")
+                result["size"]            = bp.get("size", "U")
+                result["bp_type"]         = bp.get("bp_type", "BPO")
+                result["duration"]        = result.get("time_seconds") or bp.get("time_seconds", 0)
+                result["volume"]          = bp.get("volume", 0)
+                result["required_skills"] = bp.get("required_skills", [])
+                result["blueprint_id"]    = bp.get("blueprint_id")
+
+                # Derived metrics (same formulas as api_calculator)
+                cost           = (result.get("material_cost", 0) + result.get("job_cost", 0)
+                                  + result.get("sales_tax", 0) + result.get("broker_fee", 0))
+                profit         = result.get("net_profit", 0)
+                time_s         = result.get("time_seconds") or bp.get("time_seconds", 0)
+                avg_sell_days  = result.get("avg_sell_days", 3.0)
+                total_cycle_s  = time_s + avg_sell_days * 86400.0
+                duration_h     = total_cycle_s / 3600.0 if total_cycle_s else 0
+                result["roi"]          = (profit / cost * 100) if cost > 0 else 0
+                result["isk_per_hour"] = (profit / duration_h) if duration_h > 0 else None
+                result["isk_per_m3"]   = (profit / result["volume"]) if result.get("volume", 0) > 0 else 0
+
+                _gross    = result.get("gross_revenue", 0)
+                _fees     = result.get("sales_tax", 0) + result.get("broker_fee", 0)
+                _oqty     = result.get("output_qty", 1) or 1
+                _costs    = result.get("material_cost", 0) + result.get("job_cost", 0)
+                _fee_frac = (_fees / _gross) if _gross > 0 else 0
+                result["break_even_price"] = round(
+                    _costs / (_oqty * (1.0 - _fee_frac)), 2
+                ) if _fee_frac < 1.0 else None
+
+                result["resolved_sci"]   = sci
+                result["facility_label"] = facility_cfg["label"]
+
+                results.append(result)
+
+            results.sort(key=lambda x: x["net_profit"], reverse=True)
+
+            seen: set = set()
+            deduped = []
+            for r in results:
+                oid = r.get("output_id")
+                if oid not in seen:
+                    seen.add(oid)
+                    deduped.append(r)
+
             _calc_cache[_cache_key] = {
-                "generated_at": time.time(),
-                "results":      results,
-                "prices":       prices,
+                "generated_at": int(time.time()),
+                "results":      deduped,
+                "sci":          sci,
+                "facility":     facility_cfg,
             }
             print("  [prewarm] Calculator cache ready.")
         except Exception as _e:
