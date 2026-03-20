@@ -217,20 +217,111 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
 
         region_id = CONFIG["REGION_ID"]
         max_pages = CONFIG["MAX_PAGES"]
-        session   = requests.Session()
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        retry_count = 0
+        error_count = 0
+        backoff_until = [0.0]
+        backoff_lock = threading.Lock()
+        rate_lock = threading.Lock()
+        next_slot = [time.time()]
+        slot_interval = [0.2]
+
+        def _wait_rate_slot():
+            while True:
+                with rate_lock:
+                    now = time.time()
+                    if now >= next_slot[0]:
+                        next_slot[0] = now + slot_interval[0]
+                        return
+                    wait_for = max(0.01, next_slot[0] - now)
+                time.sleep(wait_for)
+
+        def _esi_get(url: str, *, params=None, timeout=(6, 12), allow_404=False):
+            nonlocal retry_count, error_count
+            max_attempts = 4
+            for attempt in range(max_attempts):
+                while backoff_until[0] > time.time():
+                    time.sleep(0.5)
+                _wait_rate_slot()
+                try:
+                    resp = session.get(url, params=params, timeout=timeout)
+                    try:
+                        remain = int(resp.headers.get("X-ESI-Error-Limit-Remain", 100))
+                    except Exception:
+                        remain = 100
+                    if remain < 15:
+                        slot_interval[0] = 1.5
+                    elif remain < 30:
+                        slot_interval[0] = 0.6
+                    elif remain > 60:
+                        slot_interval[0] = 0.2
+
+                    if resp.status_code in (420, 429):
+                        retry_count += 1
+                        reset = resp.headers.get("X-ESI-Error-Limit-Reset") or resp.headers.get("Retry-After") or "8"
+                        try:
+                            wait_s = min(max(float(reset), 1.0) + 1.0, 60.0)
+                        except Exception:
+                            wait_s = 8.0
+                        with backoff_lock:
+                            backoff_until[0] = max(backoff_until[0], time.time() + wait_s)
+                        continue
+
+                    if resp.status_code == 404 and allow_404:
+                        return None, 404
+                    if resp.status_code >= 500 and attempt < max_attempts - 1:
+                        retry_count += 1
+                        time.sleep(1.3 * (2 ** attempt))
+                        continue
+                    if not resp.ok:
+                        error_count += 1
+                        return None, resp.status_code
+                    return resp, resp.status_code
+                except Exception:
+                    if attempt < max_attempts - 1:
+                        retry_count += 1
+                        time.sleep(1.3 * (2 ** attempt))
+                        continue
+                    error_count += 1
+                    return None, 0
+            return None, 0
 
         # ── Fetch contract pages ───────────────────────────────────────────────
         print(f"  [alerts/contract] Scanning ESI contracts (region {region_id}, up to {max_pages} pages)…")
-        first_page, total_pages = _fetch_contract_page(session, region_id, 1)
+        first_resp, first_status = _esi_get(
+            f"https://esi.evetech.net/latest/contracts/public/{region_id}/",
+            params={"page": 1},
+            timeout=(6, 14),
+            allow_404=True,
+        )
+        if first_status not in (200, 404) or first_resp is None:
+            print("  [alerts/contract] Failed to load initial contracts page.")
+            status["last_error"] = "contract scan failed to fetch initial page"
+            return
+        first_page = first_resp.json()
+        total_pages = int(first_resp.headers.get("X-Pages", 1))
         total_pages = min(total_pages, max_pages)
 
         all_contracts = [c for c in first_page if c.get("type") == "item_exchange"]
         if total_pages > 1:
+            def _fetch_page(page: int):
+                resp, code = _esi_get(
+                    f"https://esi.evetech.net/latest/contracts/public/{region_id}/",
+                    params={"page": page},
+                    timeout=(6, 12),
+                    allow_404=True,
+                )
+                if code == 404 or resp is None:
+                    return []
+                return resp.json()
+
             with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {pool.submit(_fetch_contract_page, session, region_id, p): p
-                           for p in range(2, total_pages + 1)}
+                futures = {pool.submit(_fetch_page, p): p for p in range(2, total_pages + 1)}
                 for fut in as_completed(futures):
-                    page_data, _ = fut.result()
+                    page_data = fut.result()
                     all_contracts.extend(
                         c for c in page_data if c.get("type") == "item_exchange"
                     )
@@ -241,7 +332,15 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
 
         # ── Match contracts to wanted BPOs ────────────────────────────────────
         def check_contract(contract):
-            items = _fetch_contract_items(session, contract["contract_id"])
+            resp, _ = _esi_get(
+                f"https://esi.evetech.net/latest/contracts/public/items/{contract['contract_id']}/",
+                timeout=(5, 10),
+                allow_404=True,
+            )
+            if resp is None:
+                return []
+            items = resp.json() or []
+            out = []
             for item in items:
                 tid = item.get("type_id")
                 if (
@@ -249,25 +348,25 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
                     and item.get("is_included", True)
                     and not item.get("is_blueprint_copy", False)  # BPOs only
                 ):
-                    return {
+                    out.append({
                         "contract": contract,
                         "type_id":  tid,
                         "me":       item.get("material_efficiency", 0),
                         "te":       item.get("time_efficiency", 0),
-                    }
-            return None
+                    })
+            return out
 
         matched: list[dict] = []
         with ThreadPoolExecutor(max_workers=6) as pool:
             futures = [pool.submit(check_contract, c) for c in candidates]
             for fut in as_completed(futures):
-                result = fut.result()
-                if result:
-                    matched.append(result)
+                result = fut.result() or []
+                matched.extend(result)
 
         if not matched:
             print("  [alerts/contract] No matching BPO contracts found.")
             status["contract_deals_found"] = 0
+            print(f"  [alerts/contract] Request retries={retry_count}, request_errors={error_count}")
             return
 
         # ── Evaluate each match ───────────────────────────────────────────────
@@ -311,6 +410,7 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
                 print(f"  [alerts/contract] Alert sent: {name} @ {_fmt_isk(price)} — {roi:.1f}% ROI, {breakeven_runs} runs breakeven")
 
         status["contract_deals_found"] = deals_found
+        print(f"  [alerts/contract] Request retries={retry_count}, request_errors={error_count}")
         print(f"  [alerts/contract] Scan complete. {deals_found} new deal alert(s) sent.")
 
     except Exception as e:

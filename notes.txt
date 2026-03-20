@@ -19,3 +19,5 @@ buttons:
 
 Queue Planner:
  needs mats cost of recommended amount of runs. replace isk/hr with this in the table.
+
+Job cost doesnt seem to be calculated in when running jobs (both mfg and research)

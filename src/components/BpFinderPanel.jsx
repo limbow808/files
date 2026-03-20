@@ -352,6 +352,11 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
         {/* Scan results table */}
         {scanView && scanState === 'done' && scanResults && (
           <>
+            {scanResults.results.length > filteredScanResults.length && (
+              <div style={{ padding: '8px 20px 2px', color: 'var(--dim)', fontSize: 10, letterSpacing: 1.3 }}>
+                {`${(scanResults.results.length - filteredScanResults.length).toLocaleString()} matched contract(s) hidden by current filters (including ROI >= 1%).`}
+              </div>
+            )}
             {filteredScanResults.length === 0 ? (
               <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
                 {scanResults.results.length === 0
