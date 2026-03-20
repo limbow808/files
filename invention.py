@@ -33,7 +33,63 @@ BASE SUCCESS CHANCES (from EVE SDE, manufacturing activity):
   T2 frigate/destroyer:            0.30 (30%)
 """
 
+import os
+import sqlite3
+import threading
 from pricer import get_prices_bulk
+
+# ── DB-backed invention data (loaded lazily from crest.db) ───────────────────
+# Cached in-process; cleared by setting to None (e.g. after re-seeding).
+_DB_INVENTION: dict[str, dict] | None = None
+_DB_INVENTION_LOCK = threading.Lock()
+_CREST_DB = os.path.join(os.path.dirname(__file__), "crest.db")
+
+
+def _load_invention_from_db() -> dict[str, dict]:
+    """
+    Load invention data from crest.db blueprint_invention table, keyed by
+    output_name (same format as INVENTION_DATA so callers work with both).
+    Returns an empty dict if crest.db is absent or the table doesn’t exist yet.
+    """
+    global _DB_INVENTION
+    with _DB_INVENTION_LOCK:
+        if _DB_INVENTION is not None:
+            return _DB_INVENTION
+        pool: dict[str, dict] = {}
+        if os.path.exists(_CREST_DB):
+            try:
+                conn = sqlite3.connect(_CREST_DB)
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute("""
+                    SELECT bi.datacore_1_type_id, bi.datacore_1_qty,
+                           bi.datacore_2_type_id, bi.datacore_2_qty,
+                           bi.base_success_chance, bi.output_runs_per_bpc,
+                           b.output_name
+                    FROM   blueprint_invention bi
+                    JOIN   blueprints b ON b.blueprint_id = bi.t2_blueprint_id
+                """).fetchall()
+                conn.close()
+                for r in rows:
+                    pool[r["output_name"]] = {
+                        "datacore_1_type_id":  r["datacore_1_type_id"],
+                        "datacore_1_qty":      r["datacore_1_qty"],
+                        "datacore_2_type_id":  r["datacore_2_type_id"],
+                        "datacore_2_qty":      r["datacore_2_qty"] or 0,
+                        "base_success_chance": r["base_success_chance"],
+                        "output_runs_per_bpc": r["output_runs_per_bpc"],
+                    }
+            except Exception as e:
+                print(f"[invention] Could not load from crest.db: {e}")
+        _DB_INVENTION = pool
+        return pool
+
+
+def invalidate_invention_cache() -> None:
+    """Force a reload from crest.db on next call (call after re-seeding)."""
+    global _DB_INVENTION
+    with _DB_INVENTION_LOCK:
+        _DB_INVENTION = None
+
 
 # ── Invention data per T2 blueprint ──────────────────────────────────────────
 # Key = product name (matches blueprint output_name / calculator result name)
@@ -95,8 +151,14 @@ DECRYPTOR_MODIFIERS: dict[str, float] = {
 
 
 def _all_datacore_type_ids() -> list[int]:
-    """Return every datacore type ID referenced in INVENTION_DATA."""
+    """Return every datacore type ID from both the DB and the hardcoded fallback."""
     ids: set[int] = set()
+    # DB-seeded data (covers all T2 blueprints after running seeder.py)
+    for entry in _load_invention_from_db().values():
+        ids.add(entry["datacore_1_type_id"])
+        if entry.get("datacore_2_type_id"):
+            ids.add(entry["datacore_2_type_id"])
+    # Hardcoded fallback (used when crest.db has no invention table yet)
     for entry in INVENTION_DATA.values():
         ids.add(entry["datacore_1_type_id"])
         ids.add(entry["datacore_2_type_id"])
@@ -136,9 +198,10 @@ def calculate_invention_cost(
             },
             "output_runs_per_bpc": int,
         }
-        Returns None if blueprint_name is not in INVENTION_DATA or prices missing.
+        Returns None if blueprint_name is not found in any source or prices missing.
     """
-    inv = INVENTION_DATA.get(blueprint_name)
+    # DB-seeded data takes precedence; fall back to hardcoded INVENTION_DATA.
+    inv = _load_invention_from_db().get(blueprint_name) or INVENTION_DATA.get(blueprint_name)
     if inv is None:
         return None
 

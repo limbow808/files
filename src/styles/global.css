@@ -559,6 +559,43 @@ tr.row-selected td { color: #000; }
 .scan-label-shimmer {
   animation: pulse 1.2s ease-in-out infinite;
 }
+
+/* Toast notifications */
+.bp-toast-container {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.bp-toast {
+  padding: 8px 16px;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  animation: evePanelIn 0.3s ease-out both;
+  pointer-events: auto;
+}
+.bp-toast-success {
+  background: rgba(76,255,145,0.12);
+  border: 1px solid rgba(76,255,145,0.3);
+  color: #4cff91;
+}
+.bp-toast-indexing {
+  background: rgba(255,140,0,0.12);
+  border: 1px solid rgba(255,140,0,0.3);
+  color: #ff9900;
+}
+.bp-toast-info {
+  background: rgba(100,150,255,0.12);
+  border: 1px solid rgba(100,150,255,0.3);
+  color: #6496ff;
+}
+
 .scan-label-sub {
   font-size: 9px;
   letter-spacing: 1px;

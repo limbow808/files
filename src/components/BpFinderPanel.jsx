@@ -70,14 +70,128 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
   useEffect(() => lsSet('bpf_scanSort', scanSortKey), [scanSortKey]);
 
   // ── Market scan state ─────────────────────────────────────────────────────
-  const [scanState,   setScanState]   = useState('idle');
-  const [scanResults, setScanResults] = useState(() => lsGet('bpf_scanResults', null));
+  const _restoredResults = lsGet('bpf_scanResults', null);
+  const [scanState,   setScanState]   = useState(_restoredResults != null ? 'done' : 'idle');
+  const [scanResults, setScanResults] = useState(_restoredResults);
   const [scanError,   setScanError]   = useState('');
-  const [scanView,    setScanView]    = useState(() => lsGet('bpf_scanResults', null) != null);
+  const [scanView,    setScanView]    = useState(_restoredResults != null);
   const [scanProgress, setScanProgress] = useState(null);
   const [showBpo,   setShowBpo]   = useState(true);
   const [showBpc,   setShowBpc]   = useState(true);
   const [showOwned, setShowOwned] = useState(true);
+
+  // ── Contract cache warming status ─────────────────────────────────────────
+  const [cacheStats, setCacheStats] = useState(null);
+  const [cacheRate, setCacheRate] = useState(0);   // contracts/sec
+  const [cacheEta, setCacheEta] = useState(null);  // seconds remaining
+  const [toasts, setToasts] = useState([]);
+  const prevReadyRef = useRef(false);
+  const prevFetchedRef = useRef(null);
+  const prevPollTsRef = useRef(null);
+  const lastAutoScanRef = useRef(0);       // epoch ms of last auto-rescan
+  const silentBusyRef = useRef(false);     // guard against overlapping silent fetches
+  const toastIdRef = useRef(0);
+
+  function addToast(msg, type = 'info', duration = 6000) {
+    const id = ++toastIdRef.current;
+    setToasts(prev => [...prev, { id, msg, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
+  }
+
+  // Silent background refresh — merges new contracts into existing table
+  // without blanking the UI or showing scanning progress.
+  async function silentRefresh() {
+    if (silentBusyRef.current) return;
+    silentBusyRef.current = true;
+    try {
+      const params = new URLSearchParams({ region_id: region, max_pages: 20 });
+      const r = await fetch(`${API}/api/bpo_market_scan?${params}`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!data.results || data.not_ready) return;
+
+      setScanResults(prev => {
+        if (!prev) {
+          // No existing results — just set them
+          lsSet('bpf_scanResults', data);
+          return data;
+        }
+        // Merge: add new contracts, update existing ones by contract_id
+        const existingById = new Map(
+          prev.results.map(r => [r.contract_id, r])
+        );
+        for (const row of data.results) {
+          existingById.set(row.contract_id, row);
+        }
+        const merged = { ...data, results: [...existingById.values()] };
+        lsSet('bpf_scanResults', merged);
+        return merged;
+      });
+    } catch { /* silent — don't disturb user */ }
+    finally { silentBusyRef.current = false; }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const r = await fetch(`${API}/api/contracts/status`);
+        if (!r.ok || cancelled) return;
+        const s = await r.json();
+        if (cancelled) return;
+        setCacheStats(s);
+
+        // Compute rate + ETA from successive polls
+        const now = Date.now();
+        if (prevFetchedRef.current != null && prevPollTsRef.current != null) {
+          const dt = (now - prevPollTsRef.current) / 1000;
+          const dn = s.items_fetched - prevFetchedRef.current;
+          if (dt > 0 && dn > 0) {
+            const rate = dn / dt;
+            setCacheRate(rate);
+            if (s.items_pending > 0) {
+              setCacheEta(Math.round(s.items_pending / rate));
+            } else {
+              setCacheEta(0);
+            }
+          } else if (dn === 0 && s.items_pending > 0) {
+            // Stalled — show 0 rate but keep previous ETA visible
+            setCacheRate(0);
+          }
+        }
+        prevFetchedRef.current = s.items_fetched;
+        prevPollTsRef.current = now;
+
+        // Toast on warming start
+        if (prevReadyRef.current === null && !s.ready && s.items_pending > 0) {
+          addToast(`Indexing ${s.outstanding.toLocaleString()} contracts…`, 'indexing', 8000);
+        }
+
+        // Auto-rescan + toast once cache transitions from warming → ready
+        if (!prevReadyRef.current && s.ready) {
+          addToast('Contract cache ready — scanning now', 'success', 5000);
+          if (scanState === 'done' && scanView) {
+            runScan();
+            lastAutoScanRef.current = now;
+          }
+        }
+
+        // Progressive silent refresh every 30s while cache is still warming
+        if (!s.ready && scanState === 'done' && scanView
+            && s.items_fetched > 0 && now - lastAutoScanRef.current > 30_000) {
+          silentRefresh();
+          lastAutoScanRef.current = now;
+        }
+
+        prevReadyRef.current = s.ready;
+      } catch {}
+    }
+    prevReadyRef.current = null; // sentinel for first poll
+    poll();
+    const id = setInterval(poll, 5_000);
+    return () => { cancelled = true; clearInterval(id); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanState, scanView]);
 
   const esRef = useRef(null);
 
@@ -198,8 +312,25 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
     return list;
   }, [scanResults, showBpo, showBpc, showOwned, scanSortKey]);
 
+  // Label for the "no results" message — reflects which filter is active
+  const bpTypeFilter = !showBpo ? 'BPC' : !showBpc ? 'BPO' : !showOwned ? 'UNOWNED' : 'MATCHING';
+
   return (
     <div className="bp-finder-panel">
+
+      {/* ── Toast notifications ──────────────────────────────────────────── */}
+      {toasts.length > 0 && (
+        <div className="bp-toast-container">
+          {toasts.map(t => (
+            <div key={t.id} className={`bp-toast bp-toast-${t.type}`}>
+              {t.type === 'success' && <span style={{ marginRight: 6 }}>✓</span>}
+              {t.type === 'indexing' && <span style={{ marginRight: 6 }}>⟳</span>}
+              {t.msg}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Header */}
       <div className="bp-finder-header">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
@@ -307,6 +438,60 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
       {/* Table */}
       {/* ── SCAN RESULTS panel ─────────────────────────────────────────────── */}
       <div className="bp-finder-body">
+
+        {/* Contract cache warming banner */}
+        {cacheStats && !cacheStats.ready && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 12,
+            padding: '7px 16px',
+            background: 'rgba(255,140,0,0.07)',
+            borderBottom: '1px solid rgba(255,140,0,0.25)',
+            fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1.3,
+          }}>
+            <span className="scan-label-shimmer" style={{ color: '#ff9900', flexShrink: 0 }}>
+              {cacheStats.warming_up ? '⟳ CACHE WARMING UP' : '⟳ INDEXING CONTRACTS'}
+            </span>
+            <div style={{ flex: 1, height: 3, background: '#1a1a1a', position: 'relative', borderRadius: 2, overflow: 'hidden' }}>
+              {cacheStats.outstanding > 0 && (
+                <div className="eve-bar-glow" style={{
+                  position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 2,
+                  width: `${Math.round((cacheStats.items_fetched / cacheStats.outstanding) * 100)}%`,
+                  background: '#ff9900', transition: 'width 1s',
+                }} />
+              )}
+            </div>
+            <span style={{ color: 'var(--dim)', flexShrink: 0 }}>
+              {cacheStats.items_fetched.toLocaleString()} / {cacheStats.outstanding.toLocaleString()}
+            </span>
+            {cacheRate > 0 && (
+              <span style={{ color: '#ff9900', flexShrink: 0, fontWeight: 600 }}>
+                ~{Math.round(cacheRate)}/s
+              </span>
+            )}
+            {cacheRate === 0 && !cacheStats.warming_up && cacheStats.items_pending > 0 && (
+              <span className="scan-label-shimmer" style={{ color: 'var(--dim)', flexShrink: 0 }}>
+                waiting…
+              </span>
+            )}
+            {cacheEta != null && cacheEta > 0 && (
+              <span style={{ color: 'var(--dim)', flexShrink: 0 }}>
+                ETA ~{cacheEta < 60 ? `${cacheEta}s` : `${Math.ceil(cacheEta / 60)}m`}
+              </span>
+            )}
+          </div>
+        )}
+        {cacheStats?.ready && scanResults?.from_cache && (
+          <div style={{
+            padding: '5px 16px',
+            background: 'rgba(76,255,145,0.05)',
+            borderBottom: '1px solid rgba(76,255,145,0.12)',
+            fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1.3,
+            color: '#4cff91',
+          }}>
+            ✓ LOCAL CACHE — {cacheStats.items_fetched.toLocaleString()} contracts indexed · instant results
+          </div>
+        )}
+
         {/* Live scan progress */}
         {scanView && scanState === 'scanning' && scanProgress && (
           <div className="scan-progress-panel">

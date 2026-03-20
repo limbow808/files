@@ -6,7 +6,7 @@ Personal web app that connects to your EVE accounts via ESI, pulls live Jita mar
 **Features**
 - Manufacturing calculator — profit, ROI, ISK/hr per blueprint accounting for ME/TE, system cost index, facility bonuses, taxes
 - Blueprint Finder — scans ESI public contracts, matches against profitable items, flags already-owned BPs
-- Industry jobs — active jobs across all characters and corp facilities
+- Industry jobs — track active jobs across all characters and corp facilities
 - Overview — wallet history, PLEX tracker, mineral prices, open orders
 - Telegram alerts — background scanner, fires on high-ROI items and below-median BPO contract prices
 
@@ -64,6 +64,8 @@ python server.py
 # Terminal 2 — frontend
 npx vite --port 3000
 ```
+
+python seeder.py to populate blueprint_invention
 
 Open [http://localhost:3000](http://localhost:3000), go to **Characters** and add your EVE account(s).
 

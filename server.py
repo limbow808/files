@@ -20,6 +20,7 @@ import time
 import json
 import os
 import threading
+import requests
 import esi_client as _esi
 
 from blueprints import load_blueprints, MINERALS
@@ -30,6 +31,151 @@ from database import (
     upsert_craft_jobs, get_craft_log, get_craft_stats,
 )
 import alert_scanner as _alert_scanner
+import contracts_cache as _cc
+
+# ── Contract cache background refresher config ────────────────────────────────
+_CC_REGION_ID        = 10_000_002   # The Forge / Jita
+_CC_REFRESH_INTERVAL = 600          # re-fetch contract headers every 10 min
+
+
+def _contract_cache_refresher() -> None:
+    """
+    Daemon: continuously fills contracts_cache.db so that user-facing scans
+    become instant SQL queries instead of blocking live ESI calls.
+
+    Uses async aiohttp with 50 concurrent connections for high throughput.
+    Processes ~30K contracts in ~5-10 min instead of 35+ min.
+    """
+    import asyncio
+    import aiohttp
+
+    _cc.init_db()
+    ESI = "https://esi.evetech.net/latest"
+
+    async def _run():
+        connector = aiohttp.TCPConnector(limit=60, ttl_dns_cache=300)
+        timeout   = aiohttp.ClientTimeout(total=15, connect=6)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            while True:
+                try:
+                    await _refresh_cycle(session)
+                except Exception as e:
+                    print(f"  [contract-cache] refresh error: {e}")
+                await asyncio.sleep(_CC_REFRESH_INTERVAL)
+
+    async def _esi_get(session, url, params=None, retries=3):
+        """GET with retry + 429 backoff."""
+        for attempt in range(retries):
+            try:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 429:
+                        wait = float(resp.headers.get("Retry-After", "3") or "3") + 0.5
+                        await asyncio.sleep(min(wait, 15))
+                        continue
+                    if resp.status >= 500:
+                        await asyncio.sleep(1 + attempt)
+                        continue
+                    if resp.status == 200:
+                        return await resp.json(content_type=None)
+                    return None
+            except (asyncio.TimeoutError, aiohttp.ClientError):
+                await asyncio.sleep(1 + attempt)
+        return None
+
+    async def _refresh_cycle(session):
+        # ── 1. Fetch contract header pages (fast, ~50 pages) ──────────────
+        try:
+            async with session.get(
+                f"{ESI}/contracts/public/{_CC_REGION_ID}/",
+                params={"page": 1},
+            ) as r0:
+                if r0.status != 200:
+                    print("  [contract-cache] ESI unreachable — sleeping 60 s")
+                    await asyncio.sleep(60)
+                    return
+                total_pages = min(int(r0.headers.get("X-Pages", 1)), 50)
+                data0 = await r0.json(content_type=None)
+        except (asyncio.TimeoutError, aiohttp.ClientError):
+            print("  [contract-cache] ESI unreachable — sleeping 60 s")
+            await asyncio.sleep(60)
+            return
+
+        all_contracts = list(data0)
+
+        if total_pages > 1:
+            pages = await asyncio.gather(*[
+                _esi_get(session, f"{ESI}/contracts/public/{_CC_REGION_ID}/",
+                         params={"page": p})
+                for p in range(2, total_pages + 1)
+            ])
+            for page_data in pages:
+                if page_data:
+                    all_contracts.extend(page_data)
+
+        inserted = _cc.upsert_contracts(_CC_REGION_ID, all_contracts)
+        print(
+            f"  [contract-cache] {len(all_contracts):,} headers fetched, "
+            f"{inserted:,} new"
+        )
+
+        # ── 2. Fetch items — 50 concurrent requests via semaphore ─────────
+        sem     = asyncio.Semaphore(50)
+        ok      = [0]
+        fail    = [0]
+        t_start = time.time()
+
+        async def _fetch_one(cid):
+            async with sem:
+                data = await _esi_get(
+                    session,
+                    f"{ESI}/contracts/public/items/{cid}/",
+                    retries=3,
+                )
+            if data is None:
+                fail[0] += 1
+                _cc.store_items(cid, [], time.time())  # sentinel — permanently unfetchable
+                return
+            _cc.store_items(cid, data, time.time())
+            ok[0] += 1
+            done = ok[0] + fail[0]
+            if done % 500 == 0:
+                elapsed = time.time() - t_start
+                rate = done / max(elapsed, 0.1)
+                print(
+                    f"  [contract-cache] items {done:,}/{total:,} "
+                    f"({rate:.0f}/s  ok={ok[0]:,} fail={fail[0]:,})"
+                )
+
+        _BATCH = 5_000
+        while True:
+            pending = _cc.get_ids_needing_items(_CC_REGION_ID, limit=_BATCH)
+            if not pending:
+                break
+            total = len(pending)
+            ok[0] = fail[0] = 0
+            t_start = time.time()
+            print(f"  [contract-cache] fetching items for {total:,} contracts…")
+            await asyncio.gather(*[_fetch_one(cid) for cid in pending])
+            elapsed = time.time() - t_start
+            rate = (ok[0] + fail[0]) / max(elapsed, 0.1)
+            print(
+                f"  [contract-cache] batch done in {elapsed:.0f}s "
+                f"({rate:.0f}/s  ok={ok[0]:,} fail={fail[0]:,})"
+            )
+            if fail[0] > ok[0]:
+                print("  [contract-cache] many failures — pausing 30 s")
+                await asyncio.sleep(30)
+
+        # ── 3. Purge expired contracts ────────────────────────────────────
+        purged = _cc.purge_expired(_CC_REGION_ID)
+        if purged:
+            print(f"  [contract-cache] purged {purged:,} expired contracts")
+
+    # Run the async loop in this daemon thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(_run())
+
 
 app = cors(Quart(__name__))  # Allow React dev server (localhost:3000 / file://) to call the API
 
@@ -114,9 +260,16 @@ SCAN_MIN_RPS_LIMITS = (1.0, 20.0)
 SCAN_MAX_RPS_LIMITS = (2.0, 30.0)
 
 # Cache contract item lookups to avoid re-fetching unchanged listings every scan.
+# TTL is set per-entry to the contract's own date_expired (see _run_blueprint_contract_scan);
+# this module-level constant is the fallback when expiry is absent (24 h).
 _CONTRACT_ITEMS_CACHE: dict[int, dict] = {}
-_CONTRACT_ITEMS_CACHE_TTL = 300  # 5 min
+_CONTRACT_ITEMS_CACHE_TTL = 86400  # 24 h fallback (overridden per-entry by expiry)
 _CONTRACT_ITEMS_CACHE_LOCK = threading.Lock()
+
+# Timestamp of the last completed contract scan — used to skip contracts we've
+# already seen so repeat scans only fetch items for new listings.
+_LAST_CONTRACT_SCAN_TS: float = 0.0
+_LAST_CONTRACT_SCAN_LOCK = threading.Lock()
 
 # Cache expensive owned-BP lookup to avoid repeated character/corp blueprint fetches.
 _OWNED_BP_CACHE: dict = {"ts": 0.0, "personal": set(), "corp": set()}
@@ -313,6 +466,81 @@ def api_characters_poll(state):
         return jsonify(result)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 200
+
+
+# ── Character skills cache: char_id → {ts, skills} ────────────────────────────
+_SKILLS_CACHE: dict[str, dict] = {}
+_SKILLS_CACHE_TTL = 3600  # 1 hour — skills change rarely
+
+
+@app.route("/api/characters/<character_id>/skills", methods=["GET"])
+def api_character_skills(character_id: str):
+    """
+    Return the trained skill levels for a character.
+    Response: { skills: { skill_name: trained_level, ... } }
+    Names are resolved from skill_names.json (populated by seeder) or via
+    the ESI universe/names endpoint as a fallback.
+    """
+    try:
+        import requests as _req
+        from characters import get_auth_header, load_characters
+
+        # Validate character exists in our store
+        chars = load_characters()
+        if str(character_id) not in chars:
+            return jsonify({"error": "Character not found"}), 404
+
+        cached = _SKILLS_CACHE.get(str(character_id))
+        if cached and (time.time() - cached["ts"]) < _SKILLS_CACHE_TTL:
+            return jsonify(cached["data"])
+
+        headers = get_auth_header(str(character_id))
+        r = _req.get(
+            f"https://esi.evetech.net/latest/characters/{character_id}/skills/",
+            headers=headers,
+            timeout=10,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        raw_skills = payload.get("skills", [])
+
+        # Resolve skill names: prefer loaded skill_names.json, else ESI bulk names
+        skill_id_to_name: dict[int, str] = {}
+        if _skill_id_names:
+            skill_id_to_name = {int(k): v for k, v in _skill_id_names.items()}
+        else:
+            # Fallback: bulk-resolve via ESI universe/names
+            skill_ids = [s["skill_id"] for s in raw_skills]
+            if skill_ids:
+                try:
+                    nr = _req.post(
+                        "https://esi.evetech.net/latest/universe/names/",
+                        json=skill_ids[:1000],
+                        timeout=10,
+                    )
+                    if nr.ok:
+                        for item in nr.json():
+                            skill_id_to_name[item["id"]] = item["name"]
+                except Exception:
+                    pass
+
+        skills_out: dict[str, int] = {}
+        for s in raw_skills:
+            sid  = s["skill_id"]
+            lvl  = s.get("trained_skill_level", 0)
+            name = skill_id_to_name.get(sid, f"Skill {sid}")
+            skills_out[name] = lvl
+
+        result = {
+            "character_id":        str(character_id),
+            "total_sp":            payload.get("total_sp", 0),
+            "unallocated_sp":      payload.get("unallocated_sp", 0),
+            "skills":              skills_out,
+        }
+        _SKILLS_CACHE[str(character_id)] = {"ts": time.time(), "data": result}
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/scan", methods=["GET"])
@@ -887,6 +1115,11 @@ def api_calculator():
             for mat in r.get("material_breakdown", []):
                 if "volume_m3" not in mat:
                     mat["volume_m3"] = _PACKAGED_VOLUMES.get(mat["type_id"], 0.01)
+
+        # Optional post-calculation filters (query params)
+        min_volume = float(request.args.get("min_volume", "0") or 0)
+        if min_volume > 0:
+            results = [r for r in results if (r.get("avg_daily_volume") or 0) >= min_volume]
 
         # Deduplicate by output_id — keep the highest-profit entry per product
         seen_output_ids = set()
@@ -1731,18 +1964,78 @@ def api_bpo_market_scan():
             })
 
         personal_bp_ids, corp_bp_ids = _load_owned_bp_ids()
-        scan_payload = _run_blueprint_contract_scan(
-            region_id=region_id,
-            max_pages=max_pages,
-            wanted_bp_ids=wanted_bp_ids,
-            bpid_to_calc=bpid_to_calc,
-            personal_bp_ids=personal_bp_ids,
-            corp_bp_ids=corp_bp_ids,
-            progress_cb=None,
-            min_rps=min_rps,
-            max_rps=max_rps,
+
+        # ── Use local contract cache (instant SQL query, no ESI calls) ─────────
+        stats = _cc.get_stats(region_id)
+        if stats["items_fetched"] == 0:
+            # Cache hasn't warmed up yet — fall back to live scan
+            scan_payload = _run_blueprint_contract_scan(
+                region_id=region_id,
+                max_pages=max_pages,
+                wanted_bp_ids=wanted_bp_ids,
+                bpid_to_calc=bpid_to_calc,
+                personal_bp_ids=personal_bp_ids,
+                corp_bp_ids=corp_bp_ids,
+                progress_cb=None,
+                min_rps=min_rps,
+                max_rps=max_rps,
+            )
+            return jsonify(scan_payload)
+
+        raw_matches   = _cc.query_bp_contracts(wanted_bp_ids, region_id=region_id)
+        best_by_bpid  = {}
+        for row in raw_matches:
+            match = {
+                "contract": {
+                    "contract_id":       row["contract_id"],
+                    "title":             row["title"],
+                    "price":             row["price"],
+                    "volume":            row["volume"],
+                    "date_issued":       row["date_issued"],
+                    "date_expired":      row["date_expired"],
+                    "start_location_id": None,
+                    "issuer_id":         None,
+                },
+                "type_id": row["type_id"],
+                "me":       row["material_efficiency"],
+                "te":       row["time_efficiency"],
+                "quantity": row["quantity"],
+                "is_bpc":   bool(row["is_blueprint_copy"]),
+                "runs":     row["runs"],
+            }
+            result_row = _build_scan_result_row(
+                match, bpid_to_calc, personal_bp_ids, corp_bp_ids
+            )
+            bpid     = result_row["blueprint_id"]
+            existing = best_by_bpid.get(bpid)
+            if existing is None:
+                result_row["listing_count"]  = 1
+                result_row["cheapest_price"] = result_row["price"]
+                best_by_bpid[bpid] = result_row
+            else:
+                existing["listing_count"] = existing.get("listing_count", 1) + 1
+                if result_row["price"] < existing["price"]:
+                    result_row["listing_count"]  = existing["listing_count"]
+                    result_row["cheapest_price"] = result_row["price"]
+                    best_by_bpid[bpid] = result_row
+
+        results = sorted(
+            best_by_bpid.values(),
+            key=lambda x: (
+                0 if x.get("can_breakeven", True) else 1,
+                -(x.get("adj_net_profit", 0)),
+            ),
         )
-        return jsonify(scan_payload)
+        return jsonify({
+            "results":           results,
+            "matched":           len(results),
+            "raw_matches":       len(raw_matches),
+            "contracts_checked": stats["items_fetched"],
+            "pages_scanned":     0,
+            "bp_candidates":     stats["outstanding"],
+            "cache_stats":       stats,
+            "from_cache":        True,
+        })
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1907,24 +2200,85 @@ def api_bpo_market_scan_stream():
                 _msg_q.put(_sse({"type": "status", "msg": "Loading owned blueprint data…"}))
                 personal_bp_ids, corp_bp_ids = _load_owned_bp_ids()
 
-                _msg_q.put(_sse({"type": "status", "msg": "Connecting to ESI contracts…"}))
+                # ── Use local cache when warm, fall back to live scan ──────────
+                stats = _cc.get_stats(region_id)
+                if stats["items_fetched"] > 0:
+                    _msg_q.put(_sse({"type": "status", "msg": "Querying local contract cache…"}))
+                    raw_matches  = _cc.query_bp_contracts(wanted_bp_ids, region_id=region_id)
+                    best_by_bpid: dict = {}
+                    for row in raw_matches:
+                        match = {
+                            "contract": {
+                                "contract_id":       row["contract_id"],
+                                "title":             row["title"],
+                                "price":             row["price"],
+                                "volume":            row["volume"],
+                                "date_issued":       row["date_issued"],
+                                "date_expired":      row["date_expired"],
+                                "start_location_id": None,
+                                "issuer_id":         None,
+                            },
+                            "type_id": row["type_id"],
+                            "me":       row["material_efficiency"],
+                            "te":       row["time_efficiency"],
+                            "quantity": row["quantity"],
+                            "is_bpc":   bool(row["is_blueprint_copy"]),
+                            "runs":     row["runs"],
+                        }
+                        rrow     = _build_scan_result_row(
+                            match, bpid_to_calc, personal_bp_ids, corp_bp_ids
+                        )
+                        bpid     = rrow["blueprint_id"]
+                        existing = best_by_bpid.get(bpid)
+                        if existing is None:
+                            rrow["listing_count"]  = 1
+                            rrow["cheapest_price"] = rrow["price"]
+                            best_by_bpid[bpid] = rrow
+                        else:
+                            existing["listing_count"] = existing.get("listing_count", 1) + 1
+                            if rrow["price"] < existing["price"]:
+                                rrow["listing_count"]  = existing["listing_count"]
+                                rrow["cheapest_price"] = rrow["price"]
+                                best_by_bpid[bpid]     = rrow
+                    results = sorted(
+                        best_by_bpid.values(),
+                        key=lambda x: (
+                            0 if x.get("can_breakeven", True) else 1,
+                            -(x.get("adj_net_profit", 0)),
+                        ),
+                    )
+                    payload = {
+                        "type":              "done",
+                        "results":           results,
+                        "matched":           len(results),
+                        "raw_matches":       len(raw_matches),
+                        "contracts_checked": stats["items_fetched"],
+                        "pages_scanned":     0,
+                        "bp_candidates":     stats["outstanding"],
+                        "cache_stats":       stats,
+                        "from_cache":        True,
+                    }
+                    _msg_q.put(_sse(payload))
+                else:
+                    # Cache still warming up — fall back to live ESI scan
+                    _msg_q.put(_sse({"type": "status", "msg": "Cache warming — scanning ESI contracts live…"}))
 
-                def _progress(msg):
-                    _msg_q.put(_sse(msg))
+                    def _progress(msg):
+                        _msg_q.put(_sse(msg))
 
-                payload = _run_blueprint_contract_scan(
-                    region_id=region_id,
-                    max_pages=max_pages,
-                    wanted_bp_ids=wanted_bp_ids,
-                    bpid_to_calc=bpid_to_calc,
-                    personal_bp_ids=personal_bp_ids,
-                    corp_bp_ids=corp_bp_ids,
-                    progress_cb=_progress,
-                    min_rps=min_rps,
-                    max_rps=max_rps,
-                )
-                payload["type"] = "done"
-                _msg_q.put(_sse(payload))
+                    payload = _run_blueprint_contract_scan(
+                        region_id=region_id,
+                        max_pages=max_pages,
+                        wanted_bp_ids=wanted_bp_ids,
+                        bpid_to_calc=bpid_to_calc,
+                        personal_bp_ids=personal_bp_ids,
+                        corp_bp_ids=corp_bp_ids,
+                        progress_cb=_progress,
+                        min_rps=min_rps,
+                        max_rps=max_rps,
+                    )
+                    payload["type"] = "done"
+                    _msg_q.put(_sse(payload))
 
             except Exception as e:
                 import traceback
@@ -2245,16 +2599,82 @@ def _run_blueprint_contract_scan(
                 _emit({"type": "contracts", "page": page, "total_pages": total_pages, "contracts": len(all_contracts)})
 
     contracts_checked = len(all_contracts)
-    # Keep full profitable coverage while reducing unnecessary item calls:
-    # only active, exchange-style, non-zero-price, realistic BP-sized contracts.
+
+    # ── Build a set of known blueprint item names for title matching ────────
+    # Load once per scan from crest.db: all output_names get " Blueprint" suffix
+    # appended to match typical EVE contract titles (e.g. "Hammerhead II Blueprint").
+    _bp_title_keywords: set[str] = set()
+    try:
+        import sqlite3 as _sq
+        _cdb = os.path.join(_HERE, "crest.db")
+        if os.path.exists(_cdb):
+            _c = _sq.connect(_cdb)
+            for (nm,) in _c.execute("SELECT LOWER(output_name) FROM blueprints").fetchall():
+                _bp_title_keywords.add(nm + " blueprint")
+            _c.close()
+    except Exception:
+        pass
+
+    # Retrieve the timestamp of the previous completed scan so we can skip
+    # contracts that were already fetched and cached.
+    global _LAST_CONTRACT_SCAN_TS
+    with _LAST_CONTRACT_SCAN_LOCK:
+        _prev_scan_ts = _LAST_CONTRACT_SCAN_TS
+    scan_started_ts = time.time()
+
+    def _is_new_contract(c: dict) -> bool:
+        """Return True if the contract was issued after the last completed scan."""
+        if _prev_scan_ts == 0.0:
+            return True
+        issued_str = c.get("date_issued", "")
+        if not issued_str:
+            return True
+        try:
+            from datetime import datetime, timezone
+            issued_ts = datetime.fromisoformat(issued_str.rstrip("Z")).replace(
+                tzinfo=timezone.utc
+            ).timestamp()
+            return issued_ts >= _prev_scan_ts
+        except Exception:
+            return True
+
+    def _title_looks_like_bp(title: str) -> bool:
+        """Return True when a contract title looks like a blueprint listing."""
+        if not title:
+            return True   # untitled contracts are uncategorised — keep them
+        tl = title.lower()
+        # Direct keyword hit
+        if "blueprint" in tl or " bpo" in tl or " bpc" in tl:
+            return True
+        # Check against known BP names loaded from crest.db
+        if _bp_title_keywords and tl in _bp_title_keywords:
+            return True
+        return False
+
+    # Keep full profitable coverage while reducing unnecessary item calls.
+    # Filters applied in order of cheapness:
+    #   1. Volume ≤ 1 000 m3  (blueprints are small; ships / freighters are huge)
+    #   2. Status outstanding  (expired / deleted contracts waste an item call)
+    #   3. Price floor > 1 M ISK  (zero-cost gifts and junk; no BP costs less)
+    #   4. Title looks like a blueprint (eliminates implants, PLEX, modules, etc.)
     bp_candidates = [
         c for c in all_contracts
-        if c.get("volume", 999) <= 1000
+        if c.get("volume", 9999) <= 1000
         and c.get("status", "outstanding") == "outstanding"
-        and (c.get("price", 0) or 0) >= 0
+        and (c.get("price") or 0) >= 1_000_000
+        and _title_looks_like_bp(c.get("title", ""))
     ]
+    # Sort newest first so the most actionable listings are processed first.
     bp_candidates.sort(key=lambda x: x.get("date_issued", ""), reverse=True)
-    _emit({"type": "scanning", "done": 0, "total": len(bp_candidates), "matched": 0})
+
+    # Split into new (never seen) vs. previously-cached contracts.
+    new_candidates  = [c for c in bp_candidates if _is_new_contract(c)]
+    seen_candidates = [c for c in bp_candidates if not _is_new_contract(c)]
+    # Seen contracts are very likely already in _CONTRACT_ITEMS_CACHE; process
+    # them last so new listings are surfaced first and progress looks snappy.
+    ordered_candidates = new_candidates + seen_candidates
+
+    _emit({"type": "scanning", "done": 0, "total": len(ordered_candidates), "matched": 0})
 
     def _fetch_contract_matches(contract: dict):
         contract_id = contract.get("contract_id")
@@ -2262,11 +2682,30 @@ def _run_blueprint_contract_scan(
             return []
         nonlocal cache_hits, item_requests
         now_ts = time.time()
+
+        # Calculate per-entry TTL from the contract's expiry date.
+        # A contract that expires in 3 days only needs to stay cached for 3 days;
+        # once expired the cache entry naturally becomes unreachable anyway.
+        def _entry_ttl(c: dict) -> float:
+            expiry_str = c.get("date_expired", "")
+            if expiry_str:
+                try:
+                    from datetime import datetime, timezone
+                    expiry_ts = datetime.fromisoformat(expiry_str.rstrip("Z")).replace(
+                        tzinfo=timezone.utc
+                    ).timestamp()
+                    return max(60.0, expiry_ts - now_ts)
+                except Exception:
+                    pass
+            return float(_CONTRACT_ITEMS_CACHE_TTL)  # 24 h fallback
+
         with _CONTRACT_ITEMS_CACHE_LOCK:
             cached = _CONTRACT_ITEMS_CACHE.get(contract_id)
-            if cached and (now_ts - cached.get("ts", 0.0)) < _CONTRACT_ITEMS_CACHE_TTL:
-                cache_hits += 1
-                return list(cached.get("matches", []))
+            if cached:
+                entry_ttl = cached.get("ttl", _CONTRACT_ITEMS_CACHE_TTL)
+                if (now_ts - cached.get("ts", 0.0)) < entry_ttl:
+                    cache_hits += 1
+                    return list(cached.get("matches", []))
 
         item_requests += 1
         resp, _ = _request_get(
@@ -2290,16 +2729,20 @@ def _run_blueprint_contract_scan(
                     "runs": item.get("runs", -1),
                 })
         with _CONTRACT_ITEMS_CACHE_LOCK:
-            _CONTRACT_ITEMS_CACHE[contract_id] = {"ts": now_ts, "matches": list(out)}
+            _CONTRACT_ITEMS_CACHE[contract_id] = {
+                "ts":      now_ts,
+                "ttl":     _entry_ttl(contract),
+                "matches": list(out),
+            }
         return out
 
     best_by_bpid = {}
     raw_match_count = 0
     done_count = 0
-    report_every = max(1, len(bp_candidates) // 100) if bp_candidates else 1
+    report_every = max(1, len(ordered_candidates) // 100) if ordered_candidates else 1
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = [pool.submit(_fetch_contract_matches, c) for c in bp_candidates]
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = [pool.submit(_fetch_contract_matches, c) for c in ordered_candidates]
         for fut in as_completed(futures):
             done_count += 1
             matches = fut.result()
@@ -2320,13 +2763,17 @@ def _run_blueprint_contract_scan(
                         best_by_bpid[bpid] = row
                     else:
                         current["listing_count"] = listing_count
-            if done_count % report_every == 0 or done_count == len(bp_candidates):
+            if done_count % report_every == 0 or done_count == len(ordered_candidates):
                 _emit({
                     "type": "scanning",
                     "done": done_count,
-                    "total": len(bp_candidates),
+                    "total": len(ordered_candidates),
                     "matched": raw_match_count,
                 })
+
+    # Record this scan's start time so the next scan can skip already-seen contracts.
+    with _LAST_CONTRACT_SCAN_LOCK:
+        _LAST_CONTRACT_SCAN_TS = scan_started_ts
 
     results = list(best_by_bpid.values())
     results.sort(key=lambda x: (
@@ -2334,18 +2781,20 @@ def _run_blueprint_contract_scan(
         -(x.get("adj_net_profit", 0)),
     ))
     return {
-        "results": results,
-        "matched": len(results),
-        "pages_scanned": total_pages,
+        "results":          results,
+        "matched":          len(results),
+        "pages_scanned":    total_pages,
         "contracts_checked": contracts_checked,
-        "bp_candidates": len(bp_candidates),
-        "raw_matches": raw_match_count,
-        "retries": retry_count,
-        "request_errors": error_count,
-        "item_requests": item_requests,
-        "item_cache_hits": cache_hits,
-        "min_rps": round(_min_rps, 2),
-        "max_rps": round(_max_rps, 2),
+        "bp_candidates":    len(ordered_candidates),
+        "bp_new":           len(new_candidates),
+        "bp_cached":        len(seen_candidates),
+        "raw_matches":      raw_match_count,
+        "retries":          retry_count,
+        "request_errors":   error_count,
+        "item_requests":    item_requests,
+        "item_cache_hits":  cache_hits,
+        "min_rps":          round(_min_rps, 2),
+        "max_rps":          round(_max_rps, 2),
     }
 
 
@@ -4156,6 +4605,17 @@ def api_alerts_status():
     return jsonify(_alert_scanner.status)
 
 
+@app.route("/api/contracts/status", methods=["GET"])
+def api_contracts_status():
+    """Return the current state of the local contract cache."""
+    try:
+        region_id = int(request.args.get("region_id", _CC_REGION_ID))
+        stats = _cc.get_stats(region_id)
+        return jsonify({"ok": True, **stats})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
 @app.before_serving
 async def _startup():
     """
@@ -4168,6 +4628,12 @@ async def _startup():
     asyncio.get_event_loop().create_task(_prewarm_task(), name="prewarm")
     asyncio.get_event_loop().create_task(_wealth_snapshot_task(), name="wealth-snapshot")
     _alert_scanner.start_alert_scanner(_calc_cache, CALC_CACHE_TTL, warmup_event=_warmup_done)
+    # Start contract cache background refresher
+    _t = threading.Thread(
+        target=_contract_cache_refresher, daemon=True, name="contract-cache"
+    )
+    _t.start()
+    print("  [contract-cache] background refresher started")
 
 
 @app.after_serving

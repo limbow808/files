@@ -97,6 +97,17 @@ def _init_crest(conn: sqlite3.Connection) -> None:
             sort_order   INTEGER NOT NULL DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS blueprint_invention (
+            t2_blueprint_id     INTEGER PRIMARY KEY,
+            t1_blueprint_id     INTEGER,
+            datacore_1_type_id  INTEGER NOT NULL,
+            datacore_1_qty      INTEGER NOT NULL,
+            datacore_2_type_id  INTEGER,
+            datacore_2_qty      INTEGER,
+            base_success_chance REAL    NOT NULL DEFAULT 0.34,
+            output_runs_per_bpc INTEGER NOT NULL DEFAULT 10
+        );
+
         CREATE INDEX IF NOT EXISTS idx_bp_output    ON blueprints(output_id);
         CREATE INDEX IF NOT EXISTS idx_bp_category  ON blueprints(category);
         CREATE INDEX IF NOT EXISTS idx_bp_tech      ON blueprints(tech_level);
@@ -105,12 +116,28 @@ def _init_crest(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_skill_bp     ON blueprint_skills(blueprint_id);
     """)
     conn.commit()
-    # Safe migration for existing installations that predate this column
+    # Safe migrations for existing installations that predate these columns/tables
     try:
         conn.execute("ALTER TABLE blueprints ADD COLUMN copy_time_secs INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     except Exception:
         pass  # Column already exists
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS blueprint_invention (
+                t2_blueprint_id     INTEGER PRIMARY KEY,
+                t1_blueprint_id     INTEGER,
+                datacore_1_type_id  INTEGER NOT NULL,
+                datacore_1_qty      INTEGER NOT NULL,
+                datacore_2_type_id  INTEGER,
+                datacore_2_qty      INTEGER,
+                base_success_chance REAL    NOT NULL DEFAULT 0.34,
+                output_runs_per_bpc INTEGER NOT NULL DEFAULT 10
+            )
+        """)
+        conn.commit()
+    except Exception:
+        pass  # Table already exists
 
 
 def _load_attributes(sde: sqlite3.Connection) -> tuple[dict, dict, dict]:
@@ -256,6 +283,114 @@ def _load_skills(sde: sqlite3.Connection) -> dict[int, list[dict]]:
     return skills_by_bp
 
 
+def _seed_invention(sde: sqlite3.Connection, crest: sqlite3.Connection) -> int:
+    """
+    Populate blueprint_invention from the SDE invention chains.
+
+    SDE tables used:
+      industryActivityProducts (activityID=8) — T1_bp → T2_bp output + probability
+      industryActivityMaterials (activityID=8) — T1_bp → datacores required
+      industryBlueprints — T2_bp → maxProductionLimit (runs per invented BPC)
+    """
+    print("  Seeding invention chains...", end="", flush=True)
+
+    # ── Load T2 invention products (T1_bp → T2_bp + base success chance) ─────
+    try:
+        prod_rows = sde.execute("""
+            SELECT typeID AS t1_bp_id, productTypeID AS t2_bp_id, probability
+            FROM   industryActivityProducts
+            WHERE  activityID = 8
+              AND  probability IS NOT NULL
+              AND  probability > 0
+        """).fetchall()
+    except Exception as e:
+        print(f" [WARN] Could not load invention products from SDE: {e}")
+        return 0
+
+    if not prod_rows:
+        print(" no invention data found in SDE")
+        return 0
+
+    invention_products: dict[int, dict] = {
+        row["t1_bp_id"]: {
+            "t2_bp_id":    row["t2_bp_id"],
+            "probability": float(row["probability"]),
+        }
+        for row in prod_rows
+    }
+
+    # ── Load datacores per T1 blueprint ───────────────────────────────────────
+    mat_rows = sde.execute("""
+        SELECT typeID AS t1_bp_id, materialTypeID AS dc_type_id, quantity
+        FROM   industryActivityMaterials
+        WHERE  activityID = 8
+    """).fetchall()
+
+    datacores_by_t1: dict[int, list] = {}
+    for row in mat_rows:
+        datacores_by_t1.setdefault(row["t1_bp_id"], []).append({
+            "type_id":  row["dc_type_id"],
+            "quantity": row["quantity"],
+        })
+
+    # ── Load maxProductionLimit per T2 blueprint (runs per invented BPC) ──────
+    bp_limits: dict[int, int] = {}
+    try:
+        for row in sde.execute("SELECT typeID, maxProductionLimit FROM industryBlueprints").fetchall():
+            if row["maxProductionLimit"]:
+                bp_limits[row["typeID"]] = row["maxProductionLimit"]
+    except Exception:
+        pass  # table may not exist in all SDE versions; default to 10 runs
+
+    # ── Only insert rows for T2 blueprints that exist in crest.db ────────────
+    existing_bp_ids: set[int] = {
+        row[0] for row in crest.execute("SELECT blueprint_id FROM blueprints").fetchall()
+    }
+
+    rows_to_insert = []
+    skipped = 0
+    for t1_bp_id, prod_info in invention_products.items():
+        t2_bp_id  = prod_info["t2_bp_id"]
+        if t2_bp_id not in existing_bp_ids:
+            skipped += 1
+            continue
+
+        datacores = datacores_by_t1.get(t1_bp_id, [])
+        if not datacores:
+            continue  # no datacores → incomplete SDE data; skip
+
+        dc1 = datacores[0]
+        dc2 = datacores[1] if len(datacores) >= 2 else None
+
+        runs_per_bpc = bp_limits.get(t2_bp_id, 10)
+
+        rows_to_insert.append((
+            t2_bp_id,
+            t1_bp_id,
+            dc1["type_id"],
+            dc1["quantity"],
+            dc2["type_id"]  if dc2 else None,
+            dc2["quantity"] if dc2 else None,
+            prod_info["probability"],
+            runs_per_bpc,
+        ))
+
+    crest.execute("DELETE FROM blueprint_invention")
+    crest.executemany("""
+        INSERT OR REPLACE INTO blueprint_invention
+            (t2_blueprint_id, t1_blueprint_id,
+             datacore_1_type_id, datacore_1_qty,
+             datacore_2_type_id, datacore_2_qty,
+             base_success_chance, output_runs_per_bpc)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, rows_to_insert)
+    crest.commit()
+
+    count = len(rows_to_insert)
+    print(f" {count} T2 invention chains seeded ({skipped} not yet in crest.db)")
+    return count
+
+
 def seed_from_sde() -> tuple[int, int]:
     """
     Main seeding function. Connects to both databases, reads the SDE,
@@ -398,10 +533,13 @@ def seed_from_sde() -> tuple[int, int]:
 
     crest.commit()
 
-    # ── 5. Summary ────────────────────────────────────────────────────────────
+    # ── 5. Seed invention chains ──────────────────────────────────────────────
+    inv_count = _seed_invention(sde, crest)
+
+    # ── 6. Summary ────────────────────────────────────────────────────────────
     skill_count = crest.execute("SELECT COUNT(*) FROM blueprint_skills").fetchone()[0]
     print(f"\n  Seeding complete.")
-    print(f"  {bp_count} blueprints, {mat_count} material rows, {skill_count} skill rows saved to crest.db\n")
+    print(f"  {bp_count} blueprints, {mat_count} material rows, {skill_count} skill rows, {inv_count} invention chains saved to crest.db\n")
 
     sde.close()
     crest.close()
