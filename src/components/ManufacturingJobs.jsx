@@ -28,8 +28,8 @@ const ACTIVITY_SHORT = {
 };
 
 const OWN_COLORS = {
-  personal: { fill: '#ff4700', label: 'PERS' },
-  corp:     { fill: '#44bb55', label: 'CORP' },
+  personal: { fill: '#4cff91', label: 'PERS' },
+  corp:     { fill: '#B0B0B0', label: 'CORP' },
 };
 
 function fmtCountdown(secs) {
@@ -74,7 +74,7 @@ function JobRow({ j, idx, multiChar }) {
 
   return (
     <tr className="eve-row-reveal" style={{ position: 'relative', animationDelay: `${idx * 30}ms` }}>
-      <td style={{ padding: '10px', textAlign: 'left', maxWidth: 0, width: '99%', background: 'var(--bg2)' }}>
+      <td style={{ padding: '10px', textAlign: 'left', maxWidth: 0, width: '99%', background: 'var(--table-row-bg)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
           {(j.product_type_id || j.blueprint_type_id) && (
             <img
@@ -100,7 +100,7 @@ function JobRow({ j, idx, multiChar }) {
         </div>
       </td>
       {/* TYPE badge */}
-      <td style={{ padding: '5px 6px', textAlign: 'left', whiteSpace: 'nowrap', background: 'var(--bg2)' }}>
+      <td style={{ padding: '5px 6px', textAlign: 'left', whiteSpace: 'nowrap', background: 'var(--table-row-bg)' }}>
         <span style={{
           fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 0,
           color: '#000', background: aColor,
@@ -109,13 +109,13 @@ function JobRow({ j, idx, multiChar }) {
         }}>{shortAct}</span>
       </td>
       {multiChar && (
-        <td style={{ padding: '5px 6px', textAlign: 'left', whiteSpace: 'nowrap', fontSize: 11, background: 'var(--bg2)' }}>
+        <td style={{ padding: '5px 6px', textAlign: 'left', whiteSpace: 'nowrap', fontSize: 11, background: 'var(--table-row-bg)' }}>
           <CharTag name={j.character_name} color={cColor} />
         </td>
       )}
       <td ref={countdownRef} style={{
         padding: '5px 10px 5px 6px', textAlign: 'right',
-        fontFamily: 'var(--mono)', fontSize: 12, whiteSpace: 'nowrap', background: 'var(--bg2)',
+        fontFamily: 'var(--mono)', fontSize: 12, whiteSpace: 'nowrap', background: 'var(--table-row-bg)',
       }} />
     </tr>
   );
@@ -124,8 +124,8 @@ function JobRow({ j, idx, multiChar }) {
 const TH = ({ children, align = 'right' }) => (
   <th style={{
     textAlign: align, padding: '8px', fontSize: 11, color: 'var(--dim)',
-    letterSpacing: 1, borderBottom: '1px solid var(--border)', fontWeight: 300,
-    whiteSpace: 'nowrap', background: 'var(--bg2)',
+    letterSpacing: 1, borderBottom: '1px solid #0d0d0d', fontWeight: 300,
+    whiteSpace: 'nowrap', background: 'var(--table-row-bg)',
   }}>{children}</th>
 );
 
@@ -195,7 +195,7 @@ function QueueDetailExpanded({ item, calcItem }) {
   return (
     <div style={{
       background: 'var(--table-row-bg)', borderLeft: `3px solid ${tierClr}`,
-      padding: '10px 14px', borderBottom: '1px solid var(--border)',
+      padding: '10px 14px', borderBottom: '1px solid #0d0d0d',
     }}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
 
@@ -301,7 +301,7 @@ function SupplyBar({ supplyDays, urgency }) {
                : `${supplyDays.toFixed(1)}d`;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-      <div style={{ width: 32, height: 4, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
+      <div style={{ width: 64, height: 4, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
         <div style={{ height: '100%', width: `${pct}%`, background: barClr, borderRadius: 2, transition: 'width 0.3s' }} />
       </div>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: barClr, minWidth: 28 }}>{label}</span>
@@ -323,7 +323,7 @@ function fmtAbsTime(ts) {
 
 const ACTION_LABELS = {
   manufacture: { label: 'MFG',      bg: '#ff4700' },
-  copy_first:  { label: 'COPY→MFG', bg: '#ffcc44' },
+  copy_first:  { label: 'COPY→MFG', bg: '#4da6ff' },
 };
 
 function PrereqLine({ item }) {
@@ -331,7 +331,7 @@ function PrereqLine({ item }) {
 
   if (item.action_type === 'copy_first') {
     return (
-      <span style={{ fontSize: 9, color: 'rgba(255,204,68,0.85)', letterSpacing: 0.5 }}>
+      <span style={{ fontSize: 11, color: 'rgba(255,204,68,0.85)', letterSpacing: 0.5 }}>
         → Start copy now · mfg ready {fmtAbsTime(item.manufacture_at)}
       </span>
     );
@@ -340,7 +340,7 @@ function PrereqLine({ item }) {
   const secsAway = (item.start_at || now) - now;
   if (secsAway > 30) {
     return (
-      <span style={{ fontSize: 9, color: 'rgba(255,71,0,0.8)', letterSpacing: 0.5 }}>
+      <span style={{ fontSize: 11, color: 'rgba(255,71,0,0.8)', letterSpacing: 0.5 }}>
         → Slot opens {fmtAbsTime(item.start_at)}
       </span>
     );
@@ -348,7 +348,7 @@ function PrereqLine({ item }) {
 
   if (!item.mats_ready && item.missing_mats_est_cost > 0) {
     return (
-      <span style={{ fontSize: 9, color: '#ffcc44', letterSpacing: 0.5 }}>
+      <span style={{ fontSize: 11, color: '#ff4444', letterSpacing: 0.5 }}>
         ⚠ BUY MATS · ~{fmtISK(item.missing_mats_est_cost)} needed
       </span>
     );
@@ -356,14 +356,14 @@ function PrereqLine({ item }) {
 
   if (item.producing_qty > 0) {
     return (
-      <span style={{ fontSize: 9, color: 'rgba(77,166,255,0.8)', letterSpacing: 0.5 }}>
+      <span style={{ fontSize: 11, color: 'rgba(77,166,255,0.8)', letterSpacing: 0.5 }}>
         ▶ Already manufacturing ({item.producing_qty} units in flight)
       </span>
     );
   }
 
   return (
-    <span style={{ fontSize: 9, color: '#4cff91', letterSpacing: 0.5 }}>
+    <span style={{ fontSize: 11, color: '#4cff91', letterSpacing: 0.5 }}>
       ✓ Ready to queue
     </span>
   );
@@ -384,8 +384,8 @@ function QueueActionRow({ item, idx, isOpen, onToggle, calcItem }) {
         className="eve-row-reveal"
         style={{
           display: 'flex', flexDirection: 'column',
-          padding: '7px 10px', borderBottom: '1px solid var(--border)',
-          cursor: 'pointer', background: isOpen ? '#0a0a08' : 'transparent',
+          padding: '7px 10px', borderBottom: '1px solid #0d0d0d',
+          cursor: 'pointer', background: 'var(--table-row-bg)',
           animationDelay: `${idx * 25}ms`,
         }}
         onClick={onToggle}
@@ -405,9 +405,9 @@ function QueueActionRow({ item, idx, isOpen, onToggle, calcItem }) {
 
           {/* Action badge */}
           <span style={{
-            display: 'inline-block', fontFamily: 'var(--mono)', fontSize: 8, fontWeight: 700,
+            display: 'inline-block', fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 400,
             letterSpacing: 1, padding: '2px 5px', borderRadius: 2, flexShrink: 0,
-            background: actInfo.bg, color: '#000',
+            background: actInfo.bg, color: '#0d0d0d',
           }}>{actInfo.label}</span>
 
           {/* Item icon */}
@@ -422,7 +422,7 @@ function QueueActionRow({ item, idx, isOpen, onToggle, calcItem }) {
 
           {/* Name */}
           <span style={{
-            fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text)',
+            fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 300, color: 'var(--text)',
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0,
           }}>{item.name}</span>
 
@@ -438,19 +438,9 @@ function QueueActionRow({ item, idx, isOpen, onToggle, calcItem }) {
             {(item.ownership || []).map(o => <OwnBadge key={o} kind={o} />)}
           </div>
 
-          {/* ISK/hr */}
-          <span style={{
-            fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)',
-            flexShrink: 0, minWidth: 58, textAlign: 'right',
-          }}>{fmtISK(item.isk_per_hour)}/hr</span>
-
           {/* Supply bar */}
           <SupplyBar supplyDays={supplyDays} urgency={item.urgency} />
 
-          {/* Chevron */}
-          <span style={{ fontSize: 9, color: isOpen ? 'var(--accent)' : 'var(--dim)', flexShrink: 0 }}>
-            {isOpen ? '▲' : '▼'}
-          </span>
         </div>
 
         {/* Prereq sub-line */}
@@ -505,7 +495,7 @@ function DoThisNextView() {
 
       {/* Slot status + refresh header */}
       <div style={{
-        padding: '5px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg)',
+        padding: '5px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg2)',
         display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
       }}>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)' }}>SLOTS</span>
@@ -534,10 +524,10 @@ function DoThisNextView() {
             onClick={refetch}
             disabled={tpLoading}
             style={{
-              background: 'transparent', border: '1px solid var(--border)',
-              color: tpLoading ? 'var(--dim)' : 'var(--text)',
+              background: 'none', border: 'none',
+              color: tpLoading ? 'var(--dim)' : 'var(--dim)',
               fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
-              padding: '3px 8px', cursor: tpLoading ? 'default' : 'pointer', borderRadius: 2,
+              padding: 0, cursor: tpLoading ? 'default' : 'pointer',
             }}
           >{tpLoading ? '⟳ ...' : '⟳ REFRESH'}</button>
         </div>

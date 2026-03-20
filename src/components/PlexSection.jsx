@@ -90,8 +90,8 @@ function PlexChart({ walletHistory, balance, target }) {
       }
 
       // Y axis labels
-      ctx.font = '9px "Share Tech Mono", monospace';
-      ctx.fillStyle = '#555544';
+      ctx.font = 'var(--mono) 9px';
+      ctx.fillStyle = '#444444';
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
       for (let i = 0; i <= yTicks; i++) {
@@ -275,11 +275,11 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', padding: '10px 14px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', padding: '10px 14px', background: 'var(--bg2)'}}>
 
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 8, flexShrink: 0 }}>
-        <span className="panel-title">◈ PLEX TRACKER — {month}</span>
+        <span className="panel-title">PLEX TRACKER — {month}</span>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', letterSpacing: 1 }}>
           {daysLeft} DAYS LEFT
         </span>
@@ -295,7 +295,7 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
       {/* Wallet balance */}
       <div style={{ marginBottom: 8, flexShrink: 0 }}>
         <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)', marginBottom: 3 }}>WALLET</div>
-        <div style={{ fontFamily: 'var(--mono)', fontSize: 26, fontWeight: 700, color: 'var(--accent)', lineHeight: 1 }}>
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 26, fontWeight: 500, color: 'var(--accent)', lineHeight: 1 }}>
           {loading && !plexData ? '—' : <EveText text={`${fmtISK(balance)} ISK`} scramble={true} steps={14} speed={30} />}
         </div>
       </div>
@@ -312,7 +312,7 @@ export default function PlexSection({ plexData, walletHistory, loading, error })
           <span style={{ color: projOk ? '#00cc66' : 'var(--text)' }}>{pct.toFixed(1)}% OF TARGET</span>
           <span>{fmtISK(target)} ISK</span>
         </div>
-        <div style={{ height: 6, background: 'var(--bg2)', border: '1px solid var(--border)', marginBottom: 5 }}>
+        <div style={{ height: 6, background: 'var(--bg2)', marginBottom: 5, }}>
           <div className="eve-bar-glow" style={{ height: '100%', width: `${pct}%`, background: projOk ? '#00cc66' : 'var(--accent)', transition: 'width 0.8s ease' }} />
         </div>
         <div style={{ fontSize: 10, color: projOk ? '#00cc66' : 'var(--accent)', letterSpacing: 1, marginBottom: 8, textAlign: 'right' }}>

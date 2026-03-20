@@ -1320,11 +1320,41 @@ def api_top_performers():
             # Treat in-flight production as partial coverage
             urgency = urgency * max(0.2, 1.0 - days_in_flight / URGENCY_HORIZON_DAYS)
 
-        # ── BPO copy penalty ─────────────────────────────────────────────────
-        # needs_copy = no personal BPC in hand — must copy before manufacturing,
-        # regardless of whether the BPO is personal or from corp.
+        # ── BPO copy overhead — adjust isk/hr and profit for true cycle time ──
+        # needs_copy = no personal BPC in hand; must copy BPO before manufacturing.
+        # The calculator's isk_per_hour only covers (manufacture_time + sell_time).
+        # For BPO items the copy job adds days/weeks to the effective cycle, and
+        # the copy job installation fee (≈2% of mfg install cost) is an extra
+        # cost not reflected in net_profit.
         needs_copy  = out_id not in personal_bpc_output_ids
         is_corp_bp  = out_id in corp_output_ids and out_id not in personal_output_ids
+
+        copy_time_secs_item = copy_time_by_output.get(out_id, 0) if needs_copy else 0
+        copy_job_cost       = 0.0
+        adj_isk_hr          = isk_hr
+        adj_profit          = profit
+
+        if needs_copy and copy_time_secs_item > 0:
+            # Need rec_runs early to amortise copy overhead across the run batch
+            _pre_rec = r.get("recommended_runs")
+            _pre_runs = int(_pre_rec.get("runs", 1)) if isinstance(_pre_rec, dict) else 1
+            duration_s   = float(r.get("duration", 0) or 0)
+            avg_sell_s   = (float(r.get("avg_sell_days") or 3.0)) * 86400.0
+            current_cycle = duration_s + avg_sell_s
+            # One copy job produces _pre_runs BPC runs; amortise its time over batch
+            copy_overhead_per_run = copy_time_secs_item / max(1, _pre_runs)
+            adj_cycle = current_cycle + copy_overhead_per_run
+            if current_cycle > 0 and adj_cycle > 0:
+                adj_isk_hr = isk_hr * (current_cycle / adj_cycle)
+            # Copy job install fee ≈ 2% of manufacturing install fee, amortised per run
+            mfg_job_cost  = float(r.get("job_cost") or 0)
+            copy_job_cost = (mfg_job_cost * 0.02) / max(1, _pre_runs)
+            adj_profit    = profit - copy_job_cost
+
+        if adj_profit <= 0 or adj_isk_hr <= 0:
+            continue
+
+        # ── BPO copy penalty (additional scoring signal after isk_hr fix) ─────
         copy_penalty = BPO_COPY_PENALTY if needs_copy else 1.0
 
         # ── Capital lock penalty: penalise very slow-selling items ────────────
@@ -1334,8 +1364,9 @@ def api_top_performers():
             days_to_sell = rec.get("days_to_sell", 0) or 0
         capital_penalty = max(0.3, 1.0 - max(0, days_to_sell - MAX_SELL_DAYS_BEFORE_PENALTY) / 60)
 
-        # ── Final composite score ─────────────────────────────────────────────
-        base    = isk_hr * math.log1p(max(1.0, vol)) * math.sqrt(max(0.0, roi))
+        # ── Final composite score (uses copy-adjusted isk/hr) ─────────────────
+        adj_roi = (adj_profit / max(1.0, float(r.get("material_cost") or 0) + float(r.get("job_cost") or 0))) * 100.0
+        base    = adj_isk_hr * math.log1p(max(1.0, vol)) * math.sqrt(max(0.0, adj_roi))
         score   = base * urgency * copy_penalty * capital_penalty
 
         ownership = []
@@ -1379,7 +1410,10 @@ def api_top_performers():
             "is_bpo_only":       needs_copy and not is_corp_bp,
             "urgency":           round(urgency, 2),
             "needs_copy":        needs_copy,
-            "copy_time_secs":    copy_time_by_output.get(out_id, 0) if needs_copy else 0,
+            "copy_time_secs":    copy_time_secs_item,
+            "copy_job_cost":     round(copy_job_cost),
+            "adj_net_profit":    round(adj_profit),
+            "adj_isk_per_hour":  round(adj_isk_hr),
             "mats_ready":        mats_ready,
             "missing_mats_est_cost": round(missing_mats_est_cost),
             "_score":            score,

@@ -18,11 +18,12 @@
   --text:    #E0E0E0;     /* Primary text */
   --text2:   #B0B0B0;     /* Secondary text (dim) */
   --dim:     #B0B0B0;     /* Disabled/faint text */
-  
+  --dim2:    #444444;     /* Extra-dim text, used for timestamps, sublabels, etc. */
   /* Accents */
   --accent:  #ff4700;     /* Action/warning orange */
   --green:   #4cff91;     /* Success/profit green */
   --blue:    #4da6ff;     /* Info blue */
+  --error:   #ff4444;     /* Error red */
   
   /* Borders */
   --border:  #444444;     /* Primary border/divider */
@@ -102,7 +103,7 @@ a, a:hover, button, button:hover { text-decoration: none; }
 
 /* ── Table ──────────────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; }
-table tbody tr { background: var(--table-row-bg); }
+table tbody tr { background: var(--table-row-bg); border-bottom: 1px solid #0d0d0d; }
 th {
   font-family: var(--mono);
   font-size: 9px;
@@ -112,14 +113,14 @@ th {
   padding: 5px 8px;
   color: var(--dim);
   background: var(--table-row-bg);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid #0d0d0d;
   white-space: nowrap;
 }
 th:first-child, th:nth-child(2) { text-align: left; }
 td {
   padding: 5px 8px;
   text-align: right;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid #0d0d0d;
   white-space: nowrap;
 }
 td:first-child, td:nth-child(2) { text-align: left; }
@@ -907,8 +908,8 @@ select.calc-input { appearance: none; -webkit-appearance: none; cursor: pointer;
 .calc-search-input:focus { border-color: var(--text); }
 .calc-search-input::placeholder { color: var(--dim); }
 
-.calc-table th { font-size: 10px; letter-spacing: 0.5px; padding: 5px 6px; white-space: nowrap; background: var(--table-row-bg); }
-.calc-table td { padding: 3px 6px; font-size: 11px; }
+.calc-table th { font-size: 10px; letter-spacing: 0.5px; padding: 5px 6px; white-space: nowrap; background: var(--table-row-bg); border-bottom: 1px solid #0d0d0d; }
+.calc-table td { padding: 3px 6px; font-size: 11px; border-bottom: 1px solid #0d0d0d; background: var(--table-row-bg); }
 .calc-table th, .calc-table td { text-align: right; }
 .calc-table th:first-child, .calc-table td:first-child { text-align: left; }
 .calc-table th:nth-child(2), .calc-table td:nth-child(2) { text-align: left; }
@@ -1257,10 +1258,10 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   text-transform: uppercase;
   padding: 5px 8px;
   text-align: right;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid #0d0d0d;
   position: sticky;
   top: 0;
-  background: var(--table-shell-bg);
+  background: var(--table-row-bg);
   z-index: 1;
   white-space: nowrap;
   font-weight: 400;
@@ -1270,10 +1271,15 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   font-size: 11px;
   font-family: var(--mono);
   text-align: right;
-  border-bottom: 1px solid rgb(13, 13, 13);
+  border-bottom: 1px solid #0d0d0d;
+  background: var(--table-row-bg);
+}
+.jobs-table tbody tr {
+  background: var(--table-row-bg);
 }
 .jobs-table td {
-  border-bottom: 1px solid rgb(13, 13, 13);
+  border-bottom: 1px solid #0d0d0d;
+  background: var(--table-row-bg);
 }
 .bp-finder-row:hover { background: rgba(255,71,0,0.04); }
 .bp-finder-name {

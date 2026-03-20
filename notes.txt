@@ -8,8 +8,10 @@ secondary button squares: #b0b0b0
 green: #4cff91
 blue: #4da6ff
 accent: #ff4700
+error: #ff4444
 borders/deviders: #444444
 main deviders: #b0b0b0
+secondary deviders: #0d0d0d
 
 font:
 - Space Grotesk

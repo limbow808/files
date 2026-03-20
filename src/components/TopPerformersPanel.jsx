@@ -41,8 +41,8 @@ function HeaderRow() {
     <div style={{
       display: 'flex', alignItems: 'center',
       padding: '4px 10px',
-      borderBottom: '1px solid var(--border)',
-      background: 'var(--table-shell-bg)',
+      borderBottom: '1px solid #0d0d0d',
+      background: 'var(--table-row-bg)',
       flexShrink: 0,
       gap: 0,
     }}>
@@ -62,7 +62,8 @@ function ItemRow({ item, rank }) {
     <div style={{
       display: 'flex', alignItems: 'center',
       padding: '3px 10px',
-      borderBottom: '1px solid rgba(51,51,51,0.4)',
+      borderBottom: '1px solid #0d0d0d',
+      background: 'var(--table-row-bg)',
       gap: 0,
       minHeight: 22,
     }}>
