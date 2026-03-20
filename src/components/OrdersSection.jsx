@@ -39,7 +39,7 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
               <td style={{ padding: '4px 6px', textAlign: 'left' }}>
                 <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={o.type_name}>{o.type_name}</div>
                 {/* Full-row fill bar — positioned relative to <tr> */}
-                <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 2, background: '#1a1a1a', pointerEvents: 'none', zIndex: 0 }}>
+                <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 2, background: 'var(--border)', pointerEvents: 'none', zIndex: 0 }}>
                   <div style={{ height: '100%', width: `${filled}%`, background: isBuy ? '#4da6ff' : 'var(--accent)' }} />
                 </div>
                 {!isBuy && (

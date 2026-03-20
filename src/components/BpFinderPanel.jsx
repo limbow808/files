@@ -84,19 +84,11 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
   const [cacheStats, setCacheStats] = useState(null);
   const [cacheRate, setCacheRate] = useState(0);   // contracts/sec
   const [cacheEta, setCacheEta] = useState(null);  // seconds remaining
-  const [toasts, setToasts] = useState([]);
   const prevReadyRef = useRef(false);
   const prevFetchedRef = useRef(null);
   const prevPollTsRef = useRef(null);
   const lastAutoScanRef = useRef(0);       // epoch ms of last auto-rescan
   const silentBusyRef = useRef(false);     // guard against overlapping silent fetches
-  const toastIdRef = useRef(0);
-
-  function addToast(msg, type = 'info', duration = 6000) {
-    const id = ++toastIdRef.current;
-    setToasts(prev => [...prev, { id, msg, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
-  }
 
   // Silent background refresh — merges new contracts into existing table
   // without blanking the UI or showing scanning progress.
@@ -154,22 +146,15 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
             } else {
               setCacheEta(0);
             }
-          } else if (dn === 0 && s.items_pending > 0) {
-            // Stalled — show 0 rate but keep previous ETA visible
-            setCacheRate(0);
           }
+          // No-progress interval: keep previous rate/ETA visible
         }
         prevFetchedRef.current = s.items_fetched;
         prevPollTsRef.current = now;
 
-        // Toast on warming start
-        if (prevReadyRef.current === null && !s.ready && s.items_pending > 0) {
-          addToast(`Indexing ${s.outstanding.toLocaleString()} contracts…`, 'indexing', 8000);
-        }
-
-        // Auto-rescan + toast once cache transitions from warming → ready
-        if (!prevReadyRef.current && s.ready) {
-          addToast('Contract cache ready — scanning now', 'success', 5000);
+        // Auto-rescan once cache transitions from warming → ready
+        // Strict === false so effect re-runs (scanState change) don't retrigger
+        if (prevReadyRef.current === false && s.ready) {
           if (scanState === 'done' && scanView) {
             runScan();
             lastAutoScanRef.current = now;
@@ -186,7 +171,6 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
         prevReadyRef.current = s.ready;
       } catch {}
     }
-    prevReadyRef.current = null; // sentinel for first poll
     poll();
     const id = setInterval(poll, 5_000);
     return () => { cancelled = true; clearInterval(id); };
@@ -288,9 +272,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
 
   const filteredScanResults = useMemo(() => {
     if (!scanResults) return [];
-    // Keep items where raw manufacturing ROI ≥ 1% (filters truly hopeless items)
-    // but still show infeasible BPCs so the user can see why they don't work
-    let list = scanResults.results.filter(r => (r.roi || 0) >= 1);
+    let list = [...scanResults.results];
     if (!showBpo)   list = list.filter(r =>  r.is_bpc);
     if (!showBpc)   list = list.filter(r => !r.is_bpc);
     if (!showOwned) list = list.filter(r => !r.already_owned);
@@ -318,18 +300,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
   return (
     <div className="bp-finder-panel">
 
-      {/* ── Toast notifications ──────────────────────────────────────────── */}
-      {toasts.length > 0 && (
-        <div className="bp-toast-container">
-          {toasts.map(t => (
-            <div key={t.id} className={`bp-toast bp-toast-${t.type}`}>
-              {t.type === 'success' && <span style={{ marginRight: 6 }}>✓</span>}
-              {t.type === 'indexing' && <span style={{ marginRight: 6 }}>⟳</span>}
-              {t.msg}
-            </div>
-          ))}
-        </div>
-      )}
+
 
       {/* Header */}
       <div className="bp-finder-header">
@@ -366,20 +337,22 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
                 LOAD LIST
               </button>
             )}
-            {/* Scan button */}
-            <button
-              className="chip"
-              onClick={runScan}
-              disabled={scanState === 'scanning'}
-              title={`Scan ESI contracts in ${REGION_OPTIONS.find(r => r.id === region)?.name}`}
-              style={{
-                background: scanState === 'scanning' ? 'rgba(255,71,0,0.15)' : undefined,
-                borderColor: scanState === 'scanning' ? 'var(--accent)' : undefined,
-                color:       scanState === 'scanning' ? 'var(--accent)' : undefined,
-              }}
-            >
-              {scanState === 'scanning' ? 'SCANNING…' : 'SCAN CONTRACTS'}
-            </button>
+            {/* Scan button (hidden once cache is fully ready) */}
+            {!cacheStats?.ready && (
+              <button
+                className="chip"
+                onClick={runScan}
+                disabled={scanState === 'scanning'}
+                title={`Scan ESI contracts in ${REGION_OPTIONS.find(r => r.id === region)?.name}`}
+                style={{
+                  background: scanState === 'scanning' ? 'rgba(255,71,0,0.15)' : undefined,
+                  borderColor: scanState === 'scanning' ? 'var(--accent)' : undefined,
+                  color:       scanState === 'scanning' ? 'var(--accent)' : undefined,
+                }}
+              >
+                {scanState === 'scanning' ? 'SCANNING…' : 'SCAN CONTRACTS'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -440,57 +413,48 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
       <div className="bp-finder-body">
 
         {/* Contract cache warming banner */}
-        {cacheStats && !cacheStats.ready && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 12,
-            padding: '7px 16px',
-            background: 'rgba(255,140,0,0.07)',
-            borderBottom: '1px solid rgba(255,140,0,0.25)',
-            fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1.3,
-          }}>
-            <span className="scan-label-shimmer" style={{ color: '#ff9900', flexShrink: 0 }}>
-              {cacheStats.warming_up ? '⟳ CACHE WARMING UP' : '⟳ INDEXING CONTRACTS'}
-            </span>
-            <div style={{ flex: 1, height: 3, background: '#1a1a1a', position: 'relative', borderRadius: 2, overflow: 'hidden' }}>
-              {cacheStats.outstanding > 0 && (
-                <div className="eve-bar-glow" style={{
-                  position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 2,
-                  width: `${Math.round((cacheStats.items_fetched / cacheStats.outstanding) * 100)}%`,
-                  background: '#ff9900', transition: 'width 1s',
-                }} />
-              )}
+          {cacheStats && (
+            <div className={`cache-status-fold ${(!cacheStats.ready && cacheStats.outstanding > 0) ? 'open' : 'closed'}`}>
+              <div style={{
+                padding: '6px 16px',
+                borderBottom: '1px solid rgba(255,153,0,0.2)',
+                background: 'rgba(255,153,0,0.06)',
+                display: 'flex', alignItems: 'center', gap: 10,
+                fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1.3,
+              }}>
+                <span className="scan-label-shimmer" style={{ color: '#ff9900', flexShrink: 0 }}>
+                  {cacheStats.warming_up ? '⟳ CACHE WARMING UP' : '⟳ INDEXING CONTRACTS'}
+                </span>
+                <div style={{ flex: 1, height: 3, background: 'var(--border)', position: 'relative', borderRadius: 2, overflow: 'hidden' }}>
+                  {cacheStats.outstanding > 0 && (
+                    <div className="eve-bar-glow" style={{
+                      position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 2,
+                      width: `${Math.round((cacheStats.items_fetched / cacheStats.outstanding) * 100)}%`,
+                      background: '#ff9900', transition: 'width 1s',
+                    }} />
+                  )}
+                </div>
+                <span style={{ color: 'var(--dim)', flexShrink: 0 }}>
+                  {cacheStats.items_fetched.toLocaleString()} / {cacheStats.outstanding.toLocaleString()}
+                </span>
+                {cacheRate > 0 && (
+                  <span style={{ color: '#ff9900', flexShrink: 0, fontWeight: 600 }}>
+                    ~{Math.round(cacheRate)}/s
+                  </span>
+                )}
+                {cacheRate === 0 && !cacheStats.warming_up && cacheStats.items_pending > 0 && (
+                  <span className="scan-label-shimmer" style={{ color: 'var(--dim)', flexShrink: 0 }}>
+                    waiting…
+                  </span>
+                )}
+                {cacheEta != null && cacheEta > 0 && (
+                  <span style={{ color: 'var(--dim)', flexShrink: 0 }}>
+                    ETA ~{cacheEta < 60 ? `${cacheEta}s` : `${Math.ceil(cacheEta / 60)}m`}
+                  </span>
+                )}
+              </div>
             </div>
-            <span style={{ color: 'var(--dim)', flexShrink: 0 }}>
-              {cacheStats.items_fetched.toLocaleString()} / {cacheStats.outstanding.toLocaleString()}
-            </span>
-            {cacheRate > 0 && (
-              <span style={{ color: '#ff9900', flexShrink: 0, fontWeight: 600 }}>
-                ~{Math.round(cacheRate)}/s
-              </span>
-            )}
-            {cacheRate === 0 && !cacheStats.warming_up && cacheStats.items_pending > 0 && (
-              <span className="scan-label-shimmer" style={{ color: 'var(--dim)', flexShrink: 0 }}>
-                waiting…
-              </span>
-            )}
-            {cacheEta != null && cacheEta > 0 && (
-              <span style={{ color: 'var(--dim)', flexShrink: 0 }}>
-                ETA ~{cacheEta < 60 ? `${cacheEta}s` : `${Math.ceil(cacheEta / 60)}m`}
-              </span>
-            )}
-          </div>
-        )}
-        {cacheStats?.ready && scanResults?.from_cache && (
-          <div style={{
-            padding: '5px 16px',
-            background: 'rgba(76,255,145,0.05)',
-            borderBottom: '1px solid rgba(76,255,145,0.12)',
-            fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1.3,
-            color: '#4cff91',
-          }}>
-            ✓ LOCAL CACHE — {cacheStats.items_fetched.toLocaleString()} contracts indexed · instant results
-          </div>
-        )}
+          )}
 
         {/* Live scan progress */}
         {scanView && scanState === 'scanning' && scanProgress && (
@@ -537,11 +501,6 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
         {/* Scan results table */}
         {scanView && scanState === 'done' && scanResults && (
           <>
-            {scanResults.results.length > filteredScanResults.length && (
-              <div style={{ padding: '8px 20px 2px', color: 'var(--dim)', fontSize: 10, letterSpacing: 1.3 }}>
-                {`${(scanResults.results.length - filteredScanResults.length).toLocaleString()} matched contract(s) hidden by current filters (including ROI >= 1%).`}
-              </div>
-            )}
             {filteredScanResults.length === 0 ? (
               <div style={{ padding: '24px 20px', textAlign: 'center', color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>
                 {scanResults.results.length === 0
@@ -859,10 +818,8 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
               );
             })()}
             <span style={{ color: 'var(--dim)', marginLeft: 8 }}>
-              · {scanResults.contracts_checked?.toLocaleString()} contracts checked across {scanResults.pages_scanned} pages
-            </span>
-            <span style={{ color: 'var(--dim)', marginLeft: 8 }}>
-              · BPO <span style={{ color: '#4cff91' }}>green</span> · BPC <span style={{ color: '#ffcc00' }}>yellow</span> · ME/TE max highlighted green (10/20)
+              · {scanResults.contracts_checked?.toLocaleString()} contracts checked
+              {scanResults.pages_scanned > 0 ? ` across ${scanResults.pages_scanned} pages` : ' (local cache)'}
             </span>
           </>
         ) : !scanView && !notReady && unownedItems.length > 0 ? (

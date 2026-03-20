@@ -95,7 +95,7 @@ function JobRow({ j, idx, multiChar }) {
           </div>
         </div>
         {/* Full-row progress bar — absolutely positioned, uses <tr> as containing block */}
-        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 2, background: '#0d0d0d', pointerEvents: 'none', zIndex: 0 }}>
+        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 2, background: 'var(--bg)', pointerEvents: 'none', zIndex: 0 }}>
           <div ref={progressRef} style={{ height: '100%', transition: 'width 1s linear' }} />
         </div>
       </td>
@@ -194,7 +194,7 @@ function QueueDetailExpanded({ item, calcItem }) {
 
   return (
     <div style={{
-      background: '#030303', borderLeft: `3px solid ${tierClr}`,
+      background: 'var(--table-row-bg)', borderLeft: `3px solid ${tierClr}`,
       padding: '10px 14px', borderBottom: '1px solid var(--border)',
     }}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
@@ -278,7 +278,7 @@ function QueueDetailExpanded({ item, calcItem }) {
           {calcItem?.recommended_runs && (() => {
             const rec = calcItem.recommended_runs;
             return (
-              <div style={{ marginTop: 8, padding: '5px 8px', border: '1px solid var(--border)', background: '#050505' }}>
+              <div style={{ marginTop: 8, padding: '5px 8px', border: '1px solid var(--border)', background: 'var(--bg)' }}>
                 <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2, marginBottom: 3 }}>REC. RUNS</div>
                 <span style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: tierClr }}>{rec.runs}</span>
                 <span style={{ fontSize: 9, color: 'var(--dim)', marginLeft: 6 }}>RUNS/BATCH · {rec.days_to_sell}d TO SELL</span>
@@ -301,7 +301,7 @@ function SupplyBar({ supplyDays, urgency }) {
                : `${supplyDays.toFixed(1)}d`;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-      <div style={{ width: 32, height: 4, background: '#111', borderRadius: 2, overflow: 'hidden' }}>
+      <div style={{ width: 32, height: 4, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
         <div style={{ height: '100%', width: `${pct}%`, background: barClr, borderRadius: 2, transition: 'width 0.3s' }} />
       </div>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: barClr, minWidth: 28 }}>{label}</span>
@@ -505,7 +505,7 @@ function DoThisNextView() {
 
       {/* Slot status + refresh header */}
       <div style={{
-        padding: '5px 10px', borderBottom: '1px solid var(--border)', background: '#050505',
+        padding: '5px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg)',
         display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
       }}>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)' }}>SLOTS</span>

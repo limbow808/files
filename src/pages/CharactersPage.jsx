@@ -9,7 +9,7 @@ function PortraitPlaceholder({ name }) {
   const initials = name ? name.slice(0, 2).toUpperCase() : '??';
   return (
     <div style={{
-      width: 64, height: 64, background: '#0d0d0d',
+      width: 64, height: 64, background: 'var(--bg)',
       border: '1px solid var(--border)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontFamily: 'var(--mono)', fontSize: 18, letterSpacing: 2, color: 'var(--dim)',
@@ -28,7 +28,7 @@ function CharacterCard({ char, charStats, onRemove, color, index = 0 }) {
       style={{
         border: '1px solid var(--border)',
         borderLeft: `3px solid ${color}`,
-        background: '#080808',
+        background: 'var(--subheader-bg)',
         display: 'flex', alignItems: 'stretch', transition: 'border-color 0.15s',
         animationDelay: `${index * 80}ms`,
       }}
@@ -198,7 +198,7 @@ export default function CharactersPage() {
         <div style={{
           padding: '10px 14px',
           border: `1px solid ${addStatus === 'error' ? 'var(--accent)' : addStatus === 'done' ? '#555' : 'var(--border)'}`,
-          background: '#0a0a0a', fontSize: 11, letterSpacing: 1,
+          background: 'var(--bg)', fontSize: 11, letterSpacing: 1,
           color: addStatus === 'error' ? 'var(--accent)' : addStatus === 'done' ? 'var(--text)' : 'var(--dim)',
           display: 'flex', alignItems: 'center', gap: 10,
         }}>
@@ -211,7 +211,7 @@ export default function CharactersPage() {
 
       {/* Summary bar — only shown when multiple characters */}
       {characters.length > 1 && (
-        <div style={{ display: 'flex', border: '1px solid var(--border)', background: '#080808' }}>
+        <div style={{ display: 'flex', border: '1px solid var(--border)', background: 'var(--subheader-bg)' }}>
           {[
             ['COMBINED WALLET', fmtISK(totalWallet)],
             ['ACTIVE JOBS',     totalJobs],

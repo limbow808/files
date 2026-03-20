@@ -147,7 +147,7 @@ function CraftLogPage() {
               gridTemplateColumns: '1fr 60px 80px 90px 90px 90px 60px',
               padding: '3px 16px',
               borderBottom: '1px solid var(--border)',
-              background: '#050505',
+              background: 'var(--bg)',
               position: 'sticky', top: 0, zIndex: 2,
             }}>
               {['ITEM', 'RUNS', 'COST', 'REALIZED', 'EST PROFIT', 'MKTPROFIT', 'JOBS'].map((h, i) => (
@@ -229,7 +229,7 @@ function CraftLogPage() {
               gridTemplateColumns: '1fr 80px 60px 80px 80px 64px 90px',
               padding: '3px 16px',
               borderBottom: '1px solid var(--border)',
-              background: '#050505',
+              background: 'var(--bg)',
               position: 'sticky', top: 0, zIndex: 2,
             }}>
               {['ITEM', 'CHARACTER', 'RUNS', 'COST', 'PROFIT', 'MARGIN', 'DATE'].map((h, i) => (

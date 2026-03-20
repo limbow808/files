@@ -37,7 +37,7 @@ export default function OverviewFooter() {
     <div style={{
       height: 24,
       flexShrink: 0,
-      background: '#444444',
+      background: 'var(--footer-bg)',
       borderTop: '1px solid #555',
       display: 'flex',
       alignItems: 'center',

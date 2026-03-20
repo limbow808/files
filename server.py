@@ -118,33 +118,8 @@ def _contract_cache_refresher() -> None:
             f"{inserted:,} new"
         )
 
-        # ── 2. Fetch items — 50 concurrent requests via semaphore ─────────
-        sem     = asyncio.Semaphore(50)
-        ok      = [0]
-        fail    = [0]
-        t_start = time.time()
-
-        async def _fetch_one(cid):
-            async with sem:
-                data = await _esi_get(
-                    session,
-                    f"{ESI}/contracts/public/items/{cid}/",
-                    retries=3,
-                )
-            if data is None:
-                fail[0] += 1
-                _cc.store_items(cid, [], time.time())  # sentinel — permanently unfetchable
-                return
-            _cc.store_items(cid, data, time.time())
-            ok[0] += 1
-            done = ok[0] + fail[0]
-            if done % 500 == 0:
-                elapsed = time.time() - t_start
-                rate = done / max(elapsed, 0.1)
-                print(
-                    f"  [contract-cache] items {done:,}/{total:,} "
-                    f"({rate:.0f}/s  ok={ok[0]:,} fail={fail[0]:,})"
-                )
+        # ── 2. Fetch items — 50 concurrent requests, bulk DB writes ─────
+        sem = asyncio.Semaphore(50)
 
         _BATCH = 5_000
         while True:
@@ -152,17 +127,35 @@ def _contract_cache_refresher() -> None:
             if not pending:
                 break
             total = len(pending)
-            ok[0] = fail[0] = 0
             t_start = time.time()
             print(f"  [contract-cache] fetching items for {total:,} contracts…")
+
+            # Collect all results in memory first
+            batch_results = {}
+
+            async def _fetch_one(cid):
+                async with sem:
+                    data = await _esi_get(
+                        session,
+                        f"{ESI}/contracts/public/items/{cid}/",
+                        retries=3,
+                    )
+                batch_results[cid] = data  # None for failures
+
             await asyncio.gather(*[_fetch_one(cid) for cid in pending])
+
+            # Single bulk write — one lock, one commit
+            _cc.store_items_bulk(batch_results, time.time())
+
+            ok_count = sum(1 for v in batch_results.values() if v is not None)
+            fail_count = total - ok_count
             elapsed = time.time() - t_start
-            rate = (ok[0] + fail[0]) / max(elapsed, 0.1)
+            rate = total / max(elapsed, 0.1)
             print(
                 f"  [contract-cache] batch done in {elapsed:.0f}s "
-                f"({rate:.0f}/s  ok={ok[0]:,} fail={fail[0]:,})"
+                f"({rate:.0f}/s  ok={ok_count:,} fail={fail_count:,})"
             )
-            if fail[0] > ok[0]:
+            if fail_count > ok_count:
                 print("  [contract-cache] many failures — pausing 30 s")
                 await asyncio.sleep(30)
 
@@ -1935,54 +1928,38 @@ def api_blueprints_bp_finder():
 
 @app.route("/api/bpo_market_scan", methods=["GET"])
 def api_bpo_market_scan():
-    """Non-streaming scan endpoint for profitable blueprint contracts."""
+    """Non-streaming scan endpoint for blueprint contracts (all SDE blueprints)."""
     try:
         region_id = int(request.args.get("region_id", 10000002))
         system = request.args.get("system", "Korsiki")
         facility = request.args.get("facility", "large")
-        max_pages = min(int(request.args.get("max_pages", 20)), 40)
-        min_rps = float(request.args.get("min_rps", SCAN_MIN_RPS_DEFAULT))
-        max_rps = float(request.args.get("max_rps", SCAN_MAX_RPS_DEFAULT))
 
-        calc_results = _get_scan_calc_results(system, facility)
-        if calc_results is None:
+        # Load full SDE blueprint set — scanner no longer gates on calculator
+        all_bp_ids, bp_info = _load_all_bp_info()
+        if not all_bp_ids:
             return jsonify({
                 "results": [],
                 "not_ready": True,
-                "message": "Open the Calculator tab first to load market prices, then scan.",
+                "message": "Blueprint database (crest.db) not found — run seeder.py first.",
             })
 
-        bpid_to_calc = _build_scan_bpid_map(calc_results)
-        wanted_bp_ids = set(bpid_to_calc.keys())
-        if not wanted_bp_ids:
-            return jsonify({
-                "results": [],
-                "matched": 0,
-                "pages_scanned": 0,
-                "contracts_checked": 0,
-                "message": "No calc data found — open the Calculator tab first.",
-            })
+        # Calculator data is optional enrichment
+        calc_results = _get_scan_calc_results(system, facility)
+        bpid_to_calc = _build_scan_bpid_map(calc_results) if calc_results else {}
 
         personal_bp_ids, corp_bp_ids = _load_owned_bp_ids()
 
         # ── Use local contract cache (instant SQL query, no ESI calls) ─────────
         stats = _cc.get_stats(region_id)
         if stats["items_fetched"] == 0:
-            # Cache hasn't warmed up yet — fall back to live scan
-            scan_payload = _run_blueprint_contract_scan(
-                region_id=region_id,
-                max_pages=max_pages,
-                wanted_bp_ids=wanted_bp_ids,
-                bpid_to_calc=bpid_to_calc,
-                personal_bp_ids=personal_bp_ids,
-                corp_bp_ids=corp_bp_ids,
-                progress_cb=None,
-                min_rps=min_rps,
-                max_rps=max_rps,
-            )
-            return jsonify(scan_payload)
+            return jsonify({
+                "results": [],
+                "not_ready": True,
+                "message": "Contract cache is still warming up — please wait.",
+                "cache_stats": stats,
+            })
 
-        raw_matches   = _cc.query_bp_contracts(wanted_bp_ids, region_id=region_id)
+        raw_matches   = _cc.query_bp_contracts(all_bp_ids, region_id=region_id)
         best_by_bpid  = {}
         for row in raw_matches:
             match = {
@@ -2004,7 +1981,7 @@ def api_bpo_market_scan():
                 "runs":     row["runs"],
             }
             result_row = _build_scan_result_row(
-                match, bpid_to_calc, personal_bp_ids, corp_bp_ids
+                match, bpid_to_calc, personal_bp_ids, corp_bp_ids, bp_info
             )
             bpid     = result_row["blueprint_id"]
             existing = best_by_bpid.get(bpid)
@@ -2021,10 +1998,7 @@ def api_bpo_market_scan():
 
         results = sorted(
             best_by_bpid.values(),
-            key=lambda x: (
-                0 if x.get("can_breakeven", True) else 1,
-                -(x.get("adj_net_profit", 0)),
-            ),
+            key=lambda x: x.get("price", 0),
         )
         return jsonify({
             "results":           results,
@@ -2185,26 +2159,24 @@ def api_bpo_market_scan_stream():
 
         def _worker():
             try:
-                _msg_q.put(_sse({"type": "status", "msg": "Loading cached market data…"}))
-                calc_results = _get_scan_calc_results("Korsiki", "large")
-                if calc_results is None:
-                    _msg_q.put(_sse({"type": "error", "msg": "Open the Calculator tab first to load market data, then scan."}))
+                _msg_q.put(_sse({"type": "status", "msg": "Loading blueprint database…"}))
+                all_bp_ids, bp_info = _load_all_bp_info()
+                if not all_bp_ids:
+                    _msg_q.put(_sse({"type": "error", "msg": "Blueprint database (crest.db) not found — run seeder.py first."}))
                     return
 
-                bpid_to_calc = _build_scan_bpid_map(calc_results)
-                wanted_bp_ids = set(bpid_to_calc.keys())
-                if not wanted_bp_ids:
-                    _msg_q.put(_sse({"type": "error", "msg": "No calc data — open the Calculator tab first."}))
-                    return
+                # Calculator data is optional enrichment
+                calc_results = _get_scan_calc_results("Korsiki", "large")
+                bpid_to_calc = _build_scan_bpid_map(calc_results) if calc_results else {}
 
                 _msg_q.put(_sse({"type": "status", "msg": "Loading owned blueprint data…"}))
                 personal_bp_ids, corp_bp_ids = _load_owned_bp_ids()
 
-                # ── Use local cache when warm, fall back to live scan ──────────
+                # ── Use local cache when warm ──────────────────────────────────
                 stats = _cc.get_stats(region_id)
                 if stats["items_fetched"] > 0:
                     _msg_q.put(_sse({"type": "status", "msg": "Querying local contract cache…"}))
-                    raw_matches  = _cc.query_bp_contracts(wanted_bp_ids, region_id=region_id)
+                    raw_matches  = _cc.query_bp_contracts(all_bp_ids, region_id=region_id)
                     best_by_bpid: dict = {}
                     for row in raw_matches:
                         match = {
@@ -2226,7 +2198,7 @@ def api_bpo_market_scan_stream():
                             "runs":     row["runs"],
                         }
                         rrow     = _build_scan_result_row(
-                            match, bpid_to_calc, personal_bp_ids, corp_bp_ids
+                            match, bpid_to_calc, personal_bp_ids, corp_bp_ids, bp_info
                         )
                         bpid     = rrow["blueprint_id"]
                         existing = best_by_bpid.get(bpid)
@@ -2242,10 +2214,7 @@ def api_bpo_market_scan_stream():
                                 best_by_bpid[bpid]     = rrow
                     results = sorted(
                         best_by_bpid.values(),
-                        key=lambda x: (
-                            0 if x.get("can_breakeven", True) else 1,
-                            -(x.get("adj_net_profit", 0)),
-                        ),
+                        key=lambda x: x.get("price", 0),
                     )
                     payload = {
                         "type":              "done",
@@ -2260,25 +2229,17 @@ def api_bpo_market_scan_stream():
                     }
                     _msg_q.put(_sse(payload))
                 else:
-                    # Cache still warming up — fall back to live ESI scan
-                    _msg_q.put(_sse({"type": "status", "msg": "Cache warming — scanning ESI contracts live…"}))
-
-                    def _progress(msg):
-                        _msg_q.put(_sse(msg))
-
-                    payload = _run_blueprint_contract_scan(
-                        region_id=region_id,
-                        max_pages=max_pages,
-                        wanted_bp_ids=wanted_bp_ids,
-                        bpid_to_calc=bpid_to_calc,
-                        personal_bp_ids=personal_bp_ids,
-                        corp_bp_ids=corp_bp_ids,
-                        progress_cb=_progress,
-                        min_rps=min_rps,
-                        max_rps=max_rps,
-                    )
-                    payload["type"] = "done"
-                    _msg_q.put(_sse(payload))
+                    # Cache still warming up — return empty done
+                    _msg_q.put(_sse({
+                        "type": "done",
+                        "results": [],
+                        "matched": 0,
+                        "contracts_checked": 0,
+                        "pages_scanned": 0,
+                        "from_cache": True,
+                        "cache_stats": stats,
+                        "message": "Contract cache is still warming up — please wait.",
+                    }))
 
             except Exception as e:
                 import traceback
@@ -2399,13 +2360,58 @@ def _load_owned_bp_ids() -> tuple[set, set]:
     return personal_bp_ids, corp_bp_ids
 
 
-def _build_scan_result_row(match: dict, bpid_to_calc: dict, personal_bp_ids: set, corp_bp_ids: set) -> dict:
+# ── All-SDE blueprint info cache ──────────────────────────────────────────────
+_ALL_BP_INFO_CACHE: dict | None = None
+
+def _load_all_bp_info() -> tuple[set, dict]:
+    """Return (all_bp_ids, bp_info) from crest.db blueprints table.
+
+    bp_info maps blueprint_id → {name, output_id, category, tech, item_group}.
+    Cached after the first call.
+    """
+    global _ALL_BP_INFO_CACHE
+    if _ALL_BP_INFO_CACHE is not None:
+        return _ALL_BP_INFO_CACHE
+
+    import sqlite3 as _sql
+    db_path = os.path.join(os.path.dirname(__file__), "crest.db")
+    if not os.path.exists(db_path):
+        _ALL_BP_INFO_CACHE = (set(), {})
+        return _ALL_BP_INFO_CACHE
+
+    conn = _sql.connect(db_path)
+    conn.row_factory = _sql.Row
+    rows = conn.execute(
+        "SELECT blueprint_id, output_id, output_name, category, tech_level, item_group "
+        "FROM blueprints"
+    ).fetchall()
+    conn.close()
+
+    bp_info: dict = {}
+    all_ids: set  = set()
+    for r in rows:
+        bpid = r["blueprint_id"]
+        all_ids.add(bpid)
+        bp_info[bpid] = {
+            "name":      r["output_name"],
+            "output_id": r["output_id"],
+            "category":  r["category"] or "",
+            "tech":      r["tech_level"] or "",
+            "item_group": r["item_group"] or "",
+        }
+    _ALL_BP_INFO_CACHE = (all_ids, bp_info)
+    return _ALL_BP_INFO_CACHE
+
+
+def _build_scan_result_row(match: dict, bpid_to_calc: dict, personal_bp_ids: set, corp_bp_ids: set, bp_info: dict | None = None) -> dict:
     import math
 
     contract = match["contract"]
     bpid = match["type_id"]
     calc_row = bpid_to_calc.get(bpid, {})
-    output_id = calc_row.get("output_id")
+    has_calc = bool(calc_row)
+    sde_row = (bp_info or {}).get(bpid, {})
+    output_id = calc_row.get("output_id") or sde_row.get("output_id")
     is_bpc = match.get("is_bpc", False)
     runs = match.get("runs", -1)
     price = contract.get("price", 0)
@@ -2413,7 +2419,7 @@ def _build_scan_result_row(match: dict, bpid_to_calc: dict, personal_bp_ids: set
     mat_cost_1r = calc_row.get("material_cost", 0)
     gross_rev_1r = calc_row.get("gross_revenue", 0)
 
-    if is_bpc and runs > 0:
+    if has_calc and is_bpc and runs > 0:
         cost_per_run = price / runs
         adj_net_profit_1r = net_profit_1r - cost_per_run
         total_cost_1r = mat_cost_1r + cost_per_run
@@ -2422,7 +2428,7 @@ def _build_scan_result_row(match: dict, bpid_to_calc: dict, personal_bp_ids: set
         can_breakeven = adj_net_profit_1r > 0
         breakeven_runs = math.ceil(price / net_profit_1r) if net_profit_1r > 0 else None
         bpc_feasible = (breakeven_runs is not None and breakeven_runs <= runs)
-    else:
+    elif has_calc:
         adj_net_profit_1r = net_profit_1r
         adj_roi = calc_row.get("roi", 0)
         total_adj_profit = None
@@ -2430,11 +2436,21 @@ def _build_scan_result_row(match: dict, bpid_to_calc: dict, personal_bp_ids: set
         breakeven_runs = math.ceil(price / net_profit_1r) if net_profit_1r > 0 else None
         bpc_feasible = True
         runs = -1
+    else:
+        # No calculator data — show listing info only
+        adj_net_profit_1r = 0
+        adj_roi = 0
+        total_adj_profit = None
+        can_breakeven = True
+        breakeven_runs = None
+        bpc_feasible = True
+        if not is_bpc:
+            runs = -1
 
     return {
         "blueprint_id": bpid,
         "output_id": output_id,
-        "name": calc_row.get("name", "?"),
+        "name": calc_row.get("name") or sde_row.get("name", "?"),
         "me": match.get("me", 0),
         "te": match.get("te", 0),
         "is_bpc": is_bpc,
@@ -2450,14 +2466,15 @@ def _build_scan_result_row(match: dict, bpid_to_calc: dict, personal_bp_ids: set
         "isk_per_hour": calc_row.get("isk_per_hour", 0),
         "material_cost": mat_cost_1r,
         "gross_revenue": gross_rev_1r,
-        "category": calc_row.get("category", ""),
-        "tech": calc_row.get("tech", ""),
+        "category": calc_row.get("category") or sde_row.get("category", ""),
+        "tech": calc_row.get("tech") or sde_row.get("tech", ""),
         "adj_net_profit": round(adj_net_profit_1r, 2),
         "adj_roi": round(adj_roi, 2),
         "total_adj_profit": round(total_adj_profit, 2) if total_adj_profit is not None else None,
         "can_breakeven": can_breakeven,
         "bpc_feasible": bpc_feasible,
         "breakeven_runs": breakeven_runs,
+        "has_calc_data": has_calc,
     }
 
 

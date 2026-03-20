@@ -69,7 +69,7 @@ export default function KPIBar({ plexData, walletHistory }) {
             <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 0, marginTop: 4, lineHeight: 1 }}>{s.label}</span>
           </div>
           {i < stats.length - 1 && (
-            <div style={{ width: 5, height: 5, background: '#252525', flexShrink: 0, alignSelf: 'center' }} />
+            <div style={{ width: 5, height: 5, background: 'var(--border)', flexShrink: 0, alignSelf: 'center' }} />
           )}
         </Fragment>
       ))}

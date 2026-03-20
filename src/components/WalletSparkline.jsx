@@ -62,7 +62,7 @@ export default function WalletSparkline({ history, target }) {
         width: '100%', height: '100%',
         display: 'flex', alignItems: 'center',
         color: 'var(--dim)', fontSize: 10, letterSpacing: 2,
-        background: '#050505', border: '1px solid #111',
+        background: 'var(--bg)', border: '1px solid var(--border)',
         paddingLeft: 12,
       }}>
         COLLECTING DATA…
@@ -71,7 +71,7 @@ export default function WalletSparkline({ history, target }) {
   }
 
   return (
-    <div ref={containerRef} style={{ width: '100%', height: '100%', border: '1px solid #111', background: '#030303', lineHeight: 0 }}>
+    <div ref={containerRef} style={{ width: '100%', height: '100%', border: `1px solid var(--border)`, background: 'var(--table-shell-bg)', lineHeight: 0 }}>
       {size.w > 0 && (
         <svg
           viewBox={`0 0 ${VB_W} ${VB_H}`}

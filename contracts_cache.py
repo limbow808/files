@@ -162,6 +162,47 @@ def store_items(contract_id: int, items: list, fetched_at: float) -> None:
         conn.commit()
 
 
+def store_items_bulk(results: dict, fetched_at: float) -> None:
+    """
+    Persist items for many contracts in a single transaction.
+    `results` maps contract_id → items list (or None for failed fetches).
+    """
+    with _write_lock:
+        conn = _get_conn()
+        for cid, items in results.items():
+            if items is None or len(items) == 0:
+                conn.execute(
+                    "INSERT OR REPLACE INTO contract_items "
+                    "(contract_id, type_id, fetched_at) VALUES (?, 0, ?)",
+                    (cid, fetched_at),
+                )
+            else:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO contract_items
+                        (contract_id, type_id, is_blueprint_copy,
+                         material_efficiency, time_efficiency,
+                         quantity, runs, fetched_at)
+                    VALUES (?,?,?,?,?,?,?,?)
+                    """,
+                    [
+                        (
+                            cid,
+                            item.get("type_id", 0),
+                            1 if item.get("is_blueprint_copy") else 0,
+                            item.get("material_efficiency", 0),
+                            item.get("time_efficiency", 0),
+                            item.get("quantity", 1),
+                            item.get("runs", -1),
+                            fetched_at,
+                        )
+                        for item in items
+                        if item.get("is_included", True) and item.get("type_id")
+                    ],
+                )
+        conn.commit()
+
+
 # ─── Queries ──────────────────────────────────────────────────────────────────
 
 def get_ids_needing_items(region_id: int, limit: int = 10_000) -> list[int]:
@@ -263,18 +304,18 @@ def get_stats(region_id: int = 10_000_002) -> dict:
     ).fetchone()[0]
     outstanding = conn.execute(
         "SELECT COUNT(*) FROM contracts "
-        "WHERE region_id=? AND status='outstanding' AND date_expired > ?",
+        "WHERE region_id=? AND status='outstanding' AND date_expired > ?"
+        "  AND price >= 1000000",
         (region_id, now_iso),
     ).fetchone()[0]
     fetched = conn.execute(
         "SELECT COUNT(DISTINCT ci.contract_id) "
         "FROM contract_items ci "
         "JOIN contracts c ON c.contract_id = ci.contract_id "
-        "WHERE c.region_id = ?",
+        "WHERE c.region_id = ? AND c.price >= 1000000",
         (region_id,),
     ).fetchone()[0]
-    bp_found = conn.execute(
-        "SELECT COUNT(DISTINCT ci.contract_id) "
+    bp_found = conn.execute(        "SELECT COUNT(DISTINCT ci.contract_id) "
         "FROM contract_items ci "
         "JOIN contracts c ON c.contract_id = ci.contract_id "
         "WHERE c.region_id = ? AND ci.type_id > 0",

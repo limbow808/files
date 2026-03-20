@@ -36,7 +36,7 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
 
   return (
     <tr>
-      <td colSpan={16} style={{ padding: 0, background: '#000' }}>
+      <td colSpan={16} style={{ padding: 0, background: 'var(--table-shell-bg)' }}>
         <div className="calc-detail eve-corners eve-panel-in" style={{ borderLeft: `3px solid ${tierColor}`, position: 'relative' }}>
           <div className="eve-corners-inner" style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
           <div className="eve-scanline" />
@@ -179,7 +179,7 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
                 const tooSlow = rec.max_per_day < (item.avg_daily_volume / (item.output_qty || 1));
                 const color = tooSlow ? '#00cc66' : rec.saturation_pct >= 90 ? 'var(--accent)' : 'var(--text)';
                 return (
-                  <div style={{ marginTop: 12, padding: '8px 10px', border: '1px solid var(--border)', background: '#050505' }}>
+                  <div style={{ marginTop: 12, padding: '8px 10px', border: '1px solid var(--border)', background: 'var(--bg)' }}>
                     <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 6 }}>◈ Recommended Runs</div>
                     <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'baseline' }}>
                       <div>

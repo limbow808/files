@@ -425,7 +425,7 @@ function CalculatorPage({ refreshKey = 0 }) {
               padding: '10px 16px', textAlign: 'center', cursor: 'pointer',
               borderTop: '1px solid var(--border)', color: 'var(--dim)',
               fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2,
-              background: '#050505',
+              background: 'var(--bg)',
             }}
             onMouseEnter={e => e.currentTarget.style.color = 'var(--text)'}
             onMouseLeave={e => e.currentTarget.style.color = 'var(--dim)'}
@@ -453,7 +453,7 @@ function CalculatorPage({ refreshKey = 0 }) {
                 <div style={{ color: 'var(--dim)', fontSize: 10 }}>
                   {progress.done} / {progress.total}
                 </div>
-                <div style={{ marginTop: 10, width: 240, margin: '10px auto 0', height: 2, background: '#1a1a1a', position: 'relative' }}>
+                <div style={{ marginTop: 10, width: 240, margin: '10px auto 0', height: 2, background: 'var(--border)', position: 'relative' }}>
                   <div className="eve-bar-glow" style={{
                     position: 'absolute', left: 0, top: 0, bottom: 0,
                     width: `${Math.round((progress.done / progress.total) * 100)}%`,

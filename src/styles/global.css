@@ -8,17 +8,34 @@
 }
 
 /* ── Design tokens ─────────────────────────────────────────────── */
+/* COLOR PALETTE — Update these to rebrand the entire frontend */
 :root {
-  --bg:      #0d0d0d;
-  --bg2:     #121212;
-  --text:    #E0E0E0;
-  --text2:   #B0B0B0;
-  --accent:  #ff4700;
-  --border:  #444444;
-  --border2: #B0B0B0;
-  --dim:     #B0B0B0;
-  --green:   #4cff91;
-  --blue:    #4da6ff;
+  /* Primary surfaces */
+  --bg:      #0d0d0d;     /* Main background */
+  --bg2:     #121212;     /* Secondary background */
+  
+  /* Text colors */
+  --text:    #E0E0E0;     /* Primary text */
+  --text2:   #B0B0B0;     /* Secondary text (dim) */
+  --dim:     #B0B0B0;     /* Disabled/faint text */
+  
+  /* Accents */
+  --accent:  #ff4700;     /* Action/warning orange */
+  --green:   #4cff91;     /* Success/profit green */
+  --blue:    #4da6ff;     /* Info blue */
+  
+  /* Borders */
+  --border:  #444444;     /* Primary border/divider */
+  --border2: #B0B0B0;     /* Secondary border */
+  
+  /* Layout structure — used for headers, footers, tables */
+  --header-bg: #0d0d0d;       /* Page/panel header background */
+  --subheader-bg: #121212;    /* Sub-header, toolbar, panel header bg */
+  --footer-bg: #444444;       /* Footer background */
+  --table-shell-bg: #0d0d0d;  /* Table container/wrapper background */
+  --table-row-bg: #121212;    /* Table row & header background */
+  
+  /* Font */
   --mono:    'Space Grotesk', sans-serif;
 }
 
@@ -55,7 +72,7 @@ a, a:hover, button, button:hover { text-decoration: none; }
   justify-content: space-between;
   padding: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--bg);
+  background: var(--header-bg);
   position: sticky;
   top: 0;
   z-index: 100;
@@ -79,12 +96,13 @@ a, a:hover, button, button:hover { text-decoration: none; }
   justify-content: space-between;
   padding: 6px 14px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg2);
+  background: var(--subheader-bg);
 }
 .panel-title { font-family: var(--mono); font-size: 11px; letter-spacing: 0px; color: var(--text); text-transform: uppercase; opacity: 0.6; }
 
 /* ── Table ──────────────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; }
+table tbody tr { background: var(--table-row-bg); }
 th {
   font-family: var(--mono);
   font-size: 9px;
@@ -93,6 +111,7 @@ th {
   text-align: right;
   padding: 5px 8px;
   color: var(--dim);
+  background: var(--table-row-bg);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
@@ -379,7 +398,7 @@ tr.row-selected td { color: #000; }
   align-items: center;
   justify-content: space-between;
   padding: 6px 16px;
-  background: #030303;
+  background: var(--subheader-bg);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   cursor: pointer;
@@ -417,9 +436,10 @@ tr.row-selected td { color: #000; }
   flex: 1;
   overflow-y: auto;
   overflow-x: auto;
+  background: var(--table-shell-bg);
 }
 .shopping-mats table { min-width: 700px; }
-.shopping-mats th { font-size: 9px; padding: 5px 8px; position: sticky; top: 0; background: #030303; z-index: 1; }
+.shopping-mats th { font-size: 9px; padding: 5px 8px; position: sticky; top: 0; background: var(--table-shell-bg); z-index: 1; }
 .shopping-mats td { font-size: 11px; padding: 5px 8px; }
 .shopping-copy-bar {
   flex-shrink: 0;
@@ -428,7 +448,7 @@ tr.row-selected td { color: #000; }
   gap: 10px;
   padding: 6px 16px;
   border-top: 1px solid var(--border);
-  background: #030303;
+  background: var(--subheader-bg);
   flex-wrap: wrap;
 }
 .shopping-copy-bar .copy-label {
@@ -479,7 +499,7 @@ tr.row-selected td { color: #000; }
   padding: 10px 18px;
   border-bottom: 1px solid #1a1a1a;
   flex-shrink: 0;
-  background: #040404;
+  background: var(--subheader-bg);
 }
 .sb-title {
   font-family: var(--mono);
@@ -558,42 +578,6 @@ tr.row-selected td { color: #000; }
 }
 .scan-label-shimmer {
   animation: pulse 1.2s ease-in-out infinite;
-}
-
-/* Toast notifications */
-.bp-toast-container {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  z-index: 9999;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  pointer-events: none;
-}
-.bp-toast {
-  padding: 8px 16px;
-  border-radius: 3px;
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 1.5px;
-  animation: evePanelIn 0.3s ease-out both;
-  pointer-events: auto;
-}
-.bp-toast-success {
-  background: rgba(76,255,145,0.12);
-  border: 1px solid rgba(76,255,145,0.3);
-  color: #4cff91;
-}
-.bp-toast-indexing {
-  background: rgba(255,140,0,0.12);
-  border: 1px solid rgba(255,140,0,0.3);
-  color: #ff9900;
-}
-.bp-toast-info {
-  background: rgba(100,150,255,0.12);
-  border: 1px solid rgba(100,150,255,0.3);
-  color: #6496ff;
 }
 
 .scan-label-sub {
@@ -699,6 +683,7 @@ tr.row-selected td { color: #000; }
   flex: 1;
   overflow: auto;
   min-height: 0;
+  background: var(--table-shell-bg);
 }
 .sb-table {
   width: 100%;
@@ -714,7 +699,7 @@ tr.row-selected td { color: #000; }
   text-align: right;
   position: sticky;
   top: 0;
-  background: #060606;
+  background: var(--table-shell-bg);
   border-bottom: 1px solid #1a1a1a;
   z-index: 1;
   white-space: nowrap;
@@ -783,7 +768,7 @@ tr.row-selected td { color: #000; }
   flex-shrink: 0;
   padding: 5px 18px;
   border-top: 1px solid #111;
-  background: #040404;
+  background: var(--footer-bg);
 }
 
 /* Custom checkbox — hides native, renders a styled square */
@@ -822,7 +807,7 @@ tr.row-selected td { color: #000; }
 /* ── Calc filters ────────────────────────────────────────────────── */
 .calc-filters {
   border-bottom: 1px solid var(--border);
-  background: #030303;
+  background: var(--subheader-bg);
 }
 .calc-filters-inputs {
   display: flex;
@@ -922,7 +907,7 @@ select.calc-input { appearance: none; -webkit-appearance: none; cursor: pointer;
 .calc-search-input:focus { border-color: var(--text); }
 .calc-search-input::placeholder { color: var(--dim); }
 
-.calc-table th { font-size: 10px; letter-spacing: 0.5px; padding: 5px 6px; white-space: nowrap; }
+.calc-table th { font-size: 10px; letter-spacing: 0.5px; padding: 5px 6px; white-space: nowrap; background: var(--table-row-bg); }
 .calc-table td { padding: 3px 6px; font-size: 11px; }
 .calc-table th, .calc-table td { text-align: right; }
 .calc-table th:first-child, .calc-table td:first-child { text-align: left; }
@@ -1020,7 +1005,7 @@ select.calc-input { appearance: none; -webkit-appearance: none; cursor: pointer;
   position: sticky;
   top: 0;
   z-index: 2;
-  background: #000;
+  background: var(--table-shell-bg);
   border-bottom: 1px solid var(--border);
 }
 
@@ -1197,7 +1182,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .sort-arrow { margin-left: 3px; font-size: 9px; color: var(--accent); }
 
 /* ── ESI BP Library panel ────────────────────────────────────────── */
-.esi-bp-panel { border-top: 1px solid var(--border); background: #030303; }
+.esi-bp-panel { border-top: 1px solid var(--border); background: var(--table-shell-bg); }
 .esi-bp-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -1220,7 +1205,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 /* ── BP Finder panel ─────────────────────────────────────────────── */
 .bp-finder-panel {
   border-top: 1px solid var(--border);
-  background: #030303;
+  background: var(--table-shell-bg);
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -1257,6 +1242,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 .bp-finder-body {
   overflow-y: auto;
   flex: 1;
+  background: var(--table-shell-bg);
 }
 .bp-finder-table {
   width: 100%;
@@ -1274,7 +1260,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
-  background: #030303;
+  background: var(--table-shell-bg);
   z-index: 1;
   white-space: nowrap;
   font-weight: 400;
@@ -1334,7 +1320,25 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   color: var(--text);
   letter-spacing: 1.5px;
   flex-shrink: 0;
-  background: #020202;
+  background: var(--footer-bg);
+}
+
+.cache-status-fold {
+  overflow: hidden;
+  transform-origin: top;
+  transition: max-height 220ms ease, opacity 180ms ease, transform 220ms ease;
+}
+
+.cache-status-fold.open {
+  max-height: 80px;
+  opacity: 1;
+  transform: scaleY(1);
+}
+
+.cache-status-fold.closed {
+  max-height: 0;
+  opacity: 0;
+  transform: scaleY(0.96);
 }
 
 /* ── Scan progress panel ─────────────────────────────────────── */

@@ -42,7 +42,7 @@ function HeaderRow() {
       display: 'flex', alignItems: 'center',
       padding: '4px 10px',
       borderBottom: '1px solid var(--border)',
-      background: '#0a0a08',
+      background: 'var(--table-shell-bg)',
       flexShrink: 0,
       gap: 0,
     }}>
