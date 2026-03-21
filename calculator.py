@@ -37,7 +37,19 @@ CONFIG = {
     # Structure manufacturing bonus (ME reduction as decimal)
     # E-UNI structures may offer 1% ME bonus = 0.01
     "structure_me_bonus": 0.01,    # UPDATE based on E-UNI structure
-    "job_cost_structure_discount": 0.04,   # E-UNI Engingeering Complex
+
+    # Industry job fee model (EVE formula, version 2)
+    # facility_tax_rate defaults to NPC station baseline and should be
+    # overridden per real structure when known.
+    "facility_tax_rate":         0.001,
+    "scc_surcharge_rate":        0.04,
+    "structure_type_id":         None,
+    "structure_role_bonus_mfg":  None,   # optional explicit override, e.g. -0.04
+    "structure_role_bonus_copy": None,   # optional explicit override, e.g. -0.04
+    "rig_bonus_mfg":             0.0,    # user-provided additive bonus on gross SCI cost
+    "rig_bonus_copy":            0.0,
+    "copying_activity_multiplier": 0.02,
+    "job_formula_version":       2,
 
     # ── Sanity filter thresholds ─────────────────────────────────────────────
     # Items where total raw material cost is below this are skipped.
@@ -52,13 +64,114 @@ CONFIG = {
 }
 
 
+# Base role bonuses by structure type_id (without rigs).
+# Negative values reduce gross install component.
+STRUCTURE_ROLE_BONUS_BY_TYPE = {
+    35825: {"manufacturing": -0.03, "copying": -0.03},  # Raitaru
+    35826: {"manufacturing": -0.04, "copying": -0.04},  # Azbel
+    35827: {"manufacturing": -0.05, "copying": -0.05},  # Sotiyo
+    35835: {"manufacturing":  0.0,  "copying":  0.0},   # Athanor
+    35836: {"manufacturing":  0.0,  "copying":  0.0},   # Tatara
+}
+
+
 def apply_me(base_qty: int, me_level: int, structure_bonus: float = 0.0) -> int:
     """
     Apply material efficiency research to a base material quantity.
     Formula: ceil( base * (1 - me_level/100) * (1 - structure_bonus) )
+    ME and structure bonuses are multiplicative per EVE mechanics.
     """
-    reduction = 1 - (me_level / 100) - structure_bonus
+    reduction = (1 - me_level / 100) * (1 - structure_bonus)
     return max(1, math.ceil(base_qty * reduction))
+
+
+def _role_bonus_for_activity(activity: str, cfg: dict) -> float:
+    """
+    Resolve base structure role bonus for activity.
+    Explicit config overrides win; otherwise infer from structure_type_id map.
+    """
+    if activity == "manufacturing" and cfg.get("structure_role_bonus_mfg") is not None:
+        return float(cfg.get("structure_role_bonus_mfg") or 0.0)
+    if activity == "copying" and cfg.get("structure_role_bonus_copy") is not None:
+        return float(cfg.get("structure_role_bonus_copy") or 0.0)
+
+    stid = cfg.get("structure_type_id")
+    if stid is None:
+        return 0.0
+    try:
+        stid_int = int(stid)
+    except Exception:
+        return 0.0
+    row = STRUCTURE_ROLE_BONUS_BY_TYPE.get(stid_int, {})
+    return float(row.get(activity, 0.0) or 0.0)
+
+
+def calculate_industry_job_cost(
+    activity: str,
+    eiv: float,
+    sci: float,
+    cfg: dict,
+) -> dict:
+    """
+    Calculate installation cost using EVE's activity-specific formula.
+
+    Manufacturing:
+      base = EIV
+      gross = base * SCI
+      role bonus applies to gross only
+      taxes (facility + SCC) apply to base (not gross)
+
+    Copying:
+      base = JCB = EIV * 0.02
+      gross = base * SCI
+      role bonus applies to gross only
+      taxes apply to base (JCB), not gross
+    """
+    eiv = float(eiv or 0.0)
+    sci = float(sci or 0.0)
+    scc_rate = float(cfg.get("scc_surcharge_rate", 0.04) or 0.04)
+    facility_tax_rate = float(cfg.get("facility_tax_rate", 0.001) or 0.001)
+
+    if activity == "copying":
+        activity_multiplier = float(cfg.get("copying_activity_multiplier", 0.02) or 0.02)
+        base_cost = eiv * activity_multiplier
+        rig_bonus = float(cfg.get("rig_bonus_copy", 0.0) or 0.0)
+    else:
+        activity_multiplier = 1.0
+        base_cost = eiv
+        rig_bonus = float(cfg.get("rig_bonus_mfg", 0.0) or 0.0)
+
+    role_bonus = _role_bonus_for_activity(activity, cfg)
+
+    gross = base_cost * sci
+    gross_after_bonus = gross * (1 + role_bonus) * (1 + rig_bonus)
+    gross_bonus_amount = gross_after_bonus - gross
+
+    facility_tax = base_cost * facility_tax_rate
+    scc_surcharge = base_cost * scc_rate
+    taxes_total = facility_tax + scc_surcharge
+
+    total_job_cost = gross_after_bonus + taxes_total
+
+    return {
+        "activity": activity,
+        "formula_version": int(cfg.get("job_formula_version", 2) or 2),
+        "eiv": eiv,
+        "activity_multiplier": activity_multiplier,
+        "base_cost": base_cost,
+        "sci": sci,
+        "role_bonus": role_bonus,
+        "rig_bonus": rig_bonus,
+        "gross": gross,
+        "gross_bonus_amount": gross_bonus_amount,
+        "gross_after_bonus": gross_after_bonus,
+        "facility_tax_rate": facility_tax_rate,
+        "facility_tax": facility_tax,
+        "scc_surcharge_rate": scc_rate,
+        "scc_surcharge": scc_surcharge,
+        "taxes_total": taxes_total,
+        "total_job_cost": total_job_cost,
+    }
 
 
 def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None,
@@ -105,6 +218,7 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
 
     # ── Material cost ─────────────────────────────────────────────────────────
     material_cost = 0
+    estimated_item_value = 0
     material_breakdown = []
 
     for mat in blueprint["materials"]:
@@ -122,14 +236,24 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
         # Use SELL price for inputs (conservative - what you actually pay)
         unit_price = prices[tid]["sell"]
         line_cost  = unit_price * actual_qty
+        adjusted_price = prices[tid].get("adjusted_price")
+        if adjusted_price is None:
+            adjusted_price = unit_price
+        # EIV uses RAW base quantity (not ME-reduced) per EVE mechanics
+        base_qty = mat["quantity"]
+        eiv_line_cost = adjusted_price * base_qty
 
         material_cost += line_cost
+        estimated_item_value += eiv_line_cost
         material_breakdown.append({
             "type_id":    tid,
             "name":       mat.get("name", ""),
+            "base_quantity": base_qty,
             "quantity":   actual_qty,
             "unit_price": unit_price,
-            "line_cost":  line_cost
+            "line_cost":  line_cost,
+            "adjusted_price": adjusted_price,
+            "eiv_line_cost": eiv_line_cost,
         })
 
     # ── Sanity checks — filter out SDE blueprints that aren't real player BPOs ─
@@ -145,9 +269,15 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
     if rev_mat_ratio > cfg.get("max_rev_mat_ratio", 5.0):
         return None
 
-    # ── Job installation cost (System Cost Index) ─────────────────────────────
-    # SCI is applied to the estimated job cost (sum of material values at sell price)
-    job_cost = material_cost * cfg["system_cost_index"] * (1 - cfg["job_cost_structure_discount"])
+    # ── Job installation cost (EVE formula v2) ───────────────────────────────
+    # Manufacturing cost uses EIV as base for SCI and taxes.
+    job_cost_breakdown = calculate_industry_job_cost(
+        activity="manufacturing",
+        eiv=estimated_item_value,
+        sci=cfg["system_cost_index"],
+        cfg=cfg,
+    )
+    job_cost = job_cost_breakdown["total_job_cost"]
 
     # ── Taxes and fees ────────────────────────────────────────────────────────
     sales_tax   = gross_revenue * cfg["sales_tax"]
@@ -199,7 +329,9 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
         "output_qty":         output_qty,
         "gross_revenue":      gross_revenue,
         "material_cost":      material_cost,
+        "estimated_item_value": estimated_item_value,
         "job_cost":           job_cost,
+        "job_cost_breakdown": job_cost_breakdown,
         "sales_tax":          sales_tax,
         "broker_fee":         broker_fee,
         "invention_cost":     invention_cost,
@@ -218,6 +350,7 @@ def calculate_profit(blueprint: dict, prices: dict, config_override: dict = None
             output_qty,
             time_seconds,
         ),
+        "job_formula_version": int(cfg.get("job_formula_version", 2) or 2),
     }
 
 

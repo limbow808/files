@@ -6,7 +6,7 @@ import { API } from '../App';
  * Returns { stage, msg, done, total } updated in real time.
  * Automatically closes when stage === 'done' or when deps change.
  */
-export function useCalcProgress(system, facility, enabled) {
+export function useCalcProgress(system, facility, enabled, context = {}) {
   const [progress, setProgress] = useState(null);
   const esRef = useRef(null);
 
@@ -23,6 +23,13 @@ export function useCalcProgress(system, facility, enabled) {
     }
 
     const params = new URLSearchParams({ system, facility });
+    if (context.structureId) params.set('structure_id', context.structureId);
+    if (context.facilityTaxRate !== undefined && context.facilityTaxRate !== '') {
+      params.set('facility_tax_rate', String(context.facilityTaxRate));
+    }
+    if (context.rigBonusMfg !== undefined && context.rigBonusMfg !== '') {
+      params.set('rig_bonus_mfg', String(context.rigBonusMfg));
+    }
     const url = `${API}/api/calculator/progress?${params}`;
     const es = new EventSource(url);
     esRef.current = es;
@@ -47,7 +54,7 @@ export function useCalcProgress(system, facility, enabled) {
       es.close();
       esRef.current = null;
     };
-  }, [system, facility, enabled]);
+  }, [system, facility, enabled, context.structureId, context.facilityTaxRate, context.rigBonusMfg]);
 
   return progress;
 }

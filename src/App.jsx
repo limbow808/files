@@ -5,6 +5,7 @@ import CalculatorPage from './pages/CalculatorPage';
 import CharactersPage from './pages/CharactersPage';
 import BpFinderPage from './pages/BpFinderPage';
 import CraftLogPage from './pages/CraftLogPage';
+import MessagesPage from './pages/MessagesPage';
 import BootScreen from './components/BootScreen';
 import { useApi } from './hooks/useApi';
 
@@ -109,6 +110,11 @@ export default function App() {
           {mountedTabs.has('REVENUE') && (
             <div style={{ display: activeTab === 'REVENUE' ? 'contents' : 'none' }}>
               <CraftLogPage />
+            </div>
+          )}
+          {mountedTabs.has('MESSAGES') && (
+            <div style={{ display: activeTab === 'MESSAGES' ? 'contents' : 'none' }}>
+              <MessagesPage />
             </div>
           )}
         </div>

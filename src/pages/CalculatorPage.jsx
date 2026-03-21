@@ -62,6 +62,9 @@ function CalculatorPage({ refreshKey = 0 }) {
 
   const [system,    setSystem]    = useState('Korsiki');
   const [facility,  setFacility]  = useState('large');
+  const [structureId, setStructureId] = useState('');
+  const [facilityTaxRate, setFacilityTaxRate] = useState('0.001');
+  const [rigBonusMfg, setRigBonusMfg] = useState('0');
   const [buyLoc,    setBuyLoc]    = useState('jita');
   const [sellLoc,   setSellLoc]   = useState('jita');
   const [minVolume, setMinVolume] = useState('');
@@ -89,11 +92,18 @@ function CalculatorPage({ refreshKey = 0 }) {
 
   function buildUrl() {
     const params = new URLSearchParams({ system, facility, sell_loc: sellLoc, buy_loc: buyLoc });
+    if (structureId.trim()) params.set('structure_id', structureId.trim());
+    if (facilityTaxRate !== '') params.set('facility_tax_rate', facilityTaxRate);
+    if (rigBonusMfg !== '') params.set('rig_bonus_mfg', rigBonusMfg);
     return `${API}/api/calculator?${params}`;
   }
 
   const { data: calcData, loading, error } = useApi(buildUrl(), [refreshKey, retryKey]);
-  const progress = useCalcProgress(system, facility, loading && !calcData);
+  const progress = useCalcProgress(system, facility, loading && !calcData, {
+    structureId,
+    facilityTaxRate,
+    rigBonusMfg,
+  });
   const { data: skillsData } = useApi(`${API}/api/skills`, []);
   const { data: esiBpData  } = useApi(`${API}/api/blueprints/esi`, []);
   const { data: corpBpData } = useApi(`${API}/api/blueprints/corp`, []);
@@ -222,6 +232,39 @@ function CalculatorPage({ refreshKey = 0 }) {
               <select className="calc-input" value={facility} onChange={e => setFacility(e.target.value)} style={{ width: 160 }}>
                 {FACILITY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
+            </div>
+            <div className="filter-group">
+              <span className="filter-label">STRUCT</span>
+              <input
+                className="calc-input"
+                value={structureId}
+                onChange={e => setStructureId(e.target.value.replace(/\D/g, ''))}
+                placeholder="structure_id"
+                style={{ width: 160 }}
+              />
+            </div>
+            <div className="filter-group">
+              <span className="filter-label">FAC TAX</span>
+              <input
+                className="calc-input"
+                type="number"
+                step="0.0001"
+                value={facilityTaxRate}
+                onChange={e => setFacilityTaxRate(e.target.value)}
+                style={{ width: 90 }}
+              />
+            </div>
+            <div className="filter-group">
+              <span className="filter-label">RIG</span>
+              <input
+                className="calc-input"
+                type="number"
+                step="0.001"
+                value={rigBonusMfg}
+                onChange={e => setRigBonusMfg(e.target.value)}
+                style={{ width: 70 }}
+                title="Additive manufacturing rig bonus on gross SCI component, e.g. -0.02"
+              />
             </div>
             <div className="filter-group">
               <span className="filter-label">BUY</span>
@@ -402,7 +445,7 @@ function CalculatorPage({ refreshKey = 0 }) {
                       <td>{fmtISK(r.isk_per_hour)}</td>
                       <td>{r.isk_per_m3 ? fmtISK(r.isk_per_m3) : '—'}</td>
                     </tr>
-                    {isSel && <CalcDetailPanel item={r} charSkills={charSkills} roiColorFn={roiScale.color} />}
+                    {isSel && <CalcDetailPanel item={r} runs={runs} charSkills={charSkills} roiColorFn={roiScale.color} />}
                   </Fragment>
                 );
               })

@@ -54,7 +54,7 @@ export default function KPIBar({ plexData, walletHistory }) {
     <div style={{
       display: 'flex', alignItems: 'center',
       height: 80, flexShrink: 0,
-      borderBottom: '1px solid var(--border)',
+      borderBottom: '2px solid var(--border)',
       background: 'var(--bg2)',
     }}>
       {stats.map((s, i) => (

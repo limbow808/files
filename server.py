@@ -270,8 +270,20 @@ _OWNED_BP_CACHE_TTL = 300  # 5 min
 _OWNED_BP_CACHE_LOCK = threading.Lock()
 
 
-def _calc_cache_key(system: str, facility: str) -> str:
-    return f"{system.lower()}|{facility.lower()}"
+def _calc_cache_key(
+    system: str,
+    facility: str,
+    structure_id: str = "",
+    facility_tax_rate: str = "",
+    rig_bonus_mfg: str = "",
+) -> str:
+    return "|".join([
+        system.lower(),
+        facility.lower(),
+        (structure_id or "").strip(),
+        (facility_tax_rate or "").strip(),
+        (rig_bonus_mfg or "").strip(),
+    ])
 
 
 def _calc_is_fresh(key: str) -> bool:
@@ -279,6 +291,78 @@ def _calc_is_fresh(key: str) -> bool:
     if not entry:
         return False
     return (time.time() - entry.get("generated_at", 0)) < CALC_CACHE_TTL
+
+
+def _upgrade_calc_payload_formula(payload: dict) -> None:
+    """
+    Retroactively correct cached calculator results to job formula v2.
+    Updates payload in place.
+    """
+    if not payload:
+        return
+    try:
+        from calculator import calculate_industry_job_cost
+    except Exception:
+        return
+
+    results = payload.get("results") or []
+    if not results:
+        payload["job_formula_version"] = 2
+        return
+
+    facility = payload.get("facility") or {}
+    payload_sci = payload.get("sci", 0)
+
+    for r in results:
+        if int(r.get("job_formula_version", 0) or 0) >= 2 and r.get("job_cost_breakdown"):
+            continue
+
+        sci = float(r.get("resolved_sci") or payload_sci or 0)
+        facility_tax_rate = float(
+            r.get("facility_tax_rate")
+            if r.get("facility_tax_rate") is not None
+            else facility.get("facility_tax_rate", 0.001)
+        )
+
+        cfg = {
+            "facility_tax_rate": facility_tax_rate,
+            "scc_surcharge_rate": 0.04,
+            "structure_type_id": r.get("structure_type_id") or facility.get("structure_type_id"),
+            "rig_bonus_mfg": 0.0,
+            "job_formula_version": 2,
+        }
+        breakdown = calculate_industry_job_cost(
+            activity="manufacturing",
+            eiv=float(r.get("estimated_item_value", r.get("material_cost", 0)) or 0),
+            sci=sci,
+            cfg=cfg,
+        )
+
+        job_cost = breakdown["total_job_cost"]
+        gross_revenue = float(r.get("gross_revenue", 0) or 0)
+        material_cost = float(r.get("material_cost", 0) or 0)
+        sales_tax = float(r.get("sales_tax", 0) or 0)
+        broker_fee = float(r.get("broker_fee", 0) or 0)
+        invention_cost = float(r.get("invention_cost", 0) or 0)
+
+        total_cost = material_cost + job_cost + sales_tax + broker_fee + invention_cost
+        net_profit = gross_revenue - total_cost
+
+        # Keep duration semantics aligned with calculator output
+        time_s = float(r.get("time_seconds") or r.get("duration") or 0)
+        avg_sell_days = float(r.get("avg_sell_days", 3.0) or 3.0)
+        cycle_h = (time_s + avg_sell_days * 86400.0) / 3600.0 if (time_s or avg_sell_days) else 0.0
+
+        r["job_cost"] = job_cost
+        r["job_cost_breakdown"] = breakdown
+        r["net_profit"] = net_profit
+        r["margin_pct"] = (net_profit / gross_revenue * 100.0) if gross_revenue > 0 else 0.0
+        r["roi"] = (net_profit / total_cost * 100.0) if total_cost > 0 else 0.0
+        r["isk_per_hour"] = (net_profit / cycle_h) if cycle_h > 0 else None
+        r["job_formula_version"] = 2
+
+    payload["job_formula_version"] = 2
+    payload["recalculated_at"] = int(time.time())
 
 
 # ── Live progress broadcast (SSE) ─────────────────────────────────────────────
@@ -814,6 +898,10 @@ def api_calculator():
     Accepts optional query params:
       system    - system name or ID to use for SCI lookup
       facility  - facility type: 'station', 'medium', 'large', 'xl' (structure size)
+            structure_id - exact structure id used to resolve SCI via structure -> system
+            facility_tax_rate - override install tax rate (decimal, e.g. 0.10 for NPC)
+            rig_bonus_mfg - additive manufacturing rig bonus on gross SCI component
+            force_recalc - if '1', ignore fresh cache and recompute
       sell_loc  - sell location: 'jita', 'amarr', 'dodixie', 'rens', 'hek'
       buy_loc   - buy location: same options
     """
@@ -828,8 +916,19 @@ def api_calculator():
         buy_loc        = request.args.get("buy_loc",  "jita").strip().lower()
 
         # ── Return from cache if fresh ────────────────────────────────────────
-        cache_key = _calc_cache_key(system_param, facility_param)
-        if _calc_is_fresh(cache_key):
+        structure_id_param = request.args.get("structure_id", "").strip()
+        facility_tax_param = request.args.get("facility_tax_rate", "").strip()
+        rig_bonus_mfg_param = request.args.get("rig_bonus_mfg", "").strip()
+        force_recalc = request.args.get("force_recalc", "0").strip() in ("1", "true", "yes")
+        cache_key = _calc_cache_key(
+            system_param,
+            facility_param,
+            structure_id_param,
+            facility_tax_param,
+            rig_bonus_mfg_param,
+        )
+        if _calc_is_fresh(cache_key) and not force_recalc:
+            _upgrade_calc_payload_formula(_calc_cache[cache_key])
             return jsonify(_calc_cache[cache_key])
 
         # ── Dedup: if another thread is already computing this key, wait ──────
@@ -843,17 +942,41 @@ def api_calculator():
                 if time.time() > deadline:
                     break
                 time.sleep(0.5)
-            if _calc_is_fresh(cache_key):
+            if _calc_is_fresh(cache_key) and not force_recalc:
+                _upgrade_calc_payload_formula(_calc_cache[cache_key])
                 return jsonify(_calc_cache[cache_key])
             # Timed out or failed — become the new worker
             with _calc_computing_lock:
                 _calc_computing.add(cache_key)
 
-        # ── Resolve SCI for the requested system ──────────────────────────────
-        sci = _resolve_sci(system_param)
+        # ── Resolve SCI (prefer structure_id -> system -> SCI) ───────────────
+        structure_meta = None
+        sci_source = "system"
+        if structure_id_param:
+            sci, structure_meta, sci_source = _resolve_sci_for_structure(structure_id_param)
+        else:
+            sci = _resolve_sci(system_param)
 
         # ── Resolve structure bonuses ─────────────────────────────────────────
         facility_cfg = _facility_config(facility_param)
+
+        # Optional user overrides for owner-set fees/rigs.
+        try:
+            facility_tax_rate = float(facility_tax_param) if facility_tax_param != "" else float(facility_cfg.get("facility_tax_rate", 0.001) or 0.001)
+        except Exception:
+            facility_tax_rate = float(facility_cfg.get("facility_tax_rate", 0.001) or 0.001)
+        try:
+            rig_bonus_mfg = float(rig_bonus_mfg_param) if rig_bonus_mfg_param != "" else 0.0
+        except Exception:
+            rig_bonus_mfg = 0.0
+        try:
+            rig_bonus_copy = float(request.args.get("rig_bonus_copy", "") or 0.0)
+        except Exception:
+            rig_bonus_copy = 0.0
+
+        structure_type_id = facility_cfg.get("structure_type_id")
+        if structure_meta and structure_meta.get("type_id"):
+            structure_type_id = structure_meta.get("type_id")
 
         # ── Gather all type IDs needed ────────────────────────────────────────
         _all_blueprints = load_blueprints()
@@ -939,8 +1062,11 @@ def api_calculator():
                 **CONFIG,
                 "system_cost_index":          sci,
                 "structure_me_bonus":         facility_cfg["me_bonus"],
-                "job_cost_structure_discount": facility_cfg["job_discount"],
                 "sales_tax":                  facility_cfg["sales_tax"],
+                "facility_tax_rate":          facility_tax_rate,
+                "structure_type_id":          structure_type_id,
+                "rig_bonus_mfg":              rig_bonus_mfg,
+                "rig_bonus_copy":             rig_bonus_copy,
             }
             result = calculate_profit(bp, prices, config_override=cfg_override,
                                       invention_prices=prices,
@@ -1005,6 +1131,11 @@ def api_calculator():
             # Annotate which facility/system was used
             result["resolved_sci"]      = sci
             result["facility_label"]    = facility_cfg["label"]
+            result["structure_id"]      = structure_id_param or None
+            result["structure_type_id"] = structure_type_id
+            result["structure_meta"]    = structure_meta
+            result["facility_tax_rate"] = facility_tax_rate
+            result["sci_source"]        = sci_source
 
             results.append(result)
 
@@ -1129,6 +1260,10 @@ def api_calculator():
             "generated_at": int(time.time()),
             "sci":          sci,
             "facility":     facility_cfg,
+            "structure_id": structure_id_param or None,
+            "structure_meta": structure_meta,
+            "sci_source":   sci_source,
+            "job_formula_version": 2,
         }
         _calc_cache[cache_key] = payload
         # Evict oldest entries — keep only the 8 most-recently-computed keys
@@ -1164,6 +1299,7 @@ def api_top_performers():
     ESI orders and industry jobs caches for live signals.
     """
     import math, sqlite3 as _sq
+    from calculator import calculate_industry_job_cost
 
     # ── Auto-refresh ESI blueprint cache if stale ─────────────────────────────
     # The BP cache is only refreshed when BpFinder is visited; top-performers
@@ -1195,7 +1331,9 @@ def api_top_performers():
     if not best_key:
         return jsonify({"items": [], "status": "no_data"})
 
-    all_results = _calc_cache[best_key].get("results", [])
+    best_payload = _calc_cache[best_key]
+    _upgrade_calc_payload_formula(best_payload)
+    all_results = best_payload.get("results", [])
 
     # ── Build owned blueprint_id sets (BPO vs BPC tracked separately) ─────────
     personal_bpo_bp_ids: set = set()   # personal BPOs — original, need copying
@@ -1255,26 +1393,51 @@ def api_top_performers():
 
     # ── Load copy times (blueprinting activityID=5) ─────────────────────────────────
     copy_time_by_output: dict[int, int] = {}
+    blueprint_id_by_output: dict[int, int] = {}
     if owned_output_ids:
         try:
             _ct_db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
             _ct_ph = ",".join("?" * len(owned_output_ids))
             for _ct_row in _ct_db.execute(
-                f"SELECT output_id, copy_time_secs FROM blueprints WHERE output_id IN ({_ct_ph})",
+                f"SELECT output_id, copy_time_secs, blueprint_id FROM blueprints WHERE output_id IN ({_ct_ph})",
                 list(owned_output_ids),
             ).fetchall():
-                copy_time_by_output[_ct_row[0]] = int(_ct_row[1] or 0)
+                copy_time_by_output[_ct_row[0]]    = int(_ct_row[1] or 0)
+                blueprint_id_by_output[_ct_row[0]] = int(_ct_row[2] or 0)
             _ct_db.close()
         except Exception:
             pass  # Column not yet seeded — frontend uses 68400s fallback
 
     # ── Live signal 1: sell order inventory (supply coverage) ─────────────────
-    # Aggregate volume_remain per type_id across all open sell orders
+    # Aggregate volume_remain per type_id across all open sell orders.
+    # Also detect stale orders: an order >2 days old that has sold <20% of its
+    # volume is effectively stuck.  Track the maximum stale-order age per type;
+    # we'll use it to override supply_days so urgency reflects reality.
     sell_qty_by_type: dict[int, int] = {}
+    stale_order_age_by_type: dict[int, float] = {}  # type_id → max stale age (days)
+    from datetime import datetime, timezone
+    _now_dt = datetime.now(timezone.utc)
     for o in _ESI_ORDERS_CACHE.get("sell", []):
         tid = o.get("type_id")
-        if tid:
-            sell_qty_by_type[tid] = sell_qty_by_type.get(tid, 0) + (o.get("volume_remain") or 0)
+        if not tid:
+            continue
+        sell_qty_by_type[tid] = sell_qty_by_type.get(tid, 0) + (o.get("volume_remain") or 0)
+        # Stale-order check
+        issued_str = o.get("issued", "")
+        v_total    = o.get("volume_total") or 0
+        v_remain   = o.get("volume_remain") or 0
+        if issued_str and v_total > 0:
+            try:
+                issued_dt   = datetime.fromisoformat(issued_str.rstrip("Z")).replace(tzinfo=timezone.utc)
+                order_age_d = (_now_dt - issued_dt).total_seconds() / 86400.0
+                fill_pct    = (v_total - v_remain) / v_total
+                # Stale = open >2 days and less than 20% has sold
+                if order_age_d > 2.0 and fill_pct < 0.20:
+                    stale_order_age_by_type[tid] = max(
+                        stale_order_age_by_type.get(tid, 0.0), order_age_d
+                    )
+            except Exception:
+                pass
 
     # ── Live signal 2: items actively being manufactured or queued ─────────────
     now_ts = int(time.time())
@@ -1289,7 +1452,7 @@ def api_top_performers():
     # ── Score and filter results ───────────────────────────────────────────────
     URGENCY_HORIZON_DAYS = 7    # >7 days supply → near-zero urgency
     BPO_COPY_PENALTY     = 0.70 # BPOs score 30% lower (copy overhead, 40-day waits)
-    MAX_SELL_DAYS_BEFORE_PENALTY = 21  # if it takes >21 days to sell, penalise
+    MIN_DAILY_VOLUME     = 0.5  # hard gate — items selling <0.5/day are dropped entirely
 
     candidates = []
     for r in all_results:
@@ -1304,9 +1467,18 @@ def api_top_performers():
         if profit <= 0 or isk_hr <= 0:
             continue
 
+        if vol < MIN_DAILY_VOLUME:
+            continue
+
         # ── Urgency: how urgently do we need to produce more? ─────────────────
-        sell_qty      = sell_qty_by_type.get(out_id, 0)
-        supply_days   = (sell_qty / vol) if vol > 0 else 0
+        sell_qty    = sell_qty_by_type.get(out_id, 0)
+        supply_days = (sell_qty / vol) if vol > 0 else 0
+        # If an open sell order for this item is stale (old + barely filling),
+        # treat the order's actual age as the effective supply window.
+        # A 10-day-old unsold order means we already have 10 days of stuck supply.
+        stale_age = stale_order_age_by_type.get(out_id, 0.0)
+        if stale_age > supply_days:
+            supply_days = stale_age
         # sigmoid-style: urgency=1.0 at 0d coverage, ~0.5 at horizon/2, ~0.05 at horizon+
         urgency = max(0.05, 1.0 - (supply_days / URGENCY_HORIZON_DAYS) ** 0.8)
         # Boost: if already critically low (<1 day supply) signal very urgent
@@ -1330,26 +1502,48 @@ def api_top_performers():
         is_corp_bp  = out_id in corp_output_ids and out_id not in personal_output_ids
 
         copy_time_secs_item = copy_time_by_output.get(out_id, 0) if needs_copy else 0
-        copy_job_cost       = 0.0
+        copy_job_cost_total = 0.0
+        copy_job_cost_per_run = 0.0
+        copy_breakdown      = None
         adj_isk_hr          = isk_hr
         adj_profit          = profit
 
-        if needs_copy and copy_time_secs_item > 0:
-            # Need rec_runs early to amortise copy overhead across the run batch
-            _pre_rec = r.get("recommended_runs")
+        if needs_copy:
+            _pre_rec  = r.get("recommended_runs")
             _pre_runs = int(_pre_rec.get("runs", 1)) if isinstance(_pre_rec, dict) else 1
-            duration_s   = float(r.get("duration", 0) or 0)
-            avg_sell_s   = (float(r.get("avg_sell_days") or 3.0)) * 86400.0
-            current_cycle = duration_s + avg_sell_s
-            # One copy job produces _pre_runs BPC runs; amortise its time over batch
-            copy_overhead_per_run = copy_time_secs_item / max(1, _pre_runs)
-            adj_cycle = current_cycle + copy_overhead_per_run
-            if current_cycle > 0 and adj_cycle > 0:
-                adj_isk_hr = isk_hr * (current_cycle / adj_cycle)
-            # Copy job install fee ≈ 2% of manufacturing install fee, amortised per run
-            mfg_job_cost  = float(r.get("job_cost") or 0)
-            copy_job_cost = (mfg_job_cost * 0.02) / max(1, _pre_runs)
-            adj_profit    = profit - copy_job_cost
+
+            # Resolve the copying-activity SCI for the same system as the mfg job.
+            # structure_meta carries solar_system_id; fall back to mfg SCI if unknown.
+            _meta     = r.get("structure_meta") or {}
+            _sys_id   = str(_meta.get("solar_system_id") or "")
+            _copy_sci = _resolve_sci(_sys_id, activity="copying") if _sys_id else float(r.get("resolved_sci") or 0)
+
+            # Copy job install cost — always calculated when needs_copy is True.
+            # Formula: base = EIV * 0.02, gross = base * copy_SCI, taxes on base.
+            copy_breakdown = calculate_industry_job_cost(
+                activity="copying",
+                eiv=float(r.get("estimated_item_value", r.get("material_cost", 0)) or 0),
+                sci=_copy_sci,
+                cfg={
+                    "facility_tax_rate": float(r.get("facility_tax_rate") or 0.001),
+                    "structure_type_id": r.get("structure_type_id"),
+                    "rig_bonus_copy":    0.0,
+                    "scc_surcharge_rate": 0.04,
+                },
+            )
+            copy_job_cost_total = float(copy_breakdown.get("total_job_cost") or 0.0)
+            copy_job_cost_per_run = copy_job_cost_total / max(1, _pre_runs)
+            adj_profit    = profit - copy_job_cost_per_run
+
+            # Adjust isk/hr for copy-time overhead — only when copy time is known.
+            if copy_time_secs_item > 0:
+                duration_s    = float(r.get("duration", 0) or 0)
+                avg_sell_s    = (float(r.get("avg_sell_days") or 3.0)) * 86400.0
+                current_cycle = duration_s + avg_sell_s
+                copy_overhead_per_run = copy_time_secs_item / max(1, _pre_runs)
+                adj_cycle = current_cycle + copy_overhead_per_run
+                if current_cycle > 0 and adj_cycle > 0:
+                    adj_isk_hr = isk_hr * (current_cycle / adj_cycle)
 
         if adj_profit <= 0 or adj_isk_hr <= 0:
             continue
@@ -1358,16 +1552,18 @@ def api_top_performers():
         copy_penalty = BPO_COPY_PENALTY if needs_copy else 1.0
 
         # ── Capital lock penalty: penalise very slow-selling items ────────────
+        # 7d → 1.0, 14d → 0.70, 21d → 0.39, 30d → 0.10 (floor)
         days_to_sell = 0
         rec = r.get("recommended_runs")
         if isinstance(rec, dict):
             days_to_sell = rec.get("days_to_sell", 0) or 0
-        capital_penalty = max(0.3, 1.0 - max(0, days_to_sell - MAX_SELL_DAYS_BEFORE_PENALTY) / 60)
+        capital_penalty = max(0.1, 1.0 - max(0, days_to_sell - 7) / 23)
 
         # ── Final composite score (uses copy-adjusted isk/hr) ─────────────────
-        adj_roi = (adj_profit / max(1.0, float(r.get("material_cost") or 0) + float(r.get("job_cost") or 0))) * 100.0
-        base    = adj_isk_hr * math.log1p(max(1.0, vol)) * math.sqrt(max(0.0, adj_roi))
-        score   = base * urgency * copy_penalty * capital_penalty
+        adj_roi   = (adj_profit / max(1.0, float(r.get("material_cost") or 0) + float(r.get("job_cost") or 0))) * 100.0
+        liquidity = min(1.0, vol)  # near-zeros items selling <1/day
+        base      = adj_isk_hr * math.log1p(max(1.0, vol)) * math.sqrt(max(0.0, adj_roi)) * liquidity
+        score     = base * urgency * copy_penalty * capital_penalty
 
         ownership = []
         if out_id in personal_output_ids:
@@ -1411,12 +1607,29 @@ def api_top_performers():
             "urgency":           round(urgency, 2),
             "needs_copy":        needs_copy,
             "copy_time_secs":    copy_time_secs_item,
-            "copy_job_cost":     round(copy_job_cost),
+            "blueprint_id":      blueprint_id_by_output.get(out_id) if needs_copy else None,
+            # Display full copy install fee to match in-game job window.
+            "copy_job_cost":     round(copy_job_cost_total),
+            # Keep amortized value for per-run economics and debugging.
+            "copy_job_cost_per_run": round(copy_job_cost_per_run),
+            "copy_job_breakdown": copy_breakdown,
             "adj_net_profit":    round(adj_profit),
             "adj_isk_per_hour":  round(adj_isk_hr),
             "mats_ready":        mats_ready,
             "missing_mats_est_cost": round(missing_mats_est_cost),
             "_score":            score,
+            # ── calc detail for queue planner inline breakdown ──────────────
+            "material_cost":       r.get("material_cost", 0),
+            "job_cost":            r.get("job_cost", 0),
+            "job_cost_breakdown":  r.get("job_cost_breakdown"),
+            "sales_tax":           r.get("sales_tax", 0),
+            "broker_fee":          r.get("broker_fee", 0),
+            "gross_revenue":       r.get("gross_revenue", 0),
+            "output_qty":          r.get("output_qty", 1),
+            "estimated_item_value": r.get("estimated_item_value", 0),
+            "job_formula_version": r.get("job_formula_version", 2),
+            "duration":            r.get("time_seconds", 0) or r.get("duration", 0),
+            "material_breakdown":  r.get("material_breakdown", []),
         })
 
     candidates.sort(key=lambda x: x["_score"], reverse=True)
@@ -1431,6 +1644,14 @@ def api_top_performers():
     free_slots   = max(0, max_jobs - running_mfg)
     slot_free_at = mfg_end_times[:max_jobs]
 
+    # ── Science (research) slots ───────────────────────────────────────────────
+    running_science  = sum(
+        1 for j in _ESI_JOBS_CACHE.get("jobs", [])
+        if j.get("activity_id") in (3, 4, 5, 8) and j.get("end_ts", 0) > now_ts
+    )
+    max_science      = _get_max_science_jobs(running_fallback=running_science)
+    free_science     = max(0, max_science - running_science)
+
     # ── Assign action_type + start_at per ranked item ─────────────────────────
     items = []
     mfg_queue_pos = 0
@@ -1439,7 +1660,9 @@ def api_top_performers():
         if r.get("needs_copy"):
             r["action_type"]    = "copy_first"
             r["start_at"]       = now_ts
-            r["manufacture_at"] = now_ts + (r.get("copy_time_secs") or 68400)
+            _copy_secs               = int((r.get("copy_time_secs") or 68400) * r.get("rec_runs", 1) * _COPY_TIME_MODIFIER)
+            r["manufacture_at"]      = now_ts + _copy_secs
+            r["estimated_copy_secs"] = _copy_secs
         else:
             r["action_type"] = "manufacture"
             if mfg_queue_pos < free_slots:
@@ -1452,15 +1675,24 @@ def api_top_performers():
             mfg_queue_pos += 1
         items.append(r)
 
+    # ── Persist displayed queue items so footer mirrors Queue Planner exactly ─
+    global _QUEUE_PLANNER_CANDIDATES_CACHE, _QUEUE_PLANNER_CANDIDATES_TS
+    _QUEUE_PLANNER_CANDIDATES_CACHE = list(items)
+    _QUEUE_PLANNER_CANDIDATES_TS    = time.time()
+    _QUEUE_SUMMARY_CACHE_TS         = 0  # force footer to rebuild from fresh queue items
+
     return jsonify({
-        "items":        items,
-        "generated_at": int(best_ts),
-        "total_owned":  len(candidates),
-        "cache_key":    best_key,
-        "max_jobs":     max_jobs,
-        "running_jobs": running_mfg,
-        "free_slots":   free_slots,
-        "slot_free_at": slot_free_at,
+        "items":            items,
+        "generated_at":     int(best_ts),
+        "total_owned":      len(candidates),
+        "cache_key":        best_key,
+        "max_jobs":         max_jobs,
+        "running_jobs":     running_mfg,
+        "free_slots":       free_slots,
+        "slot_free_at":     slot_free_at,
+        "max_science":      max_science,
+        "running_science":  running_science,
+        "free_science":     free_science,
     })
 
 
@@ -1509,7 +1741,16 @@ def api_calculator_progress():
     pass  # request already imported at top
     system_param   = request.args.get("system",   "").strip()
     facility_param = request.args.get("facility", "station").strip().lower()
-    cache_key = _calc_cache_key(system_param, facility_param)
+    structure_id_param = request.args.get("structure_id", "").strip()
+    facility_tax_param = request.args.get("facility_tax_rate", "").strip()
+    rig_bonus_mfg_param = request.args.get("rig_bonus_mfg", "").strip()
+    cache_key = _calc_cache_key(
+        system_param,
+        facility_param,
+        structure_id_param,
+        facility_tax_param,
+        rig_bonus_mfg_param,
+    )
 
     # If already cached, immediately send a "done" event and close
     if _calc_is_fresh(cache_key):
@@ -1538,11 +1779,43 @@ def api_calculator_progress():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── System Cost Index lookup ───────────────────────────────────────────────────
-_SCI_CACHE: dict = {}        # system_id_str → cost_index float
-_SCI_NAME_CACHE: dict = {}   # lowercase_name → system_id_str
+@app.route("/api/calculator/recalculate_cache", methods=["POST"])
+def api_calculator_recalculate_cache():
+    """
+    Recalculate/upgrade all in-memory calculator cache payloads to the latest
+    job-cost formula version.
+    """
+    upgraded = 0
+    for _k, payload in list(_calc_cache.items()):
+        before = int(payload.get("job_formula_version", 0) or 0)
+        _upgrade_calc_payload_formula(payload)
+        after = int(payload.get("job_formula_version", 0) or 0)
+        if after > before:
+            upgraded += 1
+    return jsonify({
+        "ok": True,
+        "upgraded_payloads": upgraded,
+        "cache_entries": len(_calc_cache),
+        "formula_version": 2,
+        "ts": int(time.time()),
+    })
+
+
+# ── System Cost Index + structure metadata lookup ────────────────────────────
+_SCI_CACHE: dict = {}        # system_id_str -> {activity_str: float}
+_SCI_NAME_CACHE: dict = {}   # lowercase_name -> system_id_str
 _SCI_CACHE_TS: float = 0
-_SCI_TTL = 3600  # 1 hour
+_SCI_TTL = 6 * 3600          # 6h primary TTL (heavy cache)
+_SCI_STALE_TTL = 72 * 3600   # allow stale usage up to 72h if ESI fails
+_SCI_LOCK = threading.Lock()
+
+_STRUCTURE_META_CACHE: dict = {}   # structure_id_str -> meta dict
+_STRUCTURE_META_TS: dict = {}      # structure_id_str -> last_refresh_ts
+_STRUCTURE_META_TTL = 24 * 3600    # 24h cache
+_STRUCTURE_META_LOCK = threading.Lock()
+
+_SCI_SNAPSHOT_PATH = os.path.join(_HERE, "esi_sci_cache.json")
+_STRUCTURE_SNAPSHOT_PATH = os.path.join(_HERE, "esi_structure_meta_cache.json")
 
 # Well-known systems we always want names for (avoids bulk name fetch on cold start)
 _KNOWN_SYSTEMS = {
@@ -1561,59 +1834,132 @@ _KNOWN_SYSTEMS = {
     "30002646": "Adahum",
 }
 
-def _refresh_sci_cache():
-    """Fetch ESI industry/systems and rebuild both caches."""
+def _load_sci_snapshot() -> None:
     global _SCI_CACHE, _SCI_NAME_CACHE, _SCI_CACHE_TS
+    if not os.path.exists(_SCI_SNAPSHOT_PATH):
+        return
     try:
-        resp = requests.get(
-            "https://esi.evetech.net/latest/industry/systems/",
-            timeout=15
-        )
-        if not resp.ok:
+        with open(_SCI_SNAPSHOT_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        sci = payload.get("sci", {}) or {}
+        # Migration: old format stored float values; new format requires dicts.
+        # If any value is a float, discard the snapshot and force a fresh fetch.
+        if sci and isinstance(next(iter(sci.values())), (int, float)):
             return
-        data = resp.json()
-        new_sci: dict = {}
-        for entry in data:
-            sid = str(entry.get("solar_system_id", ""))
-            for cost in entry.get("cost_indices", []):
-                if cost.get("activity") == "manufacturing":
-                    new_sci[sid] = cost.get("cost_index", 0.0)
-                    break
-        _SCI_CACHE = new_sci
+        _SCI_CACHE = sci
+        _SCI_NAME_CACHE = payload.get("names", {}) or {}
+        _SCI_CACHE_TS = float(payload.get("ts", 0) or 0)
+    except Exception:
+        pass
 
-        # Build name → id map from known systems + bulk ESI names for all IDs
-        name_map: dict = {}
-        # Seed with hardcoded known names first (instant, no API call)
-        for sid, name in _KNOWN_SYSTEMS.items():
-            name_map[name.lower()] = sid
 
-        # Fetch names for all system IDs in batches of 1000
-        all_ids = [int(sid) for sid in new_sci.keys() if sid.isdigit()]
-        batch_size = 1000
-        for i in range(0, min(len(all_ids), 5000), batch_size):  # cap at 5k to stay fast
-            batch = all_ids[i:i + batch_size]
-            try:
-                nr = requests.post(
-                    "https://esi.evetech.net/latest/universe/names/",
-                    json=batch,
-                    timeout=10
-                )
-                if nr.ok:
-                    for item in nr.json():
-                        if item.get("category") == "solar_system":
-                            name_map[item["name"].lower()] = str(item["id"])
-            except Exception:
-                pass
+def _save_sci_snapshot() -> None:
+    try:
+        payload = {
+            "sci": _SCI_CACHE,
+            "names": _SCI_NAME_CACHE,
+            "ts": _SCI_CACHE_TS,
+        }
+        with open(_SCI_SNAPSHOT_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception:
+        pass
 
-        _SCI_NAME_CACHE = name_map
-        _SCI_CACHE_TS = time.time()
-        print(f"  SCI cache refreshed: {len(_SCI_CACHE)} systems, {len(_SCI_NAME_CACHE)} names")
-    except Exception as e:
-        print(f"  SCI cache refresh failed: {e}")
+
+def _load_structure_snapshot() -> None:
+    global _STRUCTURE_META_CACHE, _STRUCTURE_META_TS
+    if not os.path.exists(_STRUCTURE_SNAPSHOT_PATH):
+        return
+    try:
+        with open(_STRUCTURE_SNAPSHOT_PATH, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        _STRUCTURE_META_CACHE = payload.get("meta", {}) or {}
+        _STRUCTURE_META_TS = {k: float(v or 0) for k, v in (payload.get("ts", {}) or {}).items()}
+    except Exception:
+        pass
+
+
+def _save_structure_snapshot() -> None:
+    try:
+        payload = {
+            "meta": _STRUCTURE_META_CACHE,
+            "ts": _STRUCTURE_META_TS,
+        }
+        with open(_STRUCTURE_SNAPSHOT_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception:
+        pass
+
+
+def _refresh_sci_cache(force: bool = False):
+    """Fetch ESI industry/systems and rebuild SCI/name caches."""
+    global _SCI_CACHE, _SCI_NAME_CACHE, _SCI_CACHE_TS
+    now = time.time()
+    if not force and _SCI_CACHE and (now - _SCI_CACHE_TS) <= _SCI_TTL:
+        return
+    with _SCI_LOCK:
+        now = time.time()
+        if not force and _SCI_CACHE and (now - _SCI_CACHE_TS) <= _SCI_TTL:
+            return
+        try:
+            resp = requests.get(
+                "https://esi.evetech.net/latest/industry/systems/",
+                timeout=15
+            )
+            if not resp.ok:
+                return
+            data = resp.json()
+            _TRACKED_ACTIVITIES = {
+                "manufacturing", "copying",
+                "researching_material_efficiency", "researching_time_efficiency",
+                "invention", "reaction",
+            }
+            new_sci: dict = {}
+            for entry in data:
+                sid = str(entry.get("solar_system_id", ""))
+                activities: dict = {}
+                for cost in entry.get("cost_indices", []):
+                    act = cost.get("activity", "")
+                    if act in _TRACKED_ACTIVITIES:
+                        activities[act] = float(cost.get("cost_index", 0.0))
+                if activities:
+                    new_sci[sid] = activities
+
+            # Build name -> id map from known systems + bulk ESI names for IDs
+            name_map: dict = {}
+            for sid, name in _KNOWN_SYSTEMS.items():
+                name_map[name.lower()] = sid
+
+            all_ids = [int(sid) for sid in new_sci.keys() if sid.isdigit()]
+            batch_size = 1000
+            for i in range(0, min(len(all_ids), 5000), batch_size):
+                batch = all_ids[i:i + batch_size]
+                try:
+                    nr = requests.post(
+                        "https://esi.evetech.net/latest/universe/names/",
+                        json=batch,
+                        timeout=10
+                    )
+                    if nr.ok:
+                        for item in nr.json():
+                            if item.get("category") == "solar_system":
+                                name_map[item["name"].lower()] = str(item["id"])
+                except Exception:
+                    pass
+
+            _SCI_CACHE = new_sci
+            _SCI_NAME_CACHE = name_map
+            _SCI_CACHE_TS = now
+            _save_sci_snapshot()
+            print(f"  SCI cache refreshed: {len(_SCI_CACHE)} systems, {len(_SCI_NAME_CACHE)} names")
+        except Exception as e:
+            print(f"  SCI cache refresh failed: {e}")
 
 
 def _ensure_sci_cache():
-    """Refresh the SCI cache if stale or empty."""
+    """Ensure SCI cache exists; refresh when stale."""
+    if not _SCI_CACHE:
+        _load_sci_snapshot()
     if not _SCI_CACHE or (time.time() - _SCI_CACHE_TS) > _SCI_TTL:
         _refresh_sci_cache()
 
@@ -1624,9 +1970,19 @@ def _name_to_system_id(name: str) -> str | None:
     return _SCI_NAME_CACHE.get(name.strip().lower())
 
 
-def _resolve_sci(system_name_or_id: str) -> float:
+_ACTIVITY_MAP = {
+    "manufacturing":  "manufacturing",
+    "me_research":    "researching_material_efficiency",
+    "te_research":    "researching_time_efficiency",
+    "copying":        "copying",
+    "invention":      "invention",
+    "reaction":       "reaction",
+}
+
+
+def _resolve_sci(system_name_or_id: str, activity: str = "manufacturing") -> float:
     """
-    Look up the manufacturing SCI for a solar system.
+    Look up the SCI for a solar system and activity type.
     Falls back to the CONFIG default if not found.
     """
     from calculator import CONFIG as CALC_CONFIG
@@ -1635,29 +1991,117 @@ def _resolve_sci(system_name_or_id: str) -> float:
     if not system_name_or_id:
         return default_sci
 
+    esi_activity = _ACTIVITY_MAP.get(activity, activity)
+
     _ensure_sci_cache()
+
+    def _lookup(sid: str) -> float | None:
+        entry = _SCI_CACHE.get(sid)
+        if isinstance(entry, dict):
+            return entry.get(esi_activity)
+        return None
 
     # Lookup by numeric ID
     if system_name_or_id.isdigit():
-        return _SCI_CACHE.get(system_name_or_id, default_sci)
+        val = _lookup(system_name_or_id)
+        return val if val is not None else default_sci
 
     # Lookup by name
     sid = _name_to_system_id(system_name_or_id)
     if sid:
-        return _SCI_CACHE.get(sid, default_sci)
+        val = _lookup(sid)
+        return val if val is not None else default_sci
 
     return default_sci
 
 
+def _load_structure_meta_cached(structure_id: str) -> dict | None:
+    sid = str(structure_id or "").strip()
+    if not sid or not sid.isdigit():
+        return None
+    if not _STRUCTURE_META_CACHE:
+        _load_structure_snapshot()
+
+    now = time.time()
+    with _STRUCTURE_META_LOCK:
+        cached = _STRUCTURE_META_CACHE.get(sid)
+        ts = _STRUCTURE_META_TS.get(sid, 0)
+        if cached and (now - ts) <= _STRUCTURE_META_TTL:
+            return cached
+
+    # Refresh from ESI on miss/expired
+    try:
+        tried_headers = [None]
+        try:
+            from characters import get_all_auth_headers
+            tried_headers = [h for _, h in get_all_auth_headers()] + [None]
+        except Exception:
+            tried_headers = [None]
+
+        for _headers in tried_headers:
+            r = requests.get(
+                f"https://esi.evetech.net/latest/universe/structures/{sid}/",
+                headers=_headers,
+                timeout=12,
+            )
+            if not r.ok:
+                continue
+            j = r.json()
+            meta = {
+                "name": j.get("name", ""),
+                "solar_system_id": j.get("solar_system_id"),
+                "type_id": j.get("type_id"),
+            }
+            with _STRUCTURE_META_LOCK:
+                _STRUCTURE_META_CACHE[sid] = meta
+                _STRUCTURE_META_TS[sid] = now
+                _save_structure_snapshot()
+            return meta
+    except Exception:
+        pass
+
+    # Fallback: stale cache is better than failure
+    with _STRUCTURE_META_LOCK:
+        return _STRUCTURE_META_CACHE.get(sid)
+
+
+def _resolve_sci_for_structure(structure_id: str) -> tuple[float, dict | None, str]:
+    """
+    Resolve manufacturing SCI via structure_id -> solar_system_id -> SCI cache.
+    Returns (sci, structure_meta_or_none, sci_source).
+    """
+    from calculator import CONFIG as CALC_CONFIG
+    default_sci = CALC_CONFIG["system_cost_index"]
+
+    meta = _load_structure_meta_cached(structure_id)
+    if not meta:
+        return default_sci, None, "default"
+
+    system_id = str(meta.get("solar_system_id") or "")
+    _ensure_sci_cache()
+    entry = _SCI_CACHE.get(system_id)
+    if isinstance(entry, dict) and "manufacturing" in entry:
+        return float(entry["manufacturing"]), meta, "esi_cache"
+
+    # If cache is very stale and still missing, attempt forced refresh once.
+    if (time.time() - _SCI_CACHE_TS) > _SCI_STALE_TTL:
+        _refresh_sci_cache(force=True)
+        entry = _SCI_CACHE.get(system_id)
+        if isinstance(entry, dict) and "manufacturing" in entry:
+            return float(entry["manufacturing"]), meta, "esi_refresh"
+
+    return default_sci, meta, "default"
+
+
 # ── Facility configuration ─────────────────────────────────────────────────────
 _FACILITY_PRESETS = {
-    "station":  {"label": "NPC Station",          "me_bonus": 0.00, "job_discount": 0.00, "sales_tax": 0.036},
-    "medium":   {"label": "Medium Eng. Complex",  "me_bonus": 0.01, "job_discount": 0.03, "sales_tax": 0.036},
-    "large":    {"label": "Large Eng. Complex",   "me_bonus": 0.01, "job_discount": 0.04, "sales_tax": 0.036},
-    "xl":       {"label": "XL Eng. Complex",      "me_bonus": 0.01, "job_discount": 0.05, "sales_tax": 0.036},
-    "raitaru":  {"label": "Raitaru",              "me_bonus": 0.01, "job_discount": 0.03, "sales_tax": 0.036},
-    "azbel":    {"label": "Azbel",                "me_bonus": 0.01, "job_discount": 0.04, "sales_tax": 0.036},
-    "sotiyo":   {"label": "Sotiyo",               "me_bonus": 0.01, "job_discount": 0.05, "sales_tax": 0.036},
+    "station":  {"label": "NPC Station",         "me_bonus": 0.00, "sales_tax": 0.036, "structure_type_id": None,  "facility_tax_rate": 0.001},
+    "medium":   {"label": "Medium Eng. Complex", "me_bonus": 0.01, "sales_tax": 0.036, "structure_type_id": 35825, "facility_tax_rate": 0.001},
+    "large":    {"label": "Large Eng. Complex",  "me_bonus": 0.01, "sales_tax": 0.036, "structure_type_id": 35826, "facility_tax_rate": 0.001},
+    "xl":       {"label": "XL Eng. Complex",     "me_bonus": 0.01, "sales_tax": 0.036, "structure_type_id": 35827, "facility_tax_rate": 0.001},
+    "raitaru":  {"label": "Raitaru",             "me_bonus": 0.01, "sales_tax": 0.036, "structure_type_id": 35825, "facility_tax_rate": 0.001},
+    "azbel":    {"label": "Azbel",               "me_bonus": 0.01, "sales_tax": 0.036, "structure_type_id": 35826, "facility_tax_rate": 0.001},
+    "sotiyo":   {"label": "Sotiyo",              "me_bonus": 0.01, "sales_tax": 0.036, "structure_type_id": 35827, "facility_tax_rate": 0.001},
 }
 
 def _facility_config(key: str) -> dict:
@@ -1704,12 +2148,12 @@ def api_systems_search():
 @app.route("/api/sci", methods=["GET"])
 def api_sci():
     """
-    GET /api/sci?system_name=Korsiki
-    Returns { system_name, system_id, cost_index, cached_at } for the given system.
+    GET /api/sci?system_name=Korsiki[&activity=manufacturing]
+    Returns { system, activity, cost_index } for the given system and activity.
     Returns 404 { error: "System not found" } if the name doesn't match.
     """
-    pass  # request already imported at top
     system_name = request.args.get("system_name", "").strip()
+    activity    = request.args.get("activity", "manufacturing").strip()
     if not system_name:
         return jsonify({"error": "system_name is required"}), 400
 
@@ -1720,15 +2164,15 @@ def api_sci():
         if not sid:
             return jsonify({"error": "System not found"}), 404
 
-        sci = _SCI_CACHE.get(sid)
-        if sci is None:
+        if _SCI_CACHE.get(sid) is None:
             return jsonify({"error": "System not found"}), 404
 
+        cost_index = _resolve_sci(system_name, activity=activity)
+
         return jsonify({
-            "system_name": system_name,
-            "system_id":   int(sid),
-            "cost_index":  sci,
-            "cached_at":   _SCI_CACHE_TS,
+            "system":     system_name,
+            "activity":   activity,
+            "cost_index": cost_index,
         })
 
     except Exception as e:
@@ -1900,6 +2344,7 @@ def api_blueprints_bp_finder():
                     "message": "Open the Calculator tab first to load market prices, then try again.",
                 })
 
+        _upgrade_calc_payload_formula(_calc_cache[cache_key])
         calc_results = _calc_cache[cache_key]["results"]
 
         # --- Load corp BP set from crest.db ---
@@ -2315,7 +2760,9 @@ def _get_scan_calc_results(system: str, facility: str):
             cache_key = fresh_key
         else:
             return None
-    return _calc_cache.get(cache_key, {}).get("results", [])
+    payload = _calc_cache.get(cache_key, {})
+    _upgrade_calc_payload_formula(payload)
+    return payload.get("results", [])
 
 
 def _build_scan_bpid_map(calc_results: list) -> dict:
@@ -2902,10 +3349,20 @@ _QUEUE_SUMMARY_CACHE:    dict  = {}
 _QUEUE_SUMMARY_CACHE_TS: float = 0
 _QUEUE_SUMMARY_TTL             = 120  # 2 min
 
+# Scored queue-planner candidates — written by /api/queue, read by /api/queue-summary
+# so the footer always reflects exactly the items the queue planner scored/filtered.
+_QUEUE_PLANNER_CANDIDATES_CACHE: list  = []
+_QUEUE_PLANNER_CANDIDATES_TS:    float = 0
+
 # max_jobs (character skill fetch) cached longer — skills barely change
 _MAX_JOBS_CACHE:    int   = 0
 _MAX_JOBS_CACHE_TS: float = 0.0
 _MAX_JOBS_TTL             = 1800  # 30 min
+
+# science/research slots cached alongside mfg slots
+_MAX_SCIENCE_JOBS_CACHE:    int   = 0
+_MAX_SCIENCE_JOBS_CACHE_TS: float = 0.0
+_COPY_TIME_MODIFIER:        float = 1.0   # best copy-time skill modifier across all characters
 _TYPE_VOLUME_CACHE: dict       = {}   # type_id → packaged volume m³, persistent until restart
 
 _ESI_ORDERS_CACHE:    dict  = {}
@@ -3676,6 +4133,56 @@ def _get_max_jobs(running_fallback: int = 0) -> int:
     return max_jobs
 
 
+def _get_max_science_jobs(running_fallback: int = 0) -> int:
+    """Return sum of science/research slots across all characters (Lab Op + Adv Lab Op).
+    Also updates _COPY_TIME_MODIFIER with the best copy-time reduction across all characters."""
+    global _MAX_SCIENCE_JOBS_CACHE, _MAX_SCIENCE_JOBS_CACHE_TS, _COPY_TIME_MODIFIER
+    if _MAX_SCIENCE_JOBS_CACHE > 0 and (time.time() - _MAX_SCIENCE_JOBS_CACHE_TS) < _MAX_JOBS_TTL:
+        return _MAX_SCIENCE_JOBS_CACHE
+    LAB_OP       = 3406   # Lab Operation          — +1 slot per level, base 1
+    ADV_LAB_OP   = 24624  # Advanced Lab Operation — +1 slot per level
+    SCIENCE      = 3402   # Science skill          — −5% copy time per level (max −25%)
+    ADV_INDUSTRY = 3388   # Advanced Industry      — −3% all job time per level (max −15%)
+    max_sci = 0
+    best_modifier = 1.0
+    try:
+        import requests as _req
+        from characters import get_all_auth_headers
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fetch_sci_slots(cid, headers):
+            try:
+                r = _req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/skills/",
+                    headers=headers, timeout=10,
+                )
+                if not r.ok:
+                    return 1, 1.0
+                skill_map = {s["skill_id"]: s["trained_skill_level"] for s in r.json().get("skills", [])}
+                slots    = 1 + skill_map.get(LAB_OP, 0) + skill_map.get(ADV_LAB_OP, 0)
+                modifier = (1.0 - 0.05 * skill_map.get(SCIENCE, 0)) * (1.0 - 0.03 * skill_map.get(ADV_INDUSTRY, 0))
+                return slots, modifier
+            except Exception:
+                return 1, 1.0
+
+        auth_headers = get_all_auth_headers()
+        if auth_headers:
+            with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
+                for slots, modifier in pool.map(lambda x: _fetch_sci_slots(*x), auth_headers):
+                    max_sci += slots
+                    best_modifier = min(best_modifier, modifier)
+        else:
+            max_sci = max(1, running_fallback + 1)
+    except Exception:
+        max_sci = max(1, running_fallback + 1)
+
+    if max_sci > 0:
+        _MAX_SCIENCE_JOBS_CACHE    = max_sci
+        _MAX_SCIENCE_JOBS_CACHE_TS = time.time()
+        _COPY_TIME_MODIFIER        = best_modifier
+    return max_sci
+
+
 # ── Queue Summary (footer stats) ───────────────────────────────────────────────
 @app.route("/api/queue-summary", methods=["GET"])
 def api_queue_summary():
@@ -3724,43 +4231,50 @@ def api_queue_summary():
         haul_m3 = 0.0
 
         if best_key:
-            all_results = _calc_cache[best_key].get("results", [])
+            # Use scored queue-planner candidates when available — this guarantees
+            # the footer reflects exactly the same items (and same filters/gates)
+            # as the Queue Planner page.  Falls back to a loose filter only when
+            # the queue endpoint hasn't been called yet in this server session.
+            if _QUEUE_PLANNER_CANDIDATES_CACHE:
+                queue_items = list(_QUEUE_PLANNER_CANDIDATES_CACHE)
+            else:
+                all_results = _calc_cache[best_key].get("results", [])
 
-            # Build owned output_id set (same as top-performers)
-            personal_bp_ids: set = set()
-            corp_bp_ids: set     = set()
-            for bp in _ESI_BP_CACHE.get("blueprints", []):
-                tid = bp.get("type_id")
-                if not tid:
-                    continue
-                if bp.get("owner") == "personal":
-                    personal_bp_ids.add(tid)
-                else:
-                    corp_bp_ids.add(tid)
-            corp_bp_ids.update(CORP_BPO_TYPE_IDS)
-            all_bp_ids = personal_bp_ids | corp_bp_ids
+                # Build owned output_id set (same as top-performers)
+                personal_bp_ids: set = set()
+                corp_bp_ids: set     = set()
+                for bp in _ESI_BP_CACHE.get("blueprints", []):
+                    tid = bp.get("type_id")
+                    if not tid:
+                        continue
+                    if bp.get("owner") == "personal":
+                        personal_bp_ids.add(tid)
+                    else:
+                        corp_bp_ids.add(tid)
+                corp_bp_ids.update(CORP_BPO_TYPE_IDS)
+                all_bp_ids = personal_bp_ids | corp_bp_ids
 
-            owned_output_ids: set = set()
-            if all_bp_ids:
-                try:
-                    import sqlite3 as _sq
-                    _db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
-                    ph = ",".join("?" * len(all_bp_ids))
-                    for bp_id, out_id in _db.execute(
-                        f"SELECT blueprint_id, output_id FROM blueprints WHERE blueprint_id IN ({ph})",
-                        list(all_bp_ids),
-                    ).fetchall():
-                        owned_output_ids.add(out_id)
-                    _db.close()
-                except Exception:
-                    pass
+                owned_output_ids: set = set()
+                if all_bp_ids:
+                    try:
+                        import sqlite3 as _sq
+                        _db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+                        ph = ",".join("?" * len(all_bp_ids))
+                        for bp_id, out_id in _db.execute(
+                            f"SELECT blueprint_id, output_id FROM blueprints WHERE blueprint_id IN ({ph})",
+                            list(all_bp_ids),
+                        ).fetchall():
+                            owned_output_ids.add(out_id)
+                        _db.close()
+                    except Exception:
+                        pass
 
-            for r in all_results:
-                if r.get("output_id") not in owned_output_ids:
-                    continue
-                if (r.get("net_profit") or 0) <= 0:
-                    continue
-                queue_items.append(r)
+                for r in all_results:
+                    if r.get("output_id") not in owned_output_ids:
+                        continue
+                    if (r.get("net_profit") or 0) <= 0:
+                        continue
+                    queue_items.append(r)
 
             # ── 4. Fetch packaged volumes for materials (cached per process) ───
             mat_type_ids: set = set()
@@ -3787,24 +4301,58 @@ def api_queue_summary():
                     for tid, vol in pool.map(_fetch_vol, missing_ids):
                         _TYPE_VOLUME_CACHE[tid] = vol
 
-            # ── 5. Aggregate cost + haul ───────────────────────────────────────
+            # ── 5. Aggregate cost, revenue + haul ─────────────────────────────
+            total_revenue_isk = 0.0
             for r in queue_items:
                 rec  = r.get("recommended_runs") or {}
                 runs = rec.get("runs", 1) if isinstance(rec, dict) else 1
-                total_cost_isk += (r.get("material_cost") or 0) * runs
+                total_cost_isk    += (r.get("material_cost") or 0) * runs
+                # Net revenue = gross revenue minus sales tax and broker fee
+                gross_rev  = float(r.get("gross_revenue") or 0)
+                sales_tax  = float(r.get("sales_tax")     or 0)
+                broker_fee = float(r.get("broker_fee")    or 0)
+                total_revenue_isk += (gross_rev - sales_tax - broker_fee) * runs
                 for m in r.get("material_breakdown", []):
                     qty = (m.get("quantity") or 0) * runs
                     vol = _TYPE_VOLUME_CACHE.get(m["type_id"], 1.0)
                     haul_m3 += qty * vol
 
         queue_count = len(queue_items)
+
+        # Slim item list for the footer shopping modal.
+        def _slim_run_count(r):
+            rr = r.get("recommended_runs")
+            if isinstance(rr, dict):
+                return rr.get("runs", 1)
+            return r.get("rec_runs", 1)
+
+        queue_items_slim = [
+            {
+                "name":               r.get("name", ""),
+                "output_id":          r.get("output_id"),
+                "rec_runs":           _slim_run_count(r),
+                "material_breakdown": [
+                    {
+                        "type_id":    m.get("type_id"),
+                        "name":       m.get("name", f"Type {m.get('type_id')}"),
+                        "quantity":   m.get("quantity", 0),
+                        "unit_price": m.get("unit_price", 0),
+                    }
+                    for m in r.get("material_breakdown", [])
+                ],
+            }
+            for r in queue_items
+        ]
+
         result = {
-            "running_jobs":   running_jobs,
-            "max_jobs":       max_jobs,
-            "queue_count":    queue_count,
-            "needs_shopping": queue_count,
-            "total_cost_isk": round(total_cost_isk, 2),
-            "haul_m3":        round(haul_m3, 1),
+            "running_jobs":      running_jobs,
+            "max_jobs":          max_jobs,
+            "queue_count":       queue_count,
+            "needs_shopping":    queue_count,
+            "total_cost_isk":    round(total_cost_isk, 2),
+            "total_revenue_isk": round(total_revenue_isk, 2),
+            "haul_m3":           round(haul_m3, 1),
+            "queue_items":       queue_items_slim,
         }
         _QUEUE_SUMMARY_CACHE    = result
         _QUEUE_SUMMARY_CACHE_TS = time.time()
@@ -4656,6 +5204,99 @@ def api_alerts_status():
     return jsonify(_alert_scanner.status)
 
 
+# ─── Bot / Telegram settings ──────────────────────────────────────────────────
+
+_SETTINGS_ALLOW = {
+    "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID",
+    "ROI_THRESHOLD", "BREAKEVEN_MAX_RUNS", "MIN_NET_PROFIT",
+    "ALERT_COOLDOWN_HOURS", "CONTRACT_SCAN_INTERVAL", "JOB_SCAN_INTERVAL",
+    "MAX_PAGES", "REGION_ID", "BLUEPRINT_TYPE",
+}
+_SETTINGS_NUMERIC = {
+    "ROI_THRESHOLD", "BREAKEVEN_MAX_RUNS", "MIN_NET_PROFIT",
+    "ALERT_COOLDOWN_HOURS", "CONTRACT_SCAN_INTERVAL", "JOB_SCAN_INTERVAL",
+    "MAX_PAGES", "REGION_ID",
+}
+_BLUEPRINT_TYPE_VALUES = {"bpo", "bpc", "both"}
+
+
+def _rewrite_env(updates: dict) -> None:
+    """Write or update key=value pairs in the .env file for the given keys."""
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    lines = []
+    if os.path.exists(env_path):
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+    written = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in updates:
+            new_lines.append(f"{key}={updates[key]}\n")
+            written.add(key)
+        else:
+            new_lines.append(line)
+    for key, val in updates.items():
+        if key not in written:
+            new_lines.append(f"{key}={val}\n")
+    with open(env_path, "w") as f:
+        f.writelines(new_lines)
+
+
+@app.route("/api/settings/bot", methods=["GET"])
+def api_settings_bot_get():
+    """Return the current bot/alert config (token partially masked)."""
+    return jsonify({**_alert_scanner.get_public_config(), **_alert_scanner.status})
+
+
+@app.route("/api/settings/bot", methods=["POST"])
+async def api_settings_bot_post():
+    """Save bot/alert settings to .env and hot-reload in-memory config."""
+    try:
+        body = (await request.get_json(force=True, silent=True)) or {}
+    except Exception:
+        return jsonify({"ok": False, "error": "Invalid JSON"}), 400
+    # Validate and sanitise — strict allow-list, no dynamic key names
+    # Blank/empty values are skipped (keep existing in-memory value)
+    validated = {}
+    for key in _SETTINGS_ALLOW:
+        if key not in body:
+            continue
+        val = body[key]
+        if val == "" or val is None:
+            continue  # leave existing value intact
+        if key in _SETTINGS_NUMERIC:
+            try:
+                validated[key] = float(val) if "." in str(val) else int(val)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": f"Invalid value for {key}"}), 400
+        elif key == "BLUEPRINT_TYPE":
+            if str(val) not in _BLUEPRINT_TYPE_VALUES:
+                return jsonify({"ok": False, "error": "BLUEPRINT_TYPE must be bpo, bpc, or both"}), 400
+            validated[key] = str(val)
+        else:
+            validated[key] = str(val)
+    # Persist strings to .env (token + chat_id + blueprint_type)
+    env_updates = {k: str(v) for k, v in validated.items()}
+    _rewrite_env({k: v for k, v in env_updates.items() if k in {"TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "BLUEPRINT_TYPE"}})
+    # Hot-reload scanner memory
+    _alert_scanner.update_config(validated)
+    return jsonify({"ok": True, **_alert_scanner.get_public_config()})
+
+
+@app.route("/api/settings/bot/test", methods=["POST"])
+async def api_settings_bot_test():
+    """Send a test Telegram message using the current config."""
+    ok = _alert_scanner._tg_send("🤖 <b>CREST</b> — test message. Bot is connected.")
+    if ok:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False, "error": "Send failed — check token and chat ID"}), 200
+
+
 @app.route("/api/contracts/status", methods=["GET"])
 def api_contracts_status():
     """Return the current state of the local contract cache."""
@@ -4800,8 +5441,9 @@ async def _prewarm_task():
                 **CONFIG,
                 "system_cost_index":           sci,
                 "structure_me_bonus":          facility_cfg["me_bonus"],
-                "job_cost_structure_discount": facility_cfg["job_discount"],
                 "sales_tax":                   facility_cfg["sales_tax"],
+                "facility_tax_rate":           facility_cfg.get("facility_tax_rate", 0.001),
+                "structure_type_id":           facility_cfg.get("structure_type_id"),
             }
 
             results = []
@@ -4823,6 +5465,11 @@ async def _prewarm_task():
                 result["volume"]          = bp.get("volume", 0)
                 result["required_skills"] = bp.get("required_skills", [])
                 result["blueprint_id"]    = bp.get("blueprint_id")
+                result["resolved_sci"]    = sci
+                result["facility_label"]  = facility_cfg["label"]
+                result["facility_tax_rate"] = facility_cfg.get("facility_tax_rate", 0.001)
+                result["structure_type_id"] = facility_cfg.get("structure_type_id")
+                result["sci_source"]      = "warmup"
 
                 # Derived metrics (same formulas as api_calculator)
                 cost           = (result.get("material_cost", 0) + result.get("job_cost", 0)

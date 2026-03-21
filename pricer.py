@@ -23,6 +23,7 @@ import asyncio
 import sqlite3
 import time
 import os
+import json as _json
 from statistics import mean
 import urllib.request as _urllib_req
 import aiohttp
@@ -36,6 +37,7 @@ CACHE_DB         = os.path.join(os.path.dirname(__file__), "market_cache.db")
 CACHE_TTL        = 600        # Refresh market dump every 10 minutes (was 5 — halves ESI + CPU load)
 STARTUP_TTL      = 1800       # On the first call after a restart, reuse data up to 30 min old
 HISTORY_TTL      = 21600      # Refresh volume history every 6 hours (was 1 hour — data doesn't change that fast)
+REFERENCE_PRICE_TTL = 86400   # Refresh adjusted prices daily
 
 # Set to True after the first successful _ensure_orders_fresh() call so subsequent
 # requests use the shorter CACHE_TTL rather than the lenient STARTUP_TTL.
@@ -45,6 +47,8 @@ _startup_done: bool = False
 # { type_id: {'sell': float, 'buy': float} }
 _ORDERS: dict = {}
 _orders_fetched_at: float = 0.0
+_REFERENCE_PRICES: dict = {}   # { type_id: {'adjusted_price': float|None, 'average_price': float|None} }
+_reference_prices_fetched_at: float = 0.0
 
 
 # ─── DB setup ─────────────────────────────────────────────────────────────────
@@ -62,6 +66,13 @@ def _init_db():
             type_id          INTEGER PRIMARY KEY,
             avg_daily_volume REAL,
             fetched_at       INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS market_reference_prices (
+            type_id         INTEGER PRIMARY KEY,
+            adjusted_price  REAL,
+            average_price   REAL,
+            fetched_at      INTEGER
         );
     """)
     conn.commit()
@@ -206,6 +217,81 @@ def _get_prices_bulk_from_db(type_ids: list) -> dict:
     return {tid: _ORDERS[tid] for tid in type_ids if tid in _ORDERS}
 
 
+def _reference_prices_are_fresh(ttl: int = REFERENCE_PRICE_TTL) -> bool:
+    return (time.time() - _reference_prices_fetched_at) < ttl and bool(_REFERENCE_PRICES)
+
+
+def _load_reference_prices_from_db() -> bool:
+    global _REFERENCE_PRICES, _reference_prices_fetched_at
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT type_id, adjusted_price, average_price, fetched_at FROM market_reference_prices")
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        return False
+    latest_ts = 0.0
+    ref = {}
+    for row in rows:
+        ref[row["type_id"]] = {
+            "adjusted_price": row["adjusted_price"],
+            "average_price": row["average_price"],
+        }
+        latest_ts = max(latest_ts, float(row["fetched_at"] or 0))
+    _REFERENCE_PRICES = ref
+    _reference_prices_fetched_at = latest_ts
+    return True
+
+
+def _refresh_reference_prices_sync():
+    """Fetch all ESI market reference prices (adjusted/average) and cache locally."""
+    global _REFERENCE_PRICES, _reference_prices_fetched_at
+    try:
+        _url = f"{ESI_BASE}/markets/prices/"
+        _req = _urllib_req.Request(_url, headers={'User-Agent': 'CREST-Dashboard/2.0'})
+        with _urllib_req.urlopen(_req, timeout=20) as _r:
+            data = _json.loads(_r.read())
+        now = int(time.time())
+        ref = {}
+        rows = []
+        for item in data or []:
+            tid = item.get("type_id")
+            if tid is None:
+                continue
+            adj = item.get("adjusted_price")
+            avg = item.get("average_price")
+            ref[int(tid)] = {
+                "adjusted_price": adj,
+                "average_price": avg,
+            }
+            rows.append((int(tid), adj, avg, now))
+
+        if rows:
+            conn = _get_conn()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM market_reference_prices")
+            cur.executemany(
+                "INSERT OR REPLACE INTO market_reference_prices (type_id, adjusted_price, average_price, fetched_at) VALUES (?,?,?,?)",
+                rows,
+            )
+            conn.commit()
+            conn.close()
+            _REFERENCE_PRICES = ref
+            _reference_prices_fetched_at = float(now)
+    except Exception:
+        # Keep old cached data on failure
+        pass
+
+
+def _ensure_reference_prices_fresh_sync():
+    if _reference_prices_are_fresh():
+        return
+    if not _REFERENCE_PRICES:
+        _load_reference_prices_from_db()
+    if not _reference_prices_are_fresh():
+        _refresh_reference_prices_sync()
+
+
 # ─── Volume history ───────────────────────────────────────────────────────────
 def _get_avg_volume(type_id: int) -> float | None:
     """
@@ -256,13 +342,18 @@ def get_price(type_id: int) -> dict | None:
     Uses local SQLite cache — call get_prices_bulk() first to ensure
     the cache is populated.
 
-    Returns { 'sell': float, 'buy': float, 'avg_daily_volume': float } or None
+    Returns { 'sell': float, 'buy': float, 'avg_daily_volume': float,
+              'adjusted_price': float|None, 'average_price': float|None } or None
     """
     _ensure_orders_fresh_sync()
+    _ensure_reference_prices_fresh_sync()
     price = _get_price_from_db(type_id)
     if not price:
         return None
     price["avg_daily_volume"] = _get_avg_volume(type_id)
+    ref = _REFERENCE_PRICES.get(type_id, {})
+    price["adjusted_price"] = ref.get("adjusted_price")
+    price["average_price"] = ref.get("average_price")
     return price
 
 
@@ -279,16 +370,22 @@ def get_prices_bulk(type_ids: list[int], history_ids: list[int] | None = None) -
                      Pass only output item IDs to avoid fetching history for
                      thousands of raw materials.
 
-    Returns { type_id: { 'sell', 'buy', 'avg_daily_volume' } }
+    Returns { type_id: { 'sell', 'buy', 'avg_daily_volume', 'adjusted_price', 'average_price' } }
     """
     # One freshness check for the whole batch
     _ensure_orders_fresh_sync()
+    _ensure_reference_prices_fresh_sync()
 
     # Bulk-query all prices in two SQL queries (instead of N × 2 per-item queries)
     results = _get_prices_bulk_from_db(list(type_ids))
 
     # Fetch volume history only for the requested subset (or all if not specified)
     ids_to_fetch = [tid for tid in (history_ids if history_ids is not None else list(results.keys())) if tid in results]
+
+    for tid, row in results.items():
+        ref = _REFERENCE_PRICES.get(tid, {})
+        row["adjusted_price"] = ref.get("adjusted_price")
+        row["average_price"] = ref.get("average_price")
 
     # Pre-load all cached volume history in one query to avoid N individual DB opens
     cached_vols: dict[int, float | None] = {}

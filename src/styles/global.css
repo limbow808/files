@@ -330,6 +330,46 @@ tr.row-selected td { color: #000; }
 .nav-tab.active:hover { background: #E0E0E0; color: #000; }
 .nav-tab.active:hover::before { background: #000; }
 
+/* ── Settings dropdown ──────────────────────────────────────────── */
+.settings-nav {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+.settings-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 160px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-top: none;
+  flex-direction: column;
+  z-index: 200;
+}
+.settings-nav:hover .settings-dropdown { display: flex; }
+.settings-item {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  padding: 10px 22px;
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.12s, background 0.12s;
+  white-space: nowrap;
+}
+.settings-item:hover { color: var(--text); background: rgba(255,71,0,0.08); }
+.settings-item.active { color: var(--accent); }
+
+/* ── Field tooltip (? icon hover) ──────────────────────────────── */
+span:hover > .field-tooltip { opacity: 1 !important; }
+
 /* ── Panel tab buttons (Sell/Buy, Minerals/Ores, etc.) ───────────── */
 .tab-btn {
   font-family: var(--mono);
@@ -1042,10 +1082,9 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 
 /* ── Calculator detail ───────────────────────────────────────────── */
 .calc-detail {
-  background: #050505;
-  border: 1px solid var(--border);
-  margin: 0 12px 12px;
-  padding: 16px 20px;
+  background: var(--bg2);
+  margin: 0px;
+  padding: 0px;
 }
 .calc-detail-grid {
   display: grid;

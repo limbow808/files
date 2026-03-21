@@ -72,8 +72,11 @@ CONFIG = {
     # Max ESI contract pages to scan (each page = 1000 contracts)
     "MAX_PAGES":               10,   # was 20 — newest BPO listings always appear on pages 1-10
 
-    # ESI region to scan contracts in (10000002 = The Forge / Jita)
+    # ESI region to scan contracts in (10000002 = The Forge / Jita, 0 = all major hubs)
     "REGION_ID":               10000002,
+
+    # Which blueprint types to watch for in contracts: "bpo", "bpc", or "both"
+    "BLUEPRINT_TYPE":          os.environ.get("BLUEPRINT_TYPE", "bpo"),
 }
 
 # ─── State (in-memory) ────────────────────────────────────────────────────────
@@ -117,6 +120,46 @@ def _tg_send(text: str) -> bool:
     except Exception as e:
         print(f"  [alerts] Telegram send failed: {e}")
         return False
+
+
+# ─── Public config helpers (used by /api/settings/bot) ───────────────────────
+
+def get_public_config() -> dict:
+    """Return a copy of CONFIG suitable for the UI. Token is partially masked."""
+    token = CONFIG.get("TELEGRAM_TOKEN", "")
+    masked = (token[:4] + "*" * max(0, len(token) - 4)) if len(token) > 4 else ("*" * len(token))
+    return {
+        "TELEGRAM_TOKEN":         masked,
+        "TELEGRAM_CHAT_ID":       CONFIG.get("TELEGRAM_CHAT_ID", ""),
+        "ROI_THRESHOLD":          CONFIG.get("ROI_THRESHOLD"),
+        "BREAKEVEN_MAX_RUNS":     CONFIG.get("BREAKEVEN_MAX_RUNS"),
+        "MIN_NET_PROFIT":         CONFIG.get("MIN_NET_PROFIT"),
+        "ALERT_COOLDOWN_HOURS":   CONFIG.get("ALERT_COOLDOWN_HOURS"),
+        "CONTRACT_SCAN_INTERVAL": CONFIG.get("CONTRACT_SCAN_INTERVAL"),
+        "JOB_SCAN_INTERVAL":      CONFIG.get("JOB_SCAN_INTERVAL"),
+        "MAX_PAGES":              CONFIG.get("MAX_PAGES"),
+        "REGION_ID":              CONFIG.get("REGION_ID"),
+        "BLUEPRINT_TYPE":         CONFIG.get("BLUEPRINT_TYPE", "bpo"),
+    }
+
+
+_NUMERIC_KEYS = {
+    "ROI_THRESHOLD", "BREAKEVEN_MAX_RUNS", "MIN_NET_PROFIT",
+    "ALERT_COOLDOWN_HOURS", "CONTRACT_SCAN_INTERVAL", "JOB_SCAN_INTERVAL",
+    "MAX_PAGES", "REGION_ID",
+}
+_ALLOWED_KEYS = _NUMERIC_KEYS | {"TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "BLUEPRINT_TYPE"}
+
+
+def update_config(updates: dict) -> None:
+    """Apply validated updates to the in-memory CONFIG dict (takes effect immediately)."""
+    for key, val in updates.items():
+        if key not in _ALLOWED_KEYS:
+            continue
+        if key in _NUMERIC_KEYS:
+            CONFIG[key] = float(val) if isinstance(val, float) else int(val)
+        else:
+            CONFIG[key] = str(val)
 
 
 def _should_alert(key: str) -> bool:
@@ -217,6 +260,10 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
 
         region_id = CONFIG["REGION_ID"]
         max_pages = CONFIG["MAX_PAGES"]
+
+        # Resolve region IDs to scan: 0 = all five major trade hub regions
+        _MAJOR_HUB_REGIONS = [10000002, 10000043, 10000032, 10000042, 10000030]
+        regions_to_scan = _MAJOR_HUB_REGIONS if int(region_id) == 0 else [int(region_id)]
         session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
         session.mount("https://", adapter)
@@ -289,48 +336,47 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
                     return None, 0
             return None, 0
 
-        # ── Fetch contract pages ───────────────────────────────────────────────
-        print(f"  [alerts/contract] Scanning ESI contracts (region {region_id}, up to {max_pages} pages)…")
-        first_resp, first_status = _esi_get(
-            f"https://esi.evetech.net/latest/contracts/public/{region_id}/",
-            params={"page": 1},
-            timeout=(6, 14),
-            allow_404=True,
-        )
-        if first_status not in (200, 404) or first_resp is None:
-            print("  [alerts/contract] Failed to load initial contracts page.")
-            status["last_error"] = "contract scan failed to fetch initial page"
-            return
-        first_page = first_resp.json()
-        total_pages = int(first_resp.headers.get("X-Pages", 1))
-        total_pages = min(total_pages, max_pages)
+        # ── Fetch contract pages (iterates over all configured regions) ─────────
+        region_label = "ALL MAJOR HUBS" if int(region_id) == 0 else str(region_id)
+        print(f"  [alerts/contract] Scanning ESI contracts ({region_label}, up to {max_pages} pages/region)…")
 
-        all_contracts = [c for c in first_page if c.get("type") == "item_exchange"]
-        if total_pages > 1:
-            def _fetch_page(page: int):
-                resp, code = _esi_get(
-                    f"https://esi.evetech.net/latest/contracts/public/{region_id}/",
-                    params={"page": page},
-                    timeout=(6, 12),
-                    allow_404=True,
-                )
-                if code == 404 or resp is None:
-                    return []
-                return resp.json()
-
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {pool.submit(_fetch_page, p): p for p in range(2, total_pages + 1)}
-                for fut in as_completed(futures):
-                    page_data = fut.result()
-                    all_contracts.extend(
-                        c for c in page_data if c.get("type") == "item_exchange"
+        def _fetch_region_pages(rid: int) -> list:
+            """Fetch all item_exchange contracts from a single region."""
+            fr, fstatus = _esi_get(
+                f"https://esi.evetech.net/latest/contracts/public/{rid}/",
+                params={"page": 1}, timeout=(6, 14), allow_404=True,
+            )
+            if fstatus not in (200, 404) or fr is None:
+                print(f"  [alerts/contract] Failed to load initial page for region {rid}, skipping.")
+                return []
+            found = [c for c in fr.json() if c.get("type") == "item_exchange"]
+            total = min(int(fr.headers.get("X-Pages", 1)), max_pages)
+            if total > 1:
+                def _fetch_page(page: int, _rid=rid):
+                    resp, code = _esi_get(
+                        f"https://esi.evetech.net/latest/contracts/public/{_rid}/",
+                        params={"page": page}, timeout=(6, 12), allow_404=True,
                     )
+                    if code == 404 or resp is None:
+                        return []
+                    return resp.json()
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = {pool.submit(_fetch_page, p): p for p in range(2, total + 1)}
+                    for fut in as_completed(futures):
+                        found.extend(c for c in fut.result() if c.get("type") == "item_exchange")
+            return found
+
+        all_contracts = []
+        for _rid in regions_to_scan:
+            all_contracts.extend(_fetch_region_pages(_rid))
 
         # Blueprints have tiny volume — skip obviously non-BP contracts
         candidates = [c for c in all_contracts if c.get("volume", 999) <= 1000]
         print(f"  [alerts/contract] {len(candidates)} candidate contracts from {total_pages} pages.")
 
         # ── Match contracts to wanted BPOs ────────────────────────────────────
+        bp_filter = CONFIG.get("BLUEPRINT_TYPE", "bpo")
+
         def check_contract(contract):
             resp, _ = _esi_get(
                 f"https://esi.evetech.net/latest/contracts/public/items/{contract['contract_id']}/",
@@ -343,16 +389,19 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
             out = []
             for item in items:
                 tid = item.get("type_id")
-                if (
-                    tid in wanted_bp_ids
-                    and item.get("is_included", True)
-                    and not item.get("is_blueprint_copy", False)  # BPOs only
-                ):
+                is_copy = item.get("is_blueprint_copy", False)
+                type_ok = (
+                    bp_filter == "both"
+                    or (bp_filter == "bpo" and not is_copy)
+                    or (bp_filter == "bpc" and is_copy)
+                )
+                if tid in wanted_bp_ids and item.get("is_included", True) and type_ok:
                     out.append({
-                        "contract": contract,
-                        "type_id":  tid,
-                        "me":       item.get("material_efficiency", 0),
-                        "te":       item.get("time_efficiency", 0),
+                        "contract":  contract,
+                        "type_id":   tid,
+                        "me":        item.get("material_efficiency", 0),
+                        "te":        item.get("time_efficiency", 0),
+                        "is_copy":   is_copy,
                     })
             return out
 
@@ -382,6 +431,7 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
             isk_per_hr = calc_row.get("isk_per_hour", 0)
             me         = m["me"]
             te         = m["te"]
+            bp_label   = "BPC" if m.get("is_copy") else "BPO"
 
             if net_profit <= 0:
                 continue
@@ -391,14 +441,14 @@ def _run_contract_scan(calc_cache: dict, calc_cache_ttl: int):
                 continue  # too many runs to recoup purchase cost
 
             # Alert key per contract so each listing fires once
-            alert_key = f"bpo|{contract['contract_id']}"
+            alert_key = f"{bp_label.lower()}|{contract['contract_id']}"
             if not _should_alert(alert_key):
                 continue
 
             deals_found += 1
             iph_line = f"\nISK/hr: {_fmt_isk(isk_per_hr)}" if isk_per_hr else ""
             msg = (
-                f"<b>BPO CONTRACT: {name}</b>\n"
+                f"<b>{bp_label} CONTRACT: {name}</b>\n"
                 f"Price: {_fmt_isk(price)}  |  ME{me} TE{te}\n"
                 f"ROI: {roi:.1f}%  |  Profit: {_fmt_isk(net_profit)}/run"
                 f"{iph_line}\n"

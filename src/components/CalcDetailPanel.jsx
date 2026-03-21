@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { fmtISK, fmtVol, fmtDuration, roiColor } from '../utils/fmt';
 import EveText from './EveText';
 
@@ -15,11 +16,13 @@ function SkillPips({ have, need }) {
   );
 }
 
-export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
+export default function CalcDetailPanel({ item, runs = 1, charSkills, roiColorFn }) {
   const materials = item.material_breakdown || [];
   const skills    = item.required_skills    || [];
   const roi       = item.roi || 0;
   const tierColor = (roiColorFn ?? roiColor)(roi);
+  const n = Math.max(1, runs);
+  const [jobOpen, setJobOpen] = useState(false);
 
   let skillStatus = null;
   if (charSkills && skills.length > 0) {
@@ -75,9 +78,9 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
                 <div key={i} className="mat-row eve-row-reveal" style={{ animationDelay: `${i * 30}ms` }}>
                   <span className="mat-name">{m.name || `Type ${m.type_id}`}</span>
                   <span className="mat-qty">
-                    <span style={{ color: 'var(--text)', marginRight: 6 }}>{fmtVol(m.quantity)}</span>
+                    <span style={{ color: 'var(--text)', marginRight: 6 }}>{fmtVol(m.quantity * n)}</span>
                     <span style={{ color: 'var(--dim)' }}>× {fmtISK(m.unit_price)}</span>
-                    <span style={{ color: 'var(--text)', marginLeft: 6 }}>{fmtISK(m.line_cost)}</span>
+                    <span style={{ color: 'var(--text)', marginLeft: 6 }}>{fmtISK(m.line_cost * n)}</span>
                   </span>
                 </div>
               )) : (
@@ -128,13 +131,57 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
             {/* Column 3: Cost breakdown */}
             <div>
               <div className="calc-detail-section-title">◈ Cost Breakdown</div>
+
+              {/* Material Cost */}
+              <div className="mat-row">
+                <span style={{ color: 'var(--dim)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1 }}>Material Cost</span>
+                <span style={{ color: 'var(--text)' }}>{fmtISK(item.material_cost * n)} ISK</span>
+              </div>
+
+              {/* Total Job Cost — collapsible */}
+              <div
+                className="mat-row"
+                onClick={() => item.job_cost_breakdown && setJobOpen(o => !o)}
+                style={{ cursor: item.job_cost_breakdown ? 'pointer' : 'default', userSelect: 'none' }}
+              >
+                <span style={{ color: 'var(--dim)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  {item.job_cost_breakdown && (
+                    <span style={{ fontSize: 9, display: 'inline-block', transition: 'transform 0.15s', transform: jobOpen ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
+                  )}
+                  Total Job Cost
+                </span>
+                <span style={{ color: 'var(--dim)' }}>{fmtISK(item.job_cost * n)} ISK</span>
+              </div>
+              {jobOpen && item.job_cost_breakdown && (() => {
+                const jc = item.job_cost_breakdown;
+                return (
+                  <div style={{ margin: '2px 0 6px 8px', borderLeft: '1px solid var(--border)', paddingLeft: 8 }}>
+                    <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 1.5, marginBottom: 3 }}>
+                      JOB FORMULA · SCI {(jc.sci * 100).toFixed(2)}% · fac.tax {(jc.facility_tax_rate * 100).toFixed(3)}%
+                    </div>
+                    {[
+                      ['EIV',         jc.eiv * n,               'var(--dim2)'],
+                      ['SCI gross',   jc.gross * n,             'var(--dim2)'],
+                      ['role bonus',  jc.gross_bonus_amount * n, jc.gross_bonus_amount < 0 ? '#4cff91' : '#ff4700'],
+                      ['install',     jc.gross_after_bonus * n,  'var(--dim2)'],
+                      ['fac. tax',    jc.facility_tax * n,       'var(--dim2)'],
+                      ['SCC 4%',      jc.scc_surcharge * n,      'var(--dim2)'],
+                    ].map(([lbl, val, clr]) => (
+                      <div key={lbl} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, padding: '1px 0' }}>
+                        <span style={{ color: 'var(--dim)', letterSpacing: 0.5 }}>{lbl}</span>
+                        <span style={{ color: clr, fontFamily: 'var(--mono)' }}>{fmtISK(val)}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {/* Sales Tax, Broker Fee, Invention */}
               {[
-                ['Material Cost', item.material_cost, 'var(--text)'],
-                ['Job Install',   item.job_cost,       'var(--dim)'],
-                ['Sales Tax',     item.sales_tax,      'var(--dim)'],
-                ['Broker Fee',    item.broker_fee,     'var(--dim)'],
+                ['Sales Tax',  item.sales_tax * n,      'var(--dim)'],
+                ['Broker Fee', item.broker_fee * n,     'var(--dim)'],
                 ...(item.invention_cost > 0
-                  ? [['Invention', item.invention_cost, 'var(--accent)']]
+                  ? [['Invention', item.invention_cost * n, 'var(--accent)']]
                   : []),
               ].map(([label, val, col]) => (
                 <div key={label} className="mat-row">
@@ -144,12 +191,12 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
               ))}
               <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, color: 'var(--dim)', textTransform: 'uppercase' }}>Revenue</span>
-                <span style={{ color: 'var(--text)', fontSize: 13 }}>{fmtISK(item.gross_revenue)} ISK</span>
+                <span style={{ color: 'var(--text)', fontSize: 13 }}>{fmtISK(item.gross_revenue * n)} ISK</span>
               </div>
               <div style={{ borderTop: '1px solid var(--border)', paddingTop: 6, marginTop: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 2, color: 'var(--text)', textTransform: 'uppercase' }}>Net Profit</span>
                 <span style={{ color: tierColor, fontSize: 16, fontWeight: 700 }}>
-                  {fmtISK(item.net_profit)} ISK
+                  {fmtISK(item.net_profit * n)} ISK
                   <span style={{ fontSize: 11, color: 'var(--dim)', marginLeft: 6 }}>({item.margin_pct?.toFixed(1)}%)</span>
                 </span>
               </div>
@@ -179,7 +226,7 @@ export default function CalcDetailPanel({ item, charSkills, roiColorFn }) {
                 const tooSlow = rec.max_per_day < (item.avg_daily_volume / (item.output_qty || 1));
                 const color = tooSlow ? '#00cc66' : rec.saturation_pct >= 90 ? 'var(--accent)' : 'var(--text)';
                 return (
-                  <div style={{ marginTop: 12, padding: '8px 10px', border: '1px solid var(--border)', background: 'var(--bg)' }}>
+                  <div style={{ marginTop: 12, padding: '8px 10px', border: '1px solid var(--border)', background: 'var(--bg2)' }}>
                     <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 6 }}>◈ Recommended Runs</div>
                     <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', alignItems: 'baseline' }}>
                       <div>

@@ -175,7 +175,8 @@ export default function CharactersPage() {
   const totalJobs   = characters.reduce((s, c) => s + (stats[c.character_id]?.active_jobs || 0), 0);
 
   return (
-    <div style={{ padding: '20px 24px', maxWidth: 780, display: 'flex', flexDirection: 'column', gap: 20 }}>
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', height: '100%', overflowY: 'auto' }}>
+    <div style={{ padding: '20px 24px', width: '100%', maxWidth: 780, display: 'flex', flexDirection: 'column', gap: 20 }}>
 
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -257,6 +258,7 @@ export default function CharactersPage() {
           ))}
         </div>
       )}
+    </div>
     </div>
   );
 }

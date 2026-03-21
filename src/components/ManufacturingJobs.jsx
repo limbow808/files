@@ -188,9 +188,375 @@ function OwnBadge({ kind }) {
   );
 }
 
+// Slot squares that wrap — fully flexible for any slot count
+function SlotDots({ total, occupied, activeColor }) {
+  const SZ = 6;
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2, maxWidth: 140 }}>
+      {Array.from({ length: Math.max(total, 1) }).map((_, i) => (
+        <div key={i} style={{
+          width: SZ, height: SZ, borderRadius: 1,
+          background: i < occupied ? activeColor : '#4cff91',
+          border: '1px solid rgba(255,255,255,0.07)',
+          flexShrink: 0,
+        }} title={i < occupied ? 'In use' : 'Free'} />
+      ))}
+    </div>
+  );
+}
+
+function SlotHeaderBar({ maxJobs, runningJobs, freeSlots, maxScience, runningScience, freeScience, lastRefresh, loading, refetch }) {
+  const nowSec  = Math.floor(Date.now() / 1000);
+  const minsAgo = lastRefresh != null ? Math.floor((nowSec - lastRefresh) / 60) : null;
+  const mfgFreeColor = freeSlots   > 0 ? '#4cff91' : 'var(--accent)';
+  const sciFreeColor = freeScience > 0 ? '#4cff91' : 'var(--accent)';
+
+  return (
+    <div style={{
+      padding: '5px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg2)',
+      display: 'flex', alignItems: 'flex-start', gap: 18, flexWrap: 'wrap', flexShrink: 0,
+    }}>
+      {/* SCI SLOTS */}
+      {maxScience > 0 && (
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', paddingTop: 1, whiteSpace: 'nowrap' }}>SCI SLOTS</span>
+          <SlotDots total={maxScience} occupied={runningScience} activeColor="#4da6ff" />
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: sciFreeColor, whiteSpace: 'nowrap', paddingTop: 0 }}>
+            {freeScience > 0 ? `${freeScience} FREE` : 'FULL'}
+          </span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
+            · {runningScience}/{maxScience}
+          </span>
+        </div>
+      )}
+
+      {/* MFG SLOTS */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', paddingTop: 1, whiteSpace: 'nowrap' }}>MFG SLOTS</span>
+        <SlotDots total={maxJobs} occupied={runningJobs} activeColor="#ff4700" />
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: mfgFreeColor, whiteSpace: 'nowrap' }}>
+          {freeSlots > 0 ? `${freeSlots} FREE` : 'FULL'}
+        </span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
+          · {runningJobs}/{maxJobs}
+        </span>
+      </div>
+
+      {/* Timestamp + refresh — pushed right */}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        {minsAgo != null && (
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>
+            {minsAgo === 0 ? 'JUST NOW' : `${minsAgo}m AGO`}
+          </span>
+        )}
+        <button
+          onClick={refetch}
+          disabled={loading}
+          style={{
+            background: 'none', border: 'none',
+            color: 'var(--dim)', fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
+            padding: 0, cursor: loading ? 'default' : 'pointer',
+          }}
+        >{loading ? '⟳ ...' : '⟳ REFRESH'}</button>
+      </div>
+    </div>
+  );
+}
+
+function QueueColumnHeaders() {
+  const cell = (label, align = 'left', width) => (
+    <div style={{
+      fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)',
+      textAlign: align, flexShrink: 0, ...(width ? { width } : { flex: 1, minWidth: 0 }),
+    }}>{label}</div>
+  );
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 6,
+      padding: '4px 10px', background: 'var(--bg)', borderBottom: '1px solid #0d0d0d',
+      flexShrink: 0,
+    }}>
+      {cell('#',          'center', 26)}
+      {cell('',           'center', 16)}   {/* activity squares */}
+      {cell('',           'left',   20)}   {/* icon */}
+      {cell('ITEM',       'left')}
+      {cell('QTY',        'right',  38)}
+      {cell('COPY READY', 'right',  86)}
+      {cell('ISK/H',      'right',  96)}
+      <div style={{ width: 10 }} />         {/* expand toggle */}
+    </div>
+  );
+}
+
+function SectionHeader({ label, count, rightLabel, accentColor }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '5px 10px', background: 'var(--bg)',
+      borderTop: '1px solid #0d0d0d', borderBottom: '1px solid #0d0d0d',
+      flexShrink: 0,
+    }}>
+      <span style={{
+        fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 3,
+        color: accentColor, fontWeight: 700,
+      }}>{label}</span>
+      <span style={{
+        fontFamily: 'var(--mono)', fontSize: 9, color: '#000',
+        background: accentColor, padding: '1px 5px', borderRadius: 2,
+      }}>{count} ITEMS</span>
+      {/* gradient bar */}
+      <div style={{
+        flex: 1, height: 1, marginLeft: 4, marginRight: 4,
+        background: `linear-gradient(to right, ${accentColor}66, transparent)`,
+      }} />
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1.5, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
+        {rightLabel}
+      </span>
+    </div>
+  );
+}
+
+function ActivitySquares({ isCopy, hasSciSlot }) {
+  const SZ = 12;
+  if (isCopy) {
+    const c = hasSciSlot ? '#4da6ff' : 'rgba(255,255,255,0.15)';
+    const o = hasSciSlot ? '#ff4700' : 'rgba(255,255,255,0.12)';
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0, alignSelf: 'stretch', justifyContent: 'space-between' }}>
+        <div style={{ width: SZ, height: SZ, borderRadius: 2, background: c }} title="Science slot" />
+        <div style={{ width: 1, flex: 1, background: '#444444', marginTop: 3, marginBottom: 3 }} />
+        <div style={{ width: SZ, height: SZ, borderRadius: 2, background: o }} title="MFG slot (after copy)" />
+      </div>
+    );
+  }
+  return (
+    <div style={{ width: SZ, display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0, alignSelf: 'center' }}>
+      <div style={{ width: SZ, height: SZ, borderRadius: 2, background: '#ff4700' }} title="MFG slot" />
+    </div>
+  );
+}
+
+function IskHrBar({ value, maxValue }) {
+  const pct = maxValue > 0 ? Math.min(100, (value / maxValue) * 100) : 0;
+  const color = value > maxValue * 0.66 ? '#4cff91' : value > maxValue * 0.33 ? 'var(--accent)' : 'var(--dim)';
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0, width: 90 }}>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color, whiteSpace: 'nowrap' }}>
+        {fmtISK(value)}
+      </span>
+      <div style={{ width: '100%', height: 3, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 2, transition: 'width 0.3s' }} />
+      </div>
+    </div>
+  );
+}
+
+const BADGE = {
+  copying:    { label: 'COPYING',              bg: '#4da6ff', color: '#000' },
+  startCopy:  { label: 'START COPY',          bg: 'rgba(77,166,255,0.25)', color: '#4da6ff' },
+  waitSci:    { label: 'WAITING FOR SCI SLOT', bg: 'rgba(255,255,255,0.07)', color: 'var(--dim)' },
+  ready:      { label: 'READY TO QUEUE',       bg: '#4cff91', color: '#000' },
+  buyMats:    { label: 'BUY MATS',             bg: '#ff4700', color: '#000' },
+  slotWait:   { label: 'SLOT OPENING',         bg: 'rgba(255,255,255,0.07)', color: 'var(--dim)' },
+};
+
+function StatusBadge({ b }) {
+  return (
+    <span style={{
+      display: 'inline-block', fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
+      padding: '2px 5px', borderRadius: 2, background: b.bg, color: b.color,
+      fontWeight: 700, flexShrink: 0,
+    }}>{b.label}</span>
+  );
+}
+
+// Exact live countdown using useGlobalTick + ref — no approximation tilde
+function LiveCountdown({ targetTs, readyText = 'NOW', style = {} }) {
+  const ref = useRef(null);
+  useGlobalTick(() => {
+    if (!ref.current) return;
+    const secs = Math.max(0, targetTs - Math.floor(Date.now() / 1000));
+    if (secs <= 0) {
+      ref.current.textContent = readyText;
+      ref.current.style.color = '#4cff91';
+      return;
+    }
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    ref.current.textContent = d > 0 ? `${d}d ${h}h ${m}m` : h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
+    ref.current.style.color = secs < 3600 ? 'var(--accent)' : 'var(--dim)';
+  });
+  return <span ref={ref} style={{ fontFamily: 'var(--mono)', fontSize: 10, ...style }} />;
+}
+
+function QueueRow({ item, globalIdx, queueType, hasSciSlot, runningScience, activeCopyEndTs, isOpen, onToggle, calcItem, maxIskHr }) {
+  const now       = Math.floor(Date.now() / 1000);
+  const isCopy    = queueType === 'sci';
+  const iskHr     = item.adj_isk_per_hour ?? item.isk_per_hour ?? 0;
+  const startSecs = Math.max(0, (item.start_at || now) - now);
+
+  // activeCopyEndTs is set when there's a real currently-running copy job for this item
+  const isActivelyCopying = isCopy && activeCopyEndTs != null && activeCopyEndTs > now;
+
+  // Sub-line badge + text
+  let badge, subText;
+  if (isCopy) {
+    if (isActivelyCopying) {
+      badge   = BADGE.copying;
+      subText = null; // LiveCountdown used instead
+    } else if (hasSciSlot) {
+      badge   = BADGE.startCopy;
+      subText = null; // LiveCountdown used instead
+    } else {
+      badge   = BADGE.waitSci;
+      subText = `${runningScience} slots occupied`;
+    }
+  } else {
+    if (startSecs > 30) {
+      badge   = BADGE.slotWait;
+      subText = null; // LiveCountdown used instead
+    } else if (!item.mats_ready && item.missing_mats_est_cost > 0) {
+      badge   = BADGE.buyMats;
+      subText = `~${fmtISK(item.missing_mats_est_cost)} needed`;
+    } else if (item.producing_qty > 0) {
+      badge   = null;
+      subText = `▶ Already manufacturing (${item.producing_qty} units in flight)`;
+    } else {
+      badge   = BADGE.ready;
+      subText = null;
+    }
+  }
+
+  return (
+    <>
+      <div
+        className="eve-row-reveal"
+        style={{
+          display: 'flex', flexDirection: 'row', alignItems: 'stretch',
+          padding: '6px 10px', borderBottom: '1px solid #0d0d0d',
+          cursor: 'pointer', background: 'var(--table-row-bg)',
+          animationDelay: `${globalIdx * 20}ms`,
+          gap: 6,
+        }}
+        onClick={onToggle}
+      >
+        {/* # — spans full card height, centered */}
+        <span style={{
+          fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)',
+          fontWeight: 700, width: 26, flexShrink: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>#{globalIdx + 1}</span>
+
+        {/* Activity squares — spans full card height, centered */}
+        <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+          <ActivitySquares isCopy={isCopy} hasSciSlot={hasSciSlot} />
+        </div>
+
+        {/* Right column: data row + sub-line */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+
+          {/* Data row */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+
+            {/* Icon */}
+            <div style={{ width: 20, flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+              {item.output_id && (
+                <img
+                  src={`https://images.evetech.net/types/${item.output_id}/icon?size=32`}
+                  alt=""
+                  style={{ width: 20, height: 20, opacity: 0.85, display: 'block' }}
+                  onError={e => { e.target.style.display = 'none'; }}
+                />
+              )}
+            </div>
+
+            {/* Name + ownership tags inline */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flex: 1, minWidth: 0, overflow: 'hidden' }}>
+              <span style={{
+                fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 300, color: 'var(--text)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1, minWidth: 0,
+              }}>{item.name}</span>
+              {(item.ownership || []).map(o => <OwnBadge key={o} kind={o} />)}
+            </div>
+
+            {/* QTY */}
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)', width: 38, textAlign: 'right', flexShrink: 0 }}>
+              {(item.rec_runs || 0) > 1 ? `×${item.rec_runs}` : ''}
+            </span>
+
+            {/* COPY READY — real countdown when actively copying, static estimate when pending copy, slot countdown for MFG */}
+            <div style={{ width: 86, textAlign: 'right', flexShrink: 0 }}>
+              {isActivelyCopying
+                ? <LiveCountdown targetTs={activeCopyEndTs} readyText="NOW" />
+                : isCopy
+                  ? <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>~{fmtDuration(item.estimated_copy_secs)}</span>
+                  : startSecs > 30
+                    ? <LiveCountdown targetTs={item.start_at} readyText="NOW" />
+                    : <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>—</span>
+              }
+            </div>
+
+            {/* ISK/H bar */}
+            <IskHrBar value={iskHr} maxValue={maxIskHr} />
+
+            {/* Expand toggle */}
+            <span style={{ fontSize: 9, color: 'var(--dim)', width: 10, textAlign: 'right', flexShrink: 0, userSelect: 'none' }}>
+              {isOpen ? '▲' : '▼'}
+            </span>
+          </div>
+
+          {/* Status sub-line */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
+            {badge && <StatusBadge b={badge} />}
+            {isCopy && !isActivelyCopying && hasSciSlot && (item.estimated_copy_secs || 0) > 0 && (
+              <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 0.3 }}>
+                est. ~{fmtDuration(item.estimated_copy_secs)} · then MFG
+              </span>
+            )}
+            {!isCopy && startSecs > 30 && item.start_at && (
+              <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 0.3 }}>
+                slot opens in <LiveCountdown targetTs={item.start_at} readyText="NOW" style={{ color: 'var(--accent)' }} />
+              </span>
+            )}
+            {subText && (
+              <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 0.3 }}>{subText}</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {isOpen && <QueueDetailExpanded item={item} calcItem={calcItem} />}
+    </>
+  );
+}
+
+function GraduatedStrip({ names }) {
+  if (!names.length) return null;
+  return (
+    <div style={{
+      padding: '4px 10px', borderBottom: '1px solid #0d0d0d',
+      background: 'var(--bg)', fontSize: 10,
+      color: 'rgba(77,166,255,0.65)', fontFamily: 'var(--mono)', letterSpacing: 0.5,
+      fontStyle: 'italic',
+    }}>
+      ↓ GRADUATED TO MFG QUEUE AFTER LAST REFRESH — {names.join(', ')}
+    </div>
+  );
+}
+
+// ── Queue Detail Expanded (reused unchanged) ──────────────────────────────────
+
 function QueueDetailExpanded({ item, calcItem }) {
   const materials = calcItem?.material_breakdown || [];
   const tierClr   = roiColor(item.roi);
+  const netProfitShown = item?.adj_net_profit ?? item?.net_profit;
+  const iskHrShown = item?.adj_isk_per_hour ?? item?.isk_per_hour;
+  const revenueShown = item?.gross_revenue ?? calcItem?.gross_revenue;
+  const jc = calcItem?.job_cost_breakdown;
+  const [mfgOpen,  setMfgOpen]  = useState(false);
+  const [copyOpen, setCopyOpen] = useState(false);
 
   return (
     <div style={{
@@ -227,16 +593,85 @@ function QueueDetailExpanded({ item, calcItem }) {
         {/* Cost breakdown */}
         <div>
           <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', marginBottom: 6 }}>◈ COST BREAKDOWN</div>
+
+          {/* Material Cost */}
+          {calcItem?.material_cost != null && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontSize: 10, borderBottom: '1px solid #0d0d0d' }}>
+              <span style={{ color: 'var(--dim)', letterSpacing: 0.5 }}>Material Cost</span>
+              <span style={{ fontFamily: 'var(--mono)', color: 'var(--text)' }}>{fmtISK(calcItem.material_cost)}</span>
+            </div>
+          )}
+
+          {/* MFG Job — clickable header */}
+          {calcItem?.job_cost != null && (
+            <>
+              <div
+                onClick={() => setMfgOpen(o => !o)}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0', fontSize: 10, borderBottom: '1px solid #0d0d0d', cursor: 'pointer', userSelect: 'none' }}
+              >
+                <span style={{ color: 'var(--dim)', letterSpacing: 0.5, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ fontSize: 8, color: 'var(--dim)', transition: 'transform 0.15s', display: 'inline-block', transform: mfgOpen ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
+                  MFG Job
+                </span>
+                <span style={{ fontFamily: 'var(--mono)', color: 'var(--dim)' }}>{fmtISK(calcItem.job_cost)}</span>
+              </div>
+              {mfgOpen && jc && (
+                <>
+                  {[
+                    ['Estimated Item Value', jc.eiv,               '#555'],
+                    ['Sys Cost Index',       jc.gross,             'var(--dim)'],
+                    ['Role Bonus',           jc.gross_bonus_amount, (jc.gross_bonus_amount ?? 0) < 0 ? '#4cff91' : 'var(--accent)'],
+                    ['Gross Cost',          jc.gross_after_bonus, 'var(--text)'],
+                    ['Facility Tax',        jc.facility_tax,      'var(--dim)'],
+                    ['SCC 4%',              jc.scc_surcharge,     'var(--dim)'],
+                  ].map(([label, val, color]) => val != null && (
+                    <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', paddingLeft: 14, fontSize: 9, borderBottom: '1px solid #0d0d0d', opacity: 0.85 }}>
+                      <span style={{ color: 'var(--dim)', letterSpacing: 0.5 }}>{label}</span>
+                      <span style={{ fontFamily: 'var(--mono)', color }}>{fmtISK(val)}</span>
+                    </div>
+                  ))}
+                </>
+              )}
+            </>
+          )}
+
+          {/* Copy Job — clickable header */}
+          {item?.needs_copy && item?.copy_job_cost != null && (
+            <>
+              <div
+                onClick={() => setCopyOpen(o => !o)}
+                style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '2px 0', fontSize: 10, borderBottom: '1px solid #0d0d0d', cursor: 'pointer', userSelect: 'none' }}
+              >
+                <span style={{ color: 'var(--dim)', letterSpacing: 0.5, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ fontSize: 8, color: 'var(--dim)', transition: 'transform 0.15s', display: 'inline-block', transform: copyOpen ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
+                  Copy Job (Total)
+                </span>
+                <span style={{ fontFamily: 'var(--mono)', color: 'var(--dim)' }}>{fmtISK(item.copy_job_cost)}</span>
+              </div>
+              {copyOpen && (
+                <>
+                  <div style={{ padding: '3px 0 3px 14px', fontSize: 9, color: 'var(--dim)', letterSpacing: 0.5, borderBottom: '1px solid #0d0d0d', opacity: 0.85 }}>
+                    Full install fee (matches in-game job window)
+                  </div>
+                  {item?.copy_job_cost_per_run != null && (item?.rec_runs || 1) > 1 && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', paddingLeft: 14, fontSize: 9, borderBottom: '1px solid #0d0d0d', opacity: 0.85 }}>
+                      <span style={{ color: 'var(--dim)', letterSpacing: 0.5 }}>
+                        Amortized / run (for ranking)
+                      </span>
+                      <span style={{ fontFamily: 'var(--mono)', color: 'var(--dim)' }}>{fmtISK(item.copy_job_cost_per_run)}</span>
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+
+          {/* Sales Tax & Broker Fee */}
           {[
-            ['Material Cost', calcItem?.material_cost, 'var(--text)'],
-            ['Job Install',   calcItem?.job_cost,      'var(--dim)'],
-            ['Sales Tax',     calcItem?.sales_tax,     'var(--dim)'],
-            ['Broker Fee',    calcItem?.broker_fee,    'var(--dim)'],
+            ['Sales Tax',  calcItem?.sales_tax,  'var(--dim)'],
+            ['Broker Fee', calcItem?.broker_fee, 'var(--dim)'],
           ].map(([label, val, color]) => val != null && (
-            <div key={label} style={{
-              display: 'flex', justifyContent: 'space-between',
-              padding: '2px 0', fontSize: 10, borderBottom: '1px solid #0d0d0d',
-            }}>
+            <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', fontSize: 10, borderBottom: '1px solid #0d0d0d' }}>
               <span style={{ color: 'var(--dim)', letterSpacing: 0.5 }}>{label}</span>
               <span style={{ fontFamily: 'var(--mono)', color }}>{fmtISK(val)}</span>
             </div>
@@ -244,13 +679,13 @@ function QueueDetailExpanded({ item, calcItem }) {
           <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
             <span style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)' }}>NET PROFIT</span>
             <span style={{ fontFamily: 'var(--mono)', fontSize: 14, fontWeight: 700, color: tierClr }}>
-              {fmtISK(item.net_profit)} ISK
+              {fmtISK(netProfitShown)} ISK
             </span>
           </div>
-          {item.is_bpo_only && (
+          {item.is_bpo_only && item.copy_job_cost > 0 && (
             <div style={{ marginTop: 6, padding: '4px 6px', border: '1px solid rgba(255,204,68,0.3)', background: 'rgba(255,204,68,0.06)', borderRadius: 2 }}>
               <span style={{ fontSize: 9, letterSpacing: 1, color: 'rgba(255,204,68,0.8)' }}>
-                ⚠ BPO — copy job required before manufacturing. Copy costs not included above.
+                BPO path: copy install and copy-time overhead are included in the adjusted ranking values.
               </span>
             </div>
           )}
@@ -261,7 +696,8 @@ function QueueDetailExpanded({ item, calcItem }) {
           <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', marginBottom: 6 }}>◈ PERFORMANCE</div>
           {[
             ['ROI',       item.roi != null ? `${item.roi.toFixed(1)}%` : '—',                    roiColor(item.roi)],
-            ['ISK/HR',    fmtISK(item.isk_per_hour),                                             'var(--accent)'],
+            ['ISK/HR',    fmtISK(iskHrShown),                                                    'var(--accent)'],
+            ['REVENUE',   revenueShown != null ? fmtISK(revenueShown) : '—',                     'var(--text)'],
             ['VOL/DAY',   item.avg_daily_volume != null ? `${Math.round(item.avg_daily_volume)}/d` : '—', 'var(--text)'],
             ['SUPPLY',    item.supply_days != null ? `${item.supply_days.toFixed(1)}d (${(item.supply_qty ?? 0).toLocaleString()} units)` : '—',
                           item.supply_days < 1 ? '#ff3b3b' : item.supply_days < 3 ? 'var(--accent)' : '#4cff91'],
@@ -278,7 +714,7 @@ function QueueDetailExpanded({ item, calcItem }) {
           {calcItem?.recommended_runs && (() => {
             const rec = calcItem.recommended_runs;
             return (
-              <div style={{ marginTop: 8, padding: '5px 8px', border: '1px solid var(--border)', background: 'var(--bg)' }}>
+              <div style={{ marginTop: 8, padding: '5px 0px', background: 'var(--bg2)', borderTop: '1px solid var(--border)' }}>
                 <div style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 2, marginBottom: 3 }}>REC. RUNS</div>
                 <span style={{ fontFamily: 'var(--mono)', fontSize: 18, fontWeight: 700, color: tierClr }}>{rec.runs}</span>
                 <span style={{ fontSize: 9, color: 'var(--dim)', marginLeft: 6 }}>RUNS/BATCH · {rec.days_to_sell}d TO SELL</span>
@@ -292,182 +728,57 @@ function QueueDetailExpanded({ item, calcItem }) {
   );
 }
 
-function SupplyBar({ supplyDays, urgency }) {
-  // Visual bar: green=stocked, orange=running low, red=empty
-  const pct = Math.min(100, (supplyDays / 7) * 100);
-  const barClr = supplyDays < 1 ? '#ff3b3b' : supplyDays < 3 ? 'var(--accent)' : '#4cff91';
-  const label  = supplyDays < 0.1 ? 'EMPTY'
-               : supplyDays < 1   ? `${supplyDays.toFixed(1)}d`
-               : `${supplyDays.toFixed(1)}d`;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-      <div style={{ width: 64, height: 4, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${pct}%`, background: barClr, borderRadius: 2, transition: 'width 0.3s' }} />
-      </div>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: barClr, minWidth: 28 }}>{label}</span>
-    </div>
-  );
-}
-
-function fmtAbsTime(ts) {
-  const now = Math.floor(Date.now() / 1000);
-  const secs = (ts || 0) - now;
-  if (secs <= 30) return 'NOW';
-  const d = Math.floor(secs / 86400);
-  const h = Math.floor((secs % 86400) / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  if (d > 0) return `~${d}d ${h}h`;
-  if (h > 0) return `~${h}h ${m}m`;
-  return `~${m}m`;
-}
-
-const ACTION_LABELS = {
-  manufacture: { label: 'MFG',      bg: '#ff4700' },
-  copy_first:  { label: 'COPY→MFG', bg: '#4da6ff' },
-};
-
-function PrereqLine({ item }) {
-  const now = Math.floor(Date.now() / 1000);
-
-  if (item.action_type === 'copy_first') {
-    return (
-      <span style={{ fontSize: 11, color: 'rgba(255,204,68,0.85)', letterSpacing: 0.5 }}>
-        → Start copy now · mfg ready {fmtAbsTime(item.manufacture_at)}
-      </span>
-    );
-  }
-
-  const secsAway = (item.start_at || now) - now;
-  if (secsAway > 30) {
-    return (
-      <span style={{ fontSize: 11, color: 'rgba(255,71,0,0.8)', letterSpacing: 0.5 }}>
-        → Slot opens {fmtAbsTime(item.start_at)}
-      </span>
-    );
-  }
-
-  if (!item.mats_ready && item.missing_mats_est_cost > 0) {
-    return (
-      <span style={{ fontSize: 11, color: '#ff4444', letterSpacing: 0.5 }}>
-        ⚠ BUY MATS · ~{fmtISK(item.missing_mats_est_cost)} needed
-      </span>
-    );
-  }
-
-  if (item.producing_qty > 0) {
-    return (
-      <span style={{ fontSize: 11, color: 'rgba(77,166,255,0.8)', letterSpacing: 0.5 }}>
-        ▶ Already manufacturing ({item.producing_qty} units in flight)
-      </span>
-    );
-  }
-
-  return (
-    <span style={{ fontSize: 11, color: '#4cff91', letterSpacing: 0.5 }}>
-      ✓ Ready to queue
-    </span>
-  );
-}
-
-function QueueActionRow({ item, idx, isOpen, onToggle, calcItem }) {
-  const now       = Math.floor(Date.now() / 1000);
-  const secsAway  = Math.max(0, (item.start_at || now) - now);
-  const isNow     = item.action_type === 'copy_first' || secsAway <= 30;
-  const actInfo   = ACTION_LABELS[item.action_type] || ACTION_LABELS.manufacture;
-  const timeCtx   = isNow ? 'NOW' : fmtAbsTime(item.start_at);
-  const timeColor = isNow ? '#4cff91' : secsAway < 7200 ? 'var(--accent)' : 'var(--dim)';
-  const supplyDays = item.supply_days ?? 0;
-
-  return (
-    <>
-      <div
-        className="eve-row-reveal"
-        style={{
-          display: 'flex', flexDirection: 'column',
-          padding: '7px 10px', borderBottom: '1px solid #0d0d0d',
-          cursor: 'pointer', background: 'var(--table-row-bg)',
-          animationDelay: `${idx * 25}ms`,
-        }}
-        onClick={onToggle}
-      >
-        {/* Main row */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-
-          {/* Priority # + time context */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 34, flexShrink: 0 }}>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--dim)', fontWeight: 700, lineHeight: 1.1 }}>
-              #{idx + 1}
-            </span>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 8, color: timeColor, letterSpacing: 0.3, whiteSpace: 'nowrap' }}>
-              {timeCtx}
-            </span>
-          </div>
-
-          {/* Action badge */}
-          <span style={{
-            display: 'inline-block', fontFamily: 'var(--mono)', fontSize: 10, fontWeight: 400,
-            letterSpacing: 1, padding: '2px 5px', borderRadius: 2, flexShrink: 0,
-            background: actInfo.bg, color: '#0d0d0d',
-          }}>{actInfo.label}</span>
-
-          {/* Item icon */}
-          {item.output_id && (
-            <img
-              src={`https://images.evetech.net/types/${item.output_id}/icon?size=32`}
-              alt=""
-              style={{ width: 20, height: 20, flexShrink: 0, opacity: 0.85 }}
-              onError={e => { e.target.style.display = 'none'; }}
-            />
-          )}
-
-          {/* Name */}
-          <span style={{
-            fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 300, color: 'var(--text)',
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0,
-          }}>{item.name}</span>
-
-          {/* Runs badge */}
-          {(item.rec_runs || 0) > 1 && (
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)', flexShrink: 0 }}>
-              ×{item.rec_runs}
-            </span>
-          )}
-
-          {/* Ownership badges */}
-          <div style={{ display: 'flex', gap: 3, flexShrink: 0 }}>
-            {(item.ownership || []).map(o => <OwnBadge key={o} kind={o} />)}
-          </div>
-
-          {/* Supply bar */}
-          <SupplyBar supplyDays={supplyDays} urgency={item.urgency} />
-
-        </div>
-
-        {/* Prereq sub-line */}
-        <div style={{ paddingLeft: 40, marginTop: 3 }}>
-          <PrereqLine item={item} />
-        </div>
-      </div>
-
-      {isOpen && <QueueDetailExpanded item={item} calcItem={calcItem} />}
-    </>
-  );
-}
-
-function DoThisNextView() {
+function DoThisNextView({ jobs = [] }) {
   const { data: tpData, loading: tpLoading, error: tpError, refetch } =
     useApi(`${API}/api/top-performers`, []);
   const { data: calcData } = useApi(`${API}/api/calculator?system=Korsiki&facility=large`, []);
   const [expandedId,  setExpandedId]  = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
+  const [graduated,   setGraduated]  = useState([]);
+  const prevSciIds = useRef(new Set());
 
-  const items       = tpData?.items       || [];
-  const maxJobs     = tpData?.max_jobs    ?? 1;
-  const runningJobs = tpData?.running_jobs ?? 0;
-  const freeSlots   = tpData?.free_slots   ?? 0;
+  const items          = tpData?.items         || [];
+  const maxJobs        = tpData?.max_jobs       ?? 1;
+  const runningJobs    = tpData?.running_jobs   ?? 0;
+  const freeSlots      = tpData?.free_slots     ?? 0;
+  const maxScience     = tpData?.max_science    ?? 0;
+  const runningScience = tpData?.running_science ?? 0;
+  const freeScience    = tpData?.free_science   ?? 0;
+
+  // Map blueprint_id → active copy job (activity Copying, activity_id 5)
+  // product_type_id on a copy job = the blueprint's type_id (blueprint_id in our DB)
+  const copyJobMap = useMemo(() => {
+    const now = Math.floor(Date.now() / 1000);
+    const m = new Map();
+    jobs.forEach(j => {
+      if (j.activity === 'Copying' && j.end_ts > now) {
+        m.set(j.product_type_id, j.end_ts);
+      }
+    });
+    return m;
+  }, [jobs]);
+
+  const sciItems = useMemo(() => items.filter(i => i.action_type === 'copy_first'), [items]);
+  const mfgItems = useMemo(() => items.filter(i => i.action_type === 'manufacture'), [items]);
+  const maxIskHr = useMemo(
+    () => Math.max(1, ...items.map(i => i.adj_isk_per_hour ?? i.isk_per_hour ?? 0)),
+    [items],
+  );
 
   useEffect(() => {
-    if (tpData) setLastRefresh(Math.floor(Date.now() / 1000));
+    if (!tpData) return;
+    setLastRefresh(Math.floor(Date.now() / 1000));
+
+    // Detect items that graduated from SCI → MFG since last refresh
+    const newSciIds  = new Set(sciItems.map(i => i.output_id));
+    const mfgNameMap = new Map(mfgItems.map(i => [i.output_id, i.name]));
+    const grad = [];
+    prevSciIds.current.forEach(id => {
+      if (!newSciIds.has(id) && mfgNameMap.has(id)) grad.push(mfgNameMap.get(id));
+    });
+    if (grad.length) setGraduated(grad);
+    else setGraduated([]);
+    prevSciIds.current = newSciIds;
   }, [tpData]);
 
   const calcMap = useMemo(() => {
@@ -486,65 +797,86 @@ function DoThisNextView() {
     </div>
   );
 
-  const slotBarColor = freeSlots > 0 ? '#4cff91' : 'var(--accent)';
-  const nowSec = Math.floor(Date.now() / 1000);
-  const minsAgo = lastRefresh != null ? Math.floor((nowSec - lastRefresh) / 60) : null;
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
 
-      {/* Slot status + refresh header */}
-      <div style={{
-        padding: '5px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg2)',
-        display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
-      }}>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)' }}>SLOTS</span>
-        <div style={{ display: 'flex', gap: 3 }}>
-          {Array.from({ length: Math.max(maxJobs, 1) }).map((_, i) => (
-            <div key={i} style={{
-              width: 10, height: 10, borderRadius: 2,
-              background: i < runningJobs ? '#ff4700' : '#4cff91',
-              border: '1px solid rgba(255,255,255,0.08)',
-            }} title={i < runningJobs ? 'In use' : 'Free'} />
-          ))}
-        </div>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: slotBarColor }}>
-          {freeSlots > 0 ? `${freeSlots} FREE` : 'ALL SLOTS IN USE'}
-        </span>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>
-          {runningJobs}/{maxJobs}
-        </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-          {minsAgo != null && (
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>
-              {minsAgo === 0 ? 'just now' : `${minsAgo}m ago`}
-            </span>
-          )}
-          <button
-            onClick={refetch}
-            disabled={tpLoading}
-            style={{
-              background: 'none', border: 'none',
-              color: tpLoading ? 'var(--dim)' : 'var(--dim)',
-              fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
-              padding: 0, cursor: tpLoading ? 'default' : 'pointer',
-            }}
-          >{tpLoading ? '⟳ ...' : '⟳ REFRESH'}</button>
-        </div>
-      </div>
+      <SlotHeaderBar
+        maxJobs={maxJobs} runningJobs={runningJobs} freeSlots={freeSlots}
+        maxScience={maxScience} runningScience={runningScience} freeScience={freeScience}
+        lastRefresh={lastRefresh} loading={tpLoading} refetch={refetch}
+      />
 
-      {/* Priority action list */}
-      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-        {items.map((item, idx) => (
-          <QueueActionRow
-            key={item.output_id}
-            item={item}
-            idx={idx}
-            isOpen={expandedId === item.output_id}
-            onToggle={() => setExpandedId(expandedId === item.output_id ? null : item.output_id)}
-            calcItem={calcMap[item.output_id] || null}
+      {/* Two equal panes side-by-side, each independently scrollable */}
+      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+
+        {/* ── SCI QUEUE pane ── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: '1px solid var(--border)' }}>
+          <SectionHeader
+            label="SCI QUEUE" count={sciItems.length}
+            rightLabel="COPY FIRST"
+            accentColor="#4da6ff"
           />
-        ))}
+          <QueueColumnHeaders />
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+            <GraduatedStrip names={graduated} />
+            {sciItems.length > 0
+              ? sciItems.map((item, i) => (
+                  <QueueRow
+                    key={item.output_id}
+                    item={item}
+                    globalIdx={items.indexOf(item)}
+                    queueType="sci"
+                    hasSciSlot={i < freeScience}
+                    runningScience={runningScience}
+                    activeCopyEndTs={item.blueprint_id ? copyJobMap.get(item.blueprint_id) : undefined}
+                    isOpen={expandedId === item.output_id}
+                    onToggle={() => setExpandedId(expandedId === item.output_id ? null : item.output_id)}
+                    calcItem={calcMap[item.output_id] ?? item}
+                    maxIskHr={maxIskHr}
+                  />
+                ))
+              : (
+                <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 10, letterSpacing: 1.5, textAlign: 'center' }}>
+                  NO COPY JOBS NEEDED
+                </div>
+              )
+            }
+          </div>
+        </div>
+
+        {/* ── MFG QUEUE pane ── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <SectionHeader
+            label="MFG QUEUE" count={mfgItems.length}
+            rightLabel="READY TO INSTALL"
+            accentColor="#ff4700"
+          />
+          <QueueColumnHeaders />
+          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+            {mfgItems.length > 0
+              ? mfgItems.map(item => (
+                  <QueueRow
+                    key={item.output_id}
+                    item={item}
+                    globalIdx={items.indexOf(item)}
+                    queueType="mfg"
+                    hasSciSlot={false}
+                    runningScience={runningScience}
+                    isOpen={expandedId === item.output_id}
+                    onToggle={() => setExpandedId(expandedId === item.output_id ? null : item.output_id)}
+                    calcItem={calcMap[item.output_id] ?? item}
+                    maxIskHr={maxIskHr}
+                  />
+                ))
+              : (
+                <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 10, letterSpacing: 1.5, textAlign: 'center' }}>
+                  NO MFG JOBS QUEUED
+                </div>
+              )
+            }
+          </div>
+        </div>
+
       </div>
     </div>
   );
@@ -601,7 +933,7 @@ export default function ManufacturingJobs({ refreshKey = 0 }) {
           ? <TopPerformersPanel />
           : view === 'jobs'
             ? <ActiveJobsView data={data} loading={loading} error={error} />
-            : <DoThisNextView />
+            : <DoThisNextView jobs={jobs} />
         }
       </div>
     </div>
