@@ -1,6 +1,8 @@
-import { memo, useState, useRef, useCallback } from 'react';
+import { memo, useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { useClock } from '../hooks/useClock';
 import EveText from './EveText';
+
+const DROPDOWN_OPEN_WIDTH = 180;
 
 // Maps each tab ID to its top-level nav group
 const TAB_GROUP = {
@@ -46,56 +48,94 @@ const DROPDOWNS = {
   ],
 };
 
-function NavDropdown({ group, activeTab, onTabChange }) {
-  const items       = DROPDOWNS[group];
-  const isActive    = TAB_GROUP[activeTab] === group;
-  const closeTimer  = useRef(null);
-  const [open, setOpen] = useState(false);
+function NavTabContent({ text }) {
+  return (
+    <span className="nav-tab__content">
+      <span className="nav-tab__indicator" aria-hidden="true" />
+      <span className="nav-tab__label">
+        <EveText text={text} scramble={false} wave={false} />
+      </span>
+    </span>
+  );
+}
 
-  const handleMouseEnter = useCallback(() => {
-    if (closeTimer.current) { clearTimeout(closeTimer.current); closeTimer.current = null; }
-    setOpen(true);
-  }, []);
+function NavDropdown({ group, activeTab, onTabChange, openGroup, closingGroup, onEnter, onLeave }) {
+  const items    = DROPDOWNS[group];
+  const isActive = TAB_GROUP[activeTab] === group;
+  const isOpen   = openGroup === group;
+  const isClosing = closingGroup === group;
+  const sizerRef = useRef(null);
+  const [closedWidth, setClosedWidth] = useState(null);
+  const targetWidth = isOpen || isClosing ? DROPDOWN_OPEN_WIDTH : closedWidth;
 
-  const handleMouseLeave = useCallback(() => {
-    closeTimer.current = setTimeout(() => setOpen(false), 120);
-  }, []);
+  useLayoutEffect(() => {
+    if (!sizerRef.current) {
+      return;
+    }
+
+    setClosedWidth(Math.ceil(sizerRef.current.getBoundingClientRect().width));
+  }, [group]);
 
   return (
     <div
-      className="nav-dropdown"
-      onMouseEnter={handleMouseEnter}
-      onMouseLeave={handleMouseLeave}
+      className={`nav-dropdown${isOpen ? ' nav-dropdown--open' : ''}${isClosing ? ' nav-dropdown--closing' : ''}`}
+      style={targetWidth ? { width: targetWidth } : undefined}
+      onMouseEnter={() => onEnter(group)}
+      onMouseLeave={onLeave}
     >
       <button
-        className={`nav-tab${isActive ? ' active' : ''}`}
+        ref={sizerRef}
+        className="nav-tab nav-dropdown-sizer"
         style={{ fontSize: 16, fontWeight: 400, letterSpacing: 0 }}
-        onClick={() => setOpen(o => !o)}
+        tabIndex={-1}
+        aria-hidden="true"
       >
-        <EveText text={group} scramble={false} wave={false} />
-        <span style={{ marginLeft: 5, fontSize: 8, opacity: 0.6, verticalAlign: 'middle' }}>{'\u25BC'}</span>
+        <NavTabContent text={group} />
       </button>
-      {open && (
-        <div className="nav-dropdown-menu">
-          {items.map(({ id, label }) => (
-            <button
-              key={id}
-              className={`nav-dropdown-item${activeTab === id ? ' active' : ''}`}
-              onClick={() => { onTabChange(id); setOpen(false); }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
+      <button
+        className={`nav-tab nav-tab--dropdown${isActive ? ' active' : ''}`}
+        style={{ fontSize: 16, fontWeight: 400, letterSpacing: 0, width: '100%' }}
+        onClick={() => onTabChange(items[0].id)}
+      >
+        <NavTabContent text={group} />
+      </button>
+      <div className="nav-dropdown-menu">
+        {items.map(({ id, label }) => (
+          <button
+            key={id}
+            className={`nav-dropdown-item${activeTab === id ? ' active' : ''}`}
+            onClick={() => { onTabChange(id); onLeave(); }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
 
 export default memo(function Header({ online, activeTab, onTabChange, onRefresh, refreshing }) {
   const clock = useClock();
+  const [openGroup, setOpenGroup]     = useState(null);
+  const [closingGroup, setClosingGroup] = useState(null);
+  const closeTimer = useRef(null);
+
+  const handleEnter = (group) => {
+    clearTimeout(closeTimer.current);
+    setClosingGroup(null);
+    setOpenGroup(group);
+  };
+  const handleLeave = () => {
+    const wasOpen = openGroup;
+    setOpenGroup(null);           // immediately triggers CSS close transition on menu
+    setClosingGroup(wasOpen);     // keeps min-width wide during animation
+    closeTimer.current = setTimeout(() => setClosingGroup(null), 50);
+  };
+
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
+
   return (
-    <div id="crest-header" style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', alignItems: 'stretch' }}>
+    <div id="crest-header" style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gridTemplateRows: 'auto 1px', alignItems: 'stretch' }}>
 
       {/* Left: EVE clock */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 14 }}>
@@ -112,7 +152,7 @@ export default memo(function Header({ online, activeTab, onTabChange, onRefresh,
           onClick={() => onTabChange('OVERVIEW')}
           style={{ fontSize: 16, fontWeight: 400, letterSpacing: 0 }}
         >
-          <EveText text="OVERVIEW" scramble={false} wave={false} />
+          <NavTabContent text="OVERVIEW" />
         </button>
 
         {/* Dropdown menus */}
@@ -122,6 +162,10 @@ export default memo(function Header({ online, activeTab, onTabChange, onRefresh,
             group={group}
             activeTab={activeTab}
             onTabChange={onTabChange}
+            openGroup={openGroup}
+            closingGroup={closingGroup}
+            onEnter={handleEnter}
+            onLeave={handleLeave}
           />
         ))}
       </div>
@@ -142,8 +186,8 @@ export default memo(function Header({ online, activeTab, onTabChange, onRefresh,
         </button>
       </div>
 
-      {/* Accent line */}
-      <div className="eve-header-line" style={{ gridColumn: '1 / -1' }} />
+      {/* Accent line — explicit 2nd grid row, spans all columns */}
+      <div className="eve-header-line" style={{ gridColumn: '1 / -1', gridRow: 2 }} />
     </div>
   );
 });

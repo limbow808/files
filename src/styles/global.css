@@ -72,7 +72,7 @@ a, a:hover, button, button:hover { text-decoration: none; }
   align-items: stretch;
   justify-content: space-between;
   padding: 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 0px solid var(--accent);
   background: var(--header-bg);
   position: sticky;
   top: 0;
@@ -305,48 +305,104 @@ tr.row-selected td { color: #000; }
   align-items: center;
   justify-content: center;
   white-space: nowrap;
+  position: relative;
+  overflow: hidden;
 }
-/* Reserve space for the indicator square so inactive tabs don't shift */
-.nav-tab::before {
-  content: '';
+.nav-tab__content {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.nav-tab__indicator {
   width: 0;
-  height: 5px;
-  flex-shrink: 0;
-  background: transparent;
-  transition: width 0.1s, margin-right 0.1s;
+  height: 0.5em;
+  flex: 0 0 auto;
+  margin-right: 0;
+  background: #000;
+  opacity: 0;
+  transition:
+    width 0.24s cubic-bezier(0.16, 1, 0.3, 1),
+    margin-right 0.24s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.18s ease;
 }
 .nav-tab:hover { color: var(--text); }
-/* Active: small black square left of text, both centered in orange bg */
 .nav-tab.active {
   color: #000;
   background: var(--accent);
 }
-.nav-tab.active::before {
-  width: 5px;
-  height: 5px;
-  background: #000;
+.nav-tab.active .nav-tab__indicator {
+  width: 0.5em;
+  height: 0.5em;
+  opacity: 1;
   margin-right: 8px;
 }
 .nav-tab.active:hover { background: #E0E0E0; color: #000; }
-.nav-tab.active:hover::before { background: #000; }
+.nav-dropdown-sizer {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  width: auto !important;
+  inset: 0 auto auto 0;
+}
 
 /* ── Nav dropdowns (INDUSTRY / MARKET / LOGISTICS / SETTINGS) ───── */
 .nav-dropdown {
   position: relative;
   display: flex;
   align-items: stretch;
+  flex: 0 0 auto;
+  transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Transparent bridge covering the 1px accent-line gap so mouse doesn't exit the wrapper */
+.nav-dropdown--open::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 2px;
+}
+.nav-dropdown > .nav-tab { width: 100%; justify-content: flex-start; }
+.nav-tab--dropdown .nav-tab__content {
+  position: absolute;
+  top: 50%;
+  left: 22px;
+  transform: translateY(-50%);
+  transition:
+    left 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.nav-tab--dropdown.active .nav-tab__content {
+  left: 50%;
+  transform: translate(-50%, -50%);
 }
 .nav-dropdown-menu {
   position: absolute;
-  top: 100%;
+  top: calc(100% + 1px);
   left: 0;
   min-width: 180px;
   background: var(--bg2);
-  border: 1px solid var(--border);
-  border-top: none;
   display: flex;
   flex-direction: column;
-  z-index: 200;
+  z-index: 201;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity  0.3s cubic-bezier(0.16, 1, 0.3, 1),
+    transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
+}
+.nav-dropdown--open .nav-dropdown-menu {
+  pointer-events: auto;
+  opacity: 1;
+  transform: translateY(0);
+}
+/* Closing override — MUST come after --open rule and use compound selector for higher specificity */
+.nav-dropdown--open.nav-dropdown--closing .nav-dropdown-menu {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
 }
 .nav-dropdown-item {
   font-family: var(--mono);

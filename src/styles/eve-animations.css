@@ -206,17 +206,17 @@
    9. HEADER LINE-BUILD — accent line grows from center under header
    ══════════════════════════════════════════════════════════════════════ */
 @keyframes eveHeaderLine {
-  0%   { width: 0; left: 50%; }
-  100% { width: 100%; left: 0; }
+  0%   { transform: scaleX(0); }
+  100% { transform: scaleX(1); }
 }
 
 .eve-header-line {
-  position: absolute;
-  bottom: 0;
   height: 1px;
   background: var(--accent);
+  transform-origin: center;
   animation: eveHeaderLine 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
   pointer-events: none;
+  will-change: transform;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
