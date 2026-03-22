@@ -12,7 +12,7 @@
 :root {
   /* Primary surfaces */
   --bg:      #0d0d0d;     /* Main background */
-  --bg2:     #121212;     /* Secondary background */
+  --bg2:     #121212;     /* Secondary background (Item Cards, etc...)*/
   
   /* Text colors */
   --text:    #E0E0E0;     /* Primary text */
@@ -330,30 +330,29 @@ tr.row-selected td { color: #000; }
 .nav-tab.active:hover { background: #E0E0E0; color: #000; }
 .nav-tab.active:hover::before { background: #000; }
 
-/* ── Settings dropdown ──────────────────────────────────────────── */
-.settings-nav {
+/* ── Nav dropdowns (INDUSTRY / MARKET / LOGISTICS / SETTINGS) ───── */
+.nav-dropdown {
   position: relative;
   display: flex;
   align-items: stretch;
 }
-.settings-dropdown {
-  display: none;
+.nav-dropdown-menu {
   position: absolute;
   top: 100%;
   left: 0;
-  min-width: 160px;
+  min-width: 180px;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-top: none;
+  display: flex;
   flex-direction: column;
   z-index: 200;
 }
-.settings-nav:hover .settings-dropdown { display: flex; }
-.settings-item {
+.nav-dropdown-item {
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 400;
-  letter-spacing: 0;
+  letter-spacing: 0.5px;
   text-transform: uppercase;
   padding: 10px 22px;
   background: transparent;
@@ -364,8 +363,8 @@ tr.row-selected td { color: #000; }
   transition: color 0.12s, background 0.12s;
   white-space: nowrap;
 }
-.settings-item:hover { color: var(--text); background: rgba(255,71,0,0.08); }
-.settings-item.active { color: var(--accent); }
+.nav-dropdown-item:hover { color: var(--text); background: rgba(255,71,0,0.08); }
+.nav-dropdown-item.active { color: var(--accent); }
 
 /* ── Field tooltip (? icon hover) ──────────────────────────────── */
 span:hover > .field-tooltip { opacity: 1 !important; }

@@ -58,7 +58,7 @@ const LIST_COLS = [
  *   calcResults  - array from /api/calculator (already loaded by parent)
  *   esiBpMap     - { lowercaseName: {hasBPO, hasBPC} } from parent
  */
-export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEnabled = false, listLoading = false, onLoadList = null }) {
+export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEnabled = false, listLoading = false, onLoadList = null, initialScanView = null }) {
   const [listSortKey,  setListSortKey]  = useState(() => lsGet('bpf_listSort', 'net_profit'));
   const [scanSortKey,  setScanSortKey]  = useState(() => lsGet('bpf_scanSort', 'adj_net_profit'));
   const [region,       setRegion]       = useState(10000002);
@@ -74,7 +74,7 @@ export default function BpFinderPanel({ calcResults = [], esiBpMap = {}, listEna
   const [scanState,   setScanState]   = useState(_restoredResults != null ? 'done' : 'idle');
   const [scanResults, setScanResults] = useState(_restoredResults);
   const [scanError,   setScanError]   = useState('');
-  const [scanView,    setScanView]    = useState(_restoredResults != null);
+  const [scanView,    setScanView]    = useState(initialScanView ?? (_restoredResults != null));
   const [scanProgress, setScanProgress] = useState(null);
   const [showBpo,   setShowBpo]   = useState(true);
   const [showBpc,   setShowBpc]   = useState(true);

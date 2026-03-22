@@ -29,6 +29,7 @@ from database import (
     save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history,
     sync_open_orders, get_sell_history_stats,
     upsert_craft_jobs, get_craft_log, get_craft_stats,
+    get_sell_velocity_by_type_id,
 )
 import alert_scanner as _alert_scanner
 import contracts_cache as _cc
@@ -1335,10 +1336,21 @@ def api_top_performers():
     _upgrade_calc_payload_formula(best_payload)
     all_results = best_payload.get("results", [])
 
+    # ── Personal sell-velocity (percentile-based weighting) ──────────────────
+    personal_vel: dict = {}
+    try:
+        personal_vel = get_sell_velocity_by_type_id()
+    except Exception:
+        pass
+
     # ── Build owned blueprint_id sets (BPO vs BPC tracked separately) ─────────
     personal_bpo_bp_ids: set = set()   # personal BPOs — original, need copying
     personal_bpc_bp_ids: set = set()   # personal BPCs — ready to manufacture
     corp_bp_ids: set         = set()
+    # Per-type counts tracked separately so max_dups uses the correct pool
+    personal_bpo_count: dict[int, int] = {}  # type_id → # of personal BPOs in ESI
+    personal_bpc_count: dict[int, int] = {}  # type_id → # of personal BPCs in ESI
+    corp_bpo_count:     dict[int, int] = {}  # type_id → # of corp BPOs in ESI
 
     for bp in _ESI_BP_CACHE.get("blueprints", []):
         tid = bp.get("type_id")
@@ -1347,10 +1359,13 @@ def api_top_performers():
         if bp.get("owner") == "personal":
             if bp.get("bp_type") == "BPO" or bp.get("runs", -1) == -1:
                 personal_bpo_bp_ids.add(tid)
+                personal_bpo_count[tid] = personal_bpo_count.get(tid, 0) + 1
             else:
                 personal_bpc_bp_ids.add(tid)
+                personal_bpc_count[tid] = personal_bpc_count.get(tid, 0) + 1
         else:
             corp_bp_ids.add(tid)
+            corp_bpo_count[tid] = corp_bpo_count.get(tid, 0) + 1
 
     # Also treat any blueprint type found as a BPC in the assets cache as a personal BPC.
     # This catches BPCs the ESI blueprints endpoint may miss (e.g. location_flag edge cases).
@@ -1368,6 +1383,9 @@ def api_top_performers():
     personal_bpo_output_ids: set = set()
     personal_bpc_output_ids: set = set()
     corp_output_ids: set         = set()
+    # Per-output counts for duplicate cap — BPOs and BPCs tracked separately
+    bpo_count_by_output: dict[int, int] = {}  # output_id → # of copyable BPOs owned
+    bpc_count_by_output: dict[int, int] = {}  # output_id → # of BPCs in hand
 
     try:
         db_path = os.path.join(os.path.dirname(__file__), "crest.db")
@@ -1381,10 +1399,13 @@ def api_top_performers():
         for bp_id, out_id in rows:
             if bp_id in personal_bpo_bp_ids:
                 personal_bpo_output_ids.add(out_id)
+                bpo_count_by_output[out_id] = bpo_count_by_output.get(out_id, 0) + personal_bpo_count.get(bp_id, 0)
             if bp_id in personal_bpc_bp_ids:
                 personal_bpc_output_ids.add(out_id)
+                bpc_count_by_output[out_id] = bpc_count_by_output.get(out_id, 0) + personal_bpc_count.get(bp_id, 0)
             if bp_id in corp_bp_ids:
                 corp_output_ids.add(out_id)
+                bpo_count_by_output[out_id] = bpo_count_by_output.get(out_id, 0) + corp_bpo_count.get(bp_id, 1)
     except Exception as e:
         print(f"[top-performers] DB error: {e}")
 
@@ -1407,6 +1428,27 @@ def api_top_performers():
             _ct_db.close()
         except Exception:
             pass  # Column not yet seeded — frontend uses 68400s fallback
+
+    # ── Load invention metadata (blueprint_invention table) ───────────────────
+    invention_t2_bp_ids: set[int]      = set()
+    invention_t1_by_t2: dict[int, int] = {}
+    invention_meta: dict[int, dict]    = {}
+    try:
+        _inv_db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+        for _inv_row in _inv_db.execute(
+            "SELECT t2_blueprint_id, t1_blueprint_id, base_success_chance, output_runs_per_bpc "
+            "FROM blueprint_invention"
+        ).fetchall():
+            invention_t2_bp_ids.add(int(_inv_row[0]))
+            if _inv_row[1]:
+                invention_t1_by_t2[int(_inv_row[0])] = int(_inv_row[1])
+            invention_meta[int(_inv_row[0])] = {
+                "success_chance":      float(_inv_row[2] or 0.34),
+                "output_runs_per_bpc": int(_inv_row[3] or 10),
+            }
+        _inv_db.close()
+    except Exception:
+        pass  # blueprint_invention table may not exist yet
 
     # ── Live signal 1: sell order inventory (supply coverage) ─────────────────
     # Aggregate volume_remain per type_id across all open sell orders.
@@ -1632,6 +1674,40 @@ def api_top_performers():
             "material_breakdown":  r.get("material_breakdown", []),
         })
 
+    # ── Sell-velocity percentile factor ─────────────────────────────────────
+    # Items with personal sell history → ranked by avg_days_to_sell (real data).
+    # Items without → ranked by market-volume proxy (1 / avg_daily_volume).
+    # Percentile maps to multiplier: has-history [1.5→0.5], no-history [1.25→0.75].
+    def _vel_percentile_factors(group: list, lo: float, hi: float) -> dict:
+        if not group:
+            return {}
+        sorted_g = sorted(group, key=lambda x: x[1])
+        n = len(sorted_g)
+        out = {}
+        for rank, (idx, _) in enumerate(sorted_g):
+            pct = rank / max(1, n - 1)         # 0 = fastest, 1 = slowest
+            out[idx] = hi - (hi - lo) * pct    # hi at pct=0, lo at pct=1
+        return out
+
+    history_group = [
+        (i, personal_vel[c["output_id"]]["avg_days_to_sell"])
+        for i, c in enumerate(candidates)
+        if c["output_id"] in personal_vel
+    ]
+    nohist_group = [
+        (i, 1.0 / max(0.01, c["avg_daily_volume"]))
+        for i, c in enumerate(candidates)
+        if c["output_id"] not in personal_vel
+    ]
+    vel_factors: dict[int, float] = {}
+    vel_factors.update(_vel_percentile_factors(history_group, 0.5, 1.5))
+    vel_factors.update(_vel_percentile_factors(nohist_group,  0.75, 1.25))
+    for i, c in enumerate(candidates):
+        vf = vel_factors.get(i, 1.0)
+        c["_score"]           *= vf
+        c["_velocity_factor"]  = round(vf, 3)
+        c["_has_sell_history"] = c["output_id"] in personal_vel
+
     candidates.sort(key=lambda x: x["_score"], reverse=True)
 
     # ── Slot timeline from active ESI manufacturing jobs ──────────────────────
@@ -1642,37 +1718,125 @@ def api_top_performers():
     running_mfg  = len(mfg_end_times)
     max_jobs     = _get_max_jobs(running_fallback=running_mfg)
     free_slots   = max(0, max_jobs - running_mfg)
-    slot_free_at = mfg_end_times[:max_jobs]
 
     # ── Science (research) slots ───────────────────────────────────────────────
-    running_science  = sum(
-        1 for j in _ESI_JOBS_CACHE.get("jobs", [])
+    sci_end_times = sorted(
+        int(j["end_ts"]) for j in _ESI_JOBS_CACHE.get("jobs", [])
         if j.get("activity_id") in (3, 4, 5, 8) and j.get("end_ts", 0) > now_ts
     )
-    max_science      = _get_max_science_jobs(running_fallback=running_science)
-    free_science     = max(0, max_science - running_science)
+    running_science = len(sci_end_times)
+    max_science     = _get_max_science_jobs(running_fallback=running_science)
+    free_science    = max(0, max_science - running_science)
 
-    # ── Assign action_type + start_at per ranked item ─────────────────────────
-    items = []
-    mfg_queue_pos = 0
-    for r in candidates[:20]:
-        r.pop("_score", None)
-        if r.get("needs_copy"):
-            r["action_type"]    = "copy_first"
-            r["start_at"]       = now_ts
-            _copy_secs               = int((r.get("copy_time_secs") or 68400) * r.get("rec_runs", 1) * _COPY_TIME_MODIFIER)
-            r["manufacture_at"]      = now_ts + _copy_secs
-            r["estimated_copy_secs"] = _copy_secs
+    # ── Duplicate expansion ────────────────────────────────────────────────────
+    # Expand high-value candidates into multiple slots with a score decay.
+    # Gate: don't add a dup if sell_qty + planned >= rec_runs * SATURATE_MULT
+    # or if there is a stale order (market already soft).
+    DUPLICATE_DECAY = 0.70   # each duplicate gets score * 0.70^n
+    SATURATE_MULT   = 3      # max planned batches before saturation gate
+    STALE_DAYS_GATE = 7.0    # if stale_order_age > 7 days, skip duplicates
+    target_size     = max_science + max_jobs
+
+    expanded: list[dict]          = []
+    planned_qty_by_type: dict[int, int] = {}
+
+    for r in candidates:
+        out_id   = r["output_id"]
+        rec_runs = r.get("rec_runs", 1)
+        vol      = r.get("avg_daily_volume", 1) or 1
+        stale    = stale_order_age_by_type.get(out_id, 0.0)
+        sell_qty = sell_qty_by_type.get(out_id, 0)
+
+        # Always add the first entry
+        planned_qty_by_type[out_id] = planned_qty_by_type.get(out_id, 0) + rec_runs
+        entry = dict(r)
+        entry["duplicate_rank"] = 1
+        entry["_orig_score"]    = r["_score"]
+        expanded.append(entry)
+        if len(expanded) >= target_size:
+            break
+
+        # Duplicate cap: needs_copy → limited by # of BPOs (one copy job per BPO);
+        # ready-to-manufacture → limited by # of BPCs in hand.
+        _needs_copy = r.get("needs_copy", False)
+        if _needs_copy:
+            max_dups = max(0, bpo_count_by_output.get(out_id, 1) - 1)
         else:
-            r["action_type"] = "manufacture"
-            if mfg_queue_pos < free_slots:
-                r["start_at"] = now_ts
-            elif (mfg_queue_pos - free_slots) < len(slot_free_at):
-                r["start_at"] = int(slot_free_at[mfg_queue_pos - free_slots])
-            else:
-                r["start_at"] = now_ts
-            r["manufacture_at"] = r["start_at"]
-            mfg_queue_pos += 1
+            max_dups = max(0, bpc_count_by_output.get(out_id, 1) - 1)
+        dup_n = 0
+        while len(expanded) < target_size and dup_n < max_dups:
+            dup_n += 1
+            planned_so_far = planned_qty_by_type[out_id]
+            if planned_so_far + rec_runs > vol * SATURATE_MULT:
+                break
+            if stale > STALE_DAYS_GATE:
+                break
+            planned_qty_by_type[out_id] += rec_runs
+            dup = dict(r)
+            dup["duplicate_rank"] = dup_n + 1
+            dup["_orig_score"]    = r["_score"]
+            dup["_score"]         = r["_score"] * (DUPLICATE_DECAY ** dup_n)
+            expanded.append(dup)
+
+    # Re-sort after injection (duplicates naturally land below originals)
+    expanded.sort(key=lambda x: x["_score"], reverse=True)
+    # Quality floor: drop items scoring below MIN_SCORE_RATIO of the top item.
+    # Prevents weak candidates from padding slots when good options run out.
+    MIN_SCORE_RATIO = 0.04
+    if expanded:
+        _score_floor = expanded[0]["_score"] * MIN_SCORE_RATIO
+        expanded = [e for e in expanded if e["_score"] >= _score_floor]
+    expanded = expanded[:target_size]
+
+    # ── Split into sci vs mfg pools, capped at slot counts ────────────────────
+    sci_items_raw: list[dict] = []
+    mfg_items_raw: list[dict] = []
+    for r in expanded:
+        r.pop("_score",      None)
+        r.pop("_orig_score", None)
+        if r.get("needs_copy"):
+            sci_items_raw.append(r)
+        else:
+            mfg_items_raw.append(r)
+
+    sci_items_raw = sci_items_raw[:max_science]
+    mfg_items_raw = mfg_items_raw[:max_jobs]
+
+    # ── MFG slot pool: free slots first, then by release time ─────────────────
+    mfg_pool = sorted([now_ts] * free_slots + list(mfg_end_times))
+
+    # ── Assign action_type + start_at per item ────────────────────────────────
+    items = []
+
+    for r in sci_items_raw:
+        out_id         = r["output_id"]
+        bp_id          = r.get("blueprint_id") or blueprint_id_by_output.get(out_id)
+        copy_time_secs = r.get("copy_time_secs") or 0
+        rec_runs       = r.get("rec_runs", 1)
+        _copy_secs     = int((copy_time_secs or 68400) * rec_runs * _COPY_TIME_MODIFIER)
+
+        if bp_id and bp_id in invention_t2_bp_ids:
+            inv_meta = invention_meta.get(bp_id, {})
+            r["action_type"]              = "invent_first"
+            r["t1_blueprint_id"]          = invention_t1_by_t2.get(bp_id)
+            r["has_t1_bpc"]               = bool(
+                r.get("t1_blueprint_id") and r["t1_blueprint_id"] in personal_bpc_bp_ids
+            )
+            r["invention_success_chance"] = inv_meta.get("success_chance", 0.34)
+            r["inv_output_runs_per_bpc"]  = inv_meta.get("output_runs_per_bpc", 10)
+            r["estimated_invent_secs"]    = _copy_secs
+        else:
+            r["action_type"] = "copy_first"
+
+        r["start_at"]            = now_ts
+        r["manufacture_at"]      = now_ts + _copy_secs
+        r["estimated_copy_secs"] = _copy_secs
+        items.append(r)
+
+    for i, r in enumerate(mfg_items_raw):
+        r["action_type"]    = "manufacture"
+        r["start_at"]       = int(mfg_pool[i]) if i < len(mfg_pool) else now_ts
+        r["manufacture_at"] = r["start_at"]
         items.append(r)
 
     # ── Persist displayed queue items so footer mirrors Queue Planner exactly ─
@@ -1689,7 +1853,7 @@ def api_top_performers():
         "max_jobs":         max_jobs,
         "running_jobs":     running_mfg,
         "free_slots":       free_slots,
-        "slot_free_at":     slot_free_at,
+        "slot_free_at":     sorted(mfg_end_times[:max_jobs]),
         "max_science":      max_science,
         "running_science":  running_science,
         "free_science":     free_science,
@@ -4083,7 +4247,8 @@ def api_craft_log():
 def api_craft_stats():
     """Return aggregated craft profitability stats from the local DB."""
     try:
-        pass  # request already imported at top
+        # Sync orders first so sold-out listings are recorded before we read revenue.
+        _refresh_orders_if_stale()
         days = int(request.args.get("days", 90))
         return jsonify(get_craft_stats(days=days))
     except Exception as e:
@@ -4363,6 +4528,162 @@ def api_queue_summary():
 
 
 # ── Character Market Orders ────────────────────────────────────────────────────
+def _refresh_orders() -> dict:
+    """
+    Fetch fresh orders from ESI for all characters, enrich with market position,
+    run sync_open_orders to record fulfilled sales, and update the cache.
+    Returns the new cache dict {sell, buy, newly_fulfilled}.
+    """
+    global _ESI_ORDERS_CACHE, _ESI_ORDERS_CACHE_TS, _LAST_SELL_POS_BY_ORDER
+
+    from characters import get_all_auth_headers, load_characters
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import requests as req
+
+    char_records = load_characters()
+    auth_headers = get_all_auth_headers()
+
+    # ── Parallel fetch: orders for all chars at once ──
+    def _fetch_char_orders(cid, headers):
+        char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+        orders = []
+        try:
+            resp = req.get(
+                f"https://esi.evetech.net/latest/characters/{cid}/orders/",
+                headers=headers, timeout=15,
+            )
+            if resp.ok:
+                for o in resp.json():
+                    o["_character_id"]   = cid
+                    o["_character_name"] = char_name
+                    orders.append(o)
+        except Exception as e:
+            print(f"  [orders] Failed for {char_name}: {e}")
+        return orders
+
+    all_orders = []
+    with ThreadPoolExecutor(max_workers=max(1, len(auth_headers))) as pool:
+        futures = [pool.submit(_fetch_char_orders, cid, h) for cid, h in auth_headers]
+        for f in as_completed(futures):
+            all_orders.extend(f.result())
+
+    if not all_orders:
+        return {"sell": [], "buy": [], "newly_fulfilled": []}
+
+    # Resolve type names
+    type_ids = list({o["type_id"] for o in all_orders})
+    names = {}
+    try:
+        for i in range(0, len(type_ids), 1000):
+            nr = req.post(
+                "https://esi.evetech.net/latest/universe/names/",
+                json=type_ids[i:i+1000], timeout=10,
+            )
+            if nr.ok:
+                for item in nr.json():
+                    names[item["id"]] = item["name"]
+    except Exception:
+        pass
+
+    # Resolve region names
+    region_ids = list({o.get("region_id") for o in all_orders if o.get("region_id")})
+    region_names = {}
+    if region_ids:
+        try:
+            rr = req.post(
+                "https://esi.evetech.net/latest/universe/names/",
+                json=region_ids[:100], timeout=10,
+            )
+            if rr.ok:
+                for item in rr.json():
+                    region_names[item["id"]] = item["name"]
+        except Exception:
+            pass
+
+    sell, buy = [], []
+    for o in all_orders:
+        enriched = {
+            "order_id":       o.get("order_id"),
+            "type_id":        o.get("type_id"),
+            "type_name":      names.get(o["type_id"], f"Type {o['type_id']}"),
+            "price":          o.get("price", 0),
+            "volume_remain":  o.get("volume_remain", 0),
+            "volume_total":   o.get("volume_total", 0),
+            "range":          o.get("range", ""),
+            "is_buy_order":   o.get("is_buy_order", False),
+            "issued":         o.get("issued", ""),
+            "duration":       o.get("duration", 0),
+            "escrow":         o.get("escrow", 0),
+            "region_name":    region_names.get(o.get("region_id"), ""),
+            "character_id":   o["_character_id"],
+            "character_name": o["_character_name"],
+        }
+        (buy if o.get("is_buy_order") else sell).append(enriched)
+
+    sell.sort(key=lambda x: x["price"] * x["volume_remain"], reverse=True)
+    buy.sort(key=lambda x: x["escrow"], reverse=True)
+
+    # ── Enrich sell orders with market position + competitor count ─────────
+    # market_position   = cheaper sell orders ahead (0 = best price)
+    # competitor_count  = ALL sell listings for the type (supply depth)
+    try:
+        import sqlite3 as _sq
+        db_path = os.path.join(_HERE, "market_cache.db")
+        if os.path.exists(db_path):
+            conn = _sq.connect(db_path)
+            new_pos_by_order: dict[int, int] = {}
+            for o in sell:
+                tid   = o["type_id"]
+                price = o["price"]
+                cheaper_row = conn.execute(
+                    "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0 AND price < ?",
+                    (tid, price),
+                ).fetchone()
+                total_row = conn.execute(
+                    "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0",
+                    (tid,),
+                ).fetchone()
+                pos = int(cheaper_row[0]) if cheaper_row else None
+                o["market_position"]  = pos
+                o["competitor_count"] = int(total_row[0])   if total_row   else 0
+
+                oid = o.get("order_id")
+                prev_pos = _LAST_SELL_POS_BY_ORDER.get(oid) if oid else None
+                o["market_position_prev"] = prev_pos
+                if pos is None or prev_pos is None or pos == prev_pos:
+                    o["market_position_trend"] = None
+                else:
+                    o["market_position_trend"] = "increasing" if pos > prev_pos else "decreasing"
+
+                if oid and pos is not None:
+                    new_pos_by_order[oid] = pos
+            _LAST_SELL_POS_BY_ORDER = new_pos_by_order
+            conn.close()
+    except Exception as _e:
+        print(f"  [orders] market_position lookup failed: {_e}")
+
+    # ── Diff sell orders against stored snapshot ───────────────────────────
+    # Only track sell orders — buy orders don't generate revenue events.
+    newly_fulfilled = []
+    try:
+        newly_fulfilled = sync_open_orders(sell)
+    except Exception as e:
+        print(f"  [orders] sync_open_orders failed: {e}")
+
+    _ESI_ORDERS_CACHE = {"sell": sell, "buy": buy, "newly_fulfilled": newly_fulfilled}
+    _ESI_ORDERS_CACHE_TS = time.time()
+    return _ESI_ORDERS_CACHE
+
+
+def _refresh_orders_if_stale() -> None:
+    """Trigger a fresh ESI order sync if the cache is stale. Silently ignores errors."""
+    if not _ESI_ORDERS_CACHE or (time.time() - _ESI_ORDERS_CACHE_TS) >= _ESI_ORDERS_TTL:
+        try:
+            _refresh_orders()
+        except Exception as _e:
+            print(f"  [orders] background sync failed: {_e}")
+
+
 @app.route("/api/orders", methods=["GET"])
 def api_orders():
     """
@@ -4373,149 +4694,10 @@ def api_orders():
     """
     global _ESI_ORDERS_CACHE, _ESI_ORDERS_CACHE_TS, _LAST_SELL_POS_BY_ORDER
     try:
-        pass  # request already imported at top
         force = request.args.get("force", "0") == "1"
         if not force and _ESI_ORDERS_CACHE and (time.time() - _ESI_ORDERS_CACHE_TS) < _ESI_ORDERS_TTL:
             return jsonify(_ESI_ORDERS_CACHE)
-
-        from characters import get_all_auth_headers, load_characters
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import requests as req
-
-        char_records = load_characters()
-        auth_headers = get_all_auth_headers()
-
-        # ── Parallel fetch: orders for all chars at once ──
-        def _fetch_char_orders(cid, headers):
-            char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
-            orders = []
-            try:
-                resp = req.get(
-                    f"https://esi.evetech.net/latest/characters/{cid}/orders/",
-                    headers=headers, timeout=15,
-                )
-                if resp.ok:
-                    for o in resp.json():
-                        o["_character_id"]   = cid
-                        o["_character_name"] = char_name
-                        orders.append(o)
-            except Exception as e:
-                print(f"  [orders] Failed for {char_name}: {e}")
-            return orders
-
-        all_orders = []
-        with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
-            futures = [pool.submit(_fetch_char_orders, cid, h) for cid, h in auth_headers]
-            for f in as_completed(futures):
-                all_orders.extend(f.result())
-
-        if not all_orders:
-            return jsonify({"sell": [], "buy": [], "newly_fulfilled": []})
-
-        # Resolve type names
-        type_ids = list({o["type_id"] for o in all_orders})
-        names = {}
-        try:
-            for i in range(0, len(type_ids), 1000):
-                nr = req.post(
-                    "https://esi.evetech.net/latest/universe/names/",
-                    json=type_ids[i:i+1000], timeout=10,
-                )
-                if nr.ok:
-                    for item in nr.json():
-                        names[item["id"]] = item["name"]
-        except Exception:
-            pass
-
-        # Resolve region names
-        region_ids = list({o.get("region_id") for o in all_orders if o.get("region_id")})
-        region_names = {}
-        if region_ids:
-            try:
-                rr = req.post(
-                    "https://esi.evetech.net/latest/universe/names/",
-                    json=region_ids[:100], timeout=10,
-                )
-                if rr.ok:
-                    for item in rr.json():
-                        region_names[item["id"]] = item["name"]
-            except Exception:
-                pass
-
-        sell, buy = [], []
-        for o in all_orders:
-            enriched = {
-                "order_id":       o.get("order_id"),
-                "type_id":        o.get("type_id"),
-                "type_name":      names.get(o["type_id"], f"Type {o['type_id']}"),
-                "price":          o.get("price", 0),
-                "volume_remain":  o.get("volume_remain", 0),
-                "volume_total":   o.get("volume_total", 0),
-                "range":          o.get("range", ""),
-                "is_buy_order":   o.get("is_buy_order", False),
-                "issued":         o.get("issued", ""),
-                "duration":       o.get("duration", 0),
-                "escrow":         o.get("escrow", 0),
-                "region_name":    region_names.get(o.get("region_id"), ""),
-                "character_id":   o["_character_id"],
-                "character_name": o["_character_name"],
-            }
-            (buy if o.get("is_buy_order") else sell).append(enriched)
-
-        sell.sort(key=lambda x: x["price"] * x["volume_remain"], reverse=True)
-        buy.sort(key=lambda x: x["escrow"], reverse=True)
-
-        # ── Enrich sell orders with market position + competitor count ─────────
-        # market_position   = cheaper sell orders ahead (0 = best price)
-        # competitor_count  = ALL sell listings for the type (supply depth)
-        try:
-            import sqlite3 as _sq
-            db_path = os.path.join(_HERE, "market_cache.db")
-            if os.path.exists(db_path):
-                conn = _sq.connect(db_path)
-                new_pos_by_order: dict[int, int] = {}
-                for o in sell:
-                    tid   = o["type_id"]
-                    price = o["price"]
-                    cheaper_row = conn.execute(
-                        "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0 AND price < ?",
-                        (tid, price),
-                    ).fetchone()
-                    total_row = conn.execute(
-                        "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0",
-                        (tid,),
-                    ).fetchone()
-                    pos = int(cheaper_row[0]) if cheaper_row else None
-                    o["market_position"]  = pos
-                    o["competitor_count"] = int(total_row[0])   if total_row   else 0
-
-                    oid = o.get("order_id")
-                    prev_pos = _LAST_SELL_POS_BY_ORDER.get(oid) if oid else None
-                    o["market_position_prev"] = prev_pos
-                    if pos is None or prev_pos is None or pos == prev_pos:
-                        o["market_position_trend"] = None
-                    else:
-                        o["market_position_trend"] = "increasing" if pos > prev_pos else "decreasing"
-
-                    if oid and pos is not None:
-                        new_pos_by_order[oid] = pos
-                _LAST_SELL_POS_BY_ORDER = new_pos_by_order
-                conn.close()
-        except Exception as _e:
-            print(f"  [orders] market_position lookup failed: {_e}")
-
-        # ── Diff sell orders against stored snapshot ───────────────────────────
-        # Only track sell orders — buy orders don't generate revenue events.
-        newly_fulfilled = []
-        try:
-            newly_fulfilled = sync_open_orders(sell)
-        except Exception as e:
-            print(f"  [orders] sync_open_orders failed: {e}")
-
-        _ESI_ORDERS_CACHE = {"sell": sell, "buy": buy, "newly_fulfilled": newly_fulfilled}
-        _ESI_ORDERS_CACHE_TS = time.time()
-        return jsonify(_ESI_ORDERS_CACHE)
-
+        return jsonify(_refresh_orders())
     except Exception as e:
         return jsonify({"error": str(e), "sell": [], "buy": [], "newly_fulfilled": []}), 200
 

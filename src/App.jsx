@@ -3,9 +3,18 @@ import Header from './components/Header';
 import OverviewPage from './pages/OverviewPage';
 import CalculatorPage from './pages/CalculatorPage';
 import CharactersPage from './pages/CharactersPage';
-import BpFinderPage from './pages/BpFinderPage';
 import CraftLogPage from './pages/CraftLogPage';
 import MessagesPage from './pages/MessagesPage';
+import QueuePlannerPage from './pages/QueuePlannerPage';
+import TopPerformersPage from './pages/TopPerformersPage';
+import ContractScannerPage from './pages/ContractScannerPage';
+import BlueprintsPage from './pages/BlueprintsPage';
+import OrdersPage from './pages/OrdersPage';
+import InventoryPage from './pages/InventoryPage';
+import ResearchPage from './pages/ResearchPage';
+import InventionPage from './pages/InventionPage';
+import MineralPricesPage from './pages/MineralPricesPage';
+import HaulPlannerPage from './pages/HaulPlannerPage';
 import BootScreen from './components/BootScreen';
 import { useApi } from './hooks/useApi';
 
@@ -92,24 +101,69 @@ export default function App() {
               refreshKey={refreshKey}
             />
           </div>
-          {mountedTabs.has('CALCULATOR') && (
-            <div style={{ display: activeTab === 'CALCULATOR' ? 'contents' : 'none' }}>
+          {mountedTabs.has('MANUFACTURING') && (
+            <div style={{ display: activeTab === 'MANUFACTURING' ? 'contents' : 'none' }}>
               <CalculatorPage refreshKey={refreshKey} />
             </div>
           )}
-          {mountedTabs.has('CHARACTERS') && (
-            <div style={{ display: activeTab === 'CHARACTERS' ? 'contents' : 'none' }}>
-              <CharactersPage />
+          {mountedTabs.has('QUEUE_PLANNER') && (
+            <div style={{ display: activeTab === 'QUEUE_PLANNER' ? 'contents' : 'none' }}>
+              <QueuePlannerPage />
             </div>
           )}
-          {mountedTabs.has('BP FINDER') && (
-            <div style={{ display: activeTab === 'BP FINDER' ? 'contents' : 'none' }}>
-              <BpFinderPage refreshKey={refreshKey} />
+          {mountedTabs.has('TOP_PERFORMERS') && (
+            <div style={{ display: activeTab === 'TOP_PERFORMERS' ? 'contents' : 'none' }}>
+              <TopPerformersPage />
+            </div>
+          )}
+          {mountedTabs.has('RESEARCH') && (
+            <div style={{ display: activeTab === 'RESEARCH' ? 'contents' : 'none' }}>
+              <ResearchPage />
+            </div>
+          )}
+          {mountedTabs.has('INVENTION') && (
+            <div style={{ display: activeTab === 'INVENTION' ? 'contents' : 'none' }}>
+              <InventionPage />
+            </div>
+          )}
+          {mountedTabs.has('BLUEPRINTS') && (
+            <div style={{ display: activeTab === 'BLUEPRINTS' ? 'contents' : 'none' }}>
+              <BlueprintsPage refreshKey={refreshKey} />
+            </div>
+          )}
+          {mountedTabs.has('CONTRACT_SCANNER') && (
+            <div style={{ display: activeTab === 'CONTRACT_SCANNER' ? 'contents' : 'none' }}>
+              <ContractScannerPage refreshKey={refreshKey} />
             </div>
           )}
           {mountedTabs.has('REVENUE') && (
             <div style={{ display: activeTab === 'REVENUE' ? 'contents' : 'none' }}>
               <CraftLogPage />
+            </div>
+          )}
+          {mountedTabs.has('ORDERS') && (
+            <div style={{ display: activeTab === 'ORDERS' ? 'contents' : 'none' }}>
+              <OrdersPage />
+            </div>
+          )}
+          {mountedTabs.has('MINERAL_PRICES') && (
+            <div style={{ display: activeTab === 'MINERAL_PRICES' ? 'contents' : 'none' }}>
+              <MineralPricesPage />
+            </div>
+          )}
+          {mountedTabs.has('HAUL_PLANNER') && (
+            <div style={{ display: activeTab === 'HAUL_PLANNER' ? 'contents' : 'none' }}>
+              <HaulPlannerPage />
+            </div>
+          )}
+          {mountedTabs.has('INVENTORY') && (
+            <div style={{ display: activeTab === 'INVENTORY' ? 'contents' : 'none' }}>
+              <InventoryPage />
+            </div>
+          )}
+          {mountedTabs.has('CHARACTERS') && (
+            <div style={{ display: activeTab === 'CHARACTERS' ? 'contents' : 'none' }}>
+              <CharactersPage />
             </div>
           )}
           {mountedTabs.has('MESSAGES') && (

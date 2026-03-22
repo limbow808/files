@@ -272,6 +272,33 @@ def get_avg_days_to_sell_by_type() -> Dict[int, float]:
     return {r["type_id"]: r["avg_days"] for r in cur.fetchall() if r["avg_days"] is not None}
 
 
+def get_sell_velocity_by_type_id() -> Dict[int, Dict[str, Any]]:
+    """
+    Return sell-velocity stats per type_id from sell_order_history.
+    Used by the queue planner to weight items by personal sell speed.
+
+    Returns dict[type_id, {"avg_days_to_sell": float, "total_sold": int}]
+    """
+    init_db()
+    conn = _get_conn()
+    cur  = conn.cursor()
+    cur.execute(
+        """
+        SELECT type_id, AVG(days_to_sell) AS avg_days, COUNT(*) AS total_sold
+        FROM sell_order_history
+        GROUP BY type_id
+        """
+    )
+    return {
+        r["type_id"]: {
+            "avg_days_to_sell": round(r["avg_days"], 4),
+            "total_sold":       r["total_sold"],
+        }
+        for r in cur.fetchall()
+        if r["avg_days"] is not None
+    }
+
+
 def get_fill_rate_7d() -> Dict[str, Any]:
     """
     Return 7-day sell-order fill rate.
