@@ -6,7 +6,7 @@ const DROPDOWN_OPEN_WIDTH = 180;
 
 // Maps each tab ID to its top-level nav group
 const TAB_GROUP = {
-  OVERVIEW:          'OVERVIEW',
+  OVERVIEW:          'INDUSTRY',
   QUEUE_PLANNER:     'INDUSTRY',
   TOP_PERFORMERS:    'INDUSTRY',
   MANUFACTURING:     'INDUSTRY',
@@ -25,33 +25,84 @@ const TAB_GROUP = {
 
 const DROPDOWNS = {
   INDUSTRY: [
-    { id: 'QUEUE_PLANNER',    label: 'Queue Planner'    },
-    { id: 'TOP_PERFORMERS',   label: 'Top Performers'   },
-    { id: 'MANUFACTURING',    label: 'Manufacturing'    },
-    { id: 'RESEARCH',         label: 'Research'         },
-    { id: 'INVENTION',        label: 'Invention'        },
-    { id: 'BLUEPRINTS',       label: 'Blueprints'       },
-    { id: 'CONTRACT_SCANNER', label: 'Contract Scanner' },
+    {
+      title: 'Dashboard',
+      items: [
+        { id: 'OVERVIEW', label: 'Overview' },
+      ],
+    },
+    {
+      title: 'Planning',
+      items: [
+        { id: 'QUEUE_PLANNER',  label: 'Queue Planner'  },
+        { id: 'TOP_PERFORMERS', label: 'Top Performers' },
+      ],
+    },
+    {
+      title: 'Calculators',
+      items: [
+        { id: 'MANUFACTURING', label: 'Manufacturing' },
+        { id: 'RESEARCH',      label: 'Research'      },
+        { id: 'INVENTION',     label: 'Invention'     },
+      ],
+    },
+    {
+      title: 'Blueprints',
+      items: [
+        { id: 'BLUEPRINTS',       label: 'Blueprints'       },
+        { id: 'CONTRACT_SCANNER', label: 'Contract Scanner' },
+      ],
+    },
   ],
   MARKET: [
-    { id: 'REVENUE',        label: 'Revenue'        },
-    { id: 'ORDERS',         label: 'Orders'         },
-    { id: 'MINERAL_PRICES', label: 'Mineral Prices' },
+    {
+      title: 'Performance',
+      items: [
+        { id: 'REVENUE', label: 'Revenue' },
+        { id: 'ORDERS',  label: 'Orders'  },
+      ],
+    },
+    {
+      title: 'Inputs',
+      items: [
+        { id: 'MINERAL_PRICES', label: 'Mineral Prices' },
+      ],
+    },
   ],
   LOGISTICS: [
-    { id: 'HAUL_PLANNER', label: 'Haul Planner' },
-    { id: 'INVENTORY',    label: 'Inventory'    },
+    {
+      title: 'Routing',
+      items: [
+        { id: 'HAUL_PLANNER', label: 'Haul Planner' },
+      ],
+    },
+    {
+      title: 'Storage',
+      items: [
+        { id: 'INVENTORY', label: 'Inventory' },
+      ],
+    },
   ],
   SETTINGS: [
-    { id: 'CHARACTERS', label: 'Characters' },
-    { id: 'MESSAGES',   label: 'Messages'   },
+    {
+      title: 'Profiles',
+      items: [
+        { id: 'CHARACTERS', label: 'Characters' },
+      ],
+    },
+    {
+      title: 'Messages',
+      items: [
+        { id: 'MESSAGES', label: 'Messages' },
+      ],
+    },
   ],
 };
 
-function NavTabContent({ text }) {
+function NavTabContent({ text, indicatorKey }) {
   return (
     <span className="nav-tab__content">
-      <span className="nav-tab__indicator" aria-hidden="true" />
+      <span key={indicatorKey} className="nav-tab__indicator" aria-hidden="true" />
       <span className="nav-tab__label">
         <EveText text={text} scramble={false} wave={false} />
       </span>
@@ -60,13 +111,19 @@ function NavTabContent({ text }) {
 }
 
 function NavDropdown({ group, activeTab, onTabChange, openGroup, closingGroup, onEnter, onLeave }) {
-  const items    = DROPDOWNS[group];
+  const sections = DROPDOWNS[group];
+  const firstItemId = sections[0]?.items?.[0]?.id;
   const isActive = TAB_GROUP[activeTab] === group;
   const isOpen   = openGroup === group;
   const isClosing = closingGroup === group;
+  const activeItemLabel = sections
+    .flatMap(section => section.items)
+    .find(item => item.id === activeTab)?.label;
+  const buttonText = activeItemLabel ?? group;
   const sizerRef = useRef(null);
   const [closedWidth, setClosedWidth] = useState(null);
-  const targetWidth = isOpen || isClosing ? DROPDOWN_OPEN_WIDTH : closedWidth;
+  const openWidth = Math.max(DROPDOWN_OPEN_WIDTH, closedWidth ?? 0);
+  const targetWidth = isOpen || isClosing ? openWidth : closedWidth;
 
   useLayoutEffect(() => {
     if (!sizerRef.current) {
@@ -74,7 +131,7 @@ function NavDropdown({ group, activeTab, onTabChange, openGroup, closingGroup, o
     }
 
     setClosedWidth(Math.ceil(sizerRef.current.getBoundingClientRect().width));
-  }, [group]);
+  }, [buttonText]);
 
   return (
     <div
@@ -90,24 +147,32 @@ function NavDropdown({ group, activeTab, onTabChange, openGroup, closingGroup, o
         tabIndex={-1}
         aria-hidden="true"
       >
-        <NavTabContent text={group} />
+        <NavTabContent text={buttonText} />
       </button>
       <button
         className={`nav-tab nav-tab--dropdown${isActive ? ' active' : ''}`}
         style={{ fontSize: 16, fontWeight: 400, letterSpacing: 0, width: '100%' }}
-        onClick={() => onTabChange(items[0].id)}
+        onClick={() => firstItemId && onTabChange(firstItemId)}
       >
-        <NavTabContent text={group} />
+        <NavTabContent text={buttonText} indicatorKey={buttonText} />
       </button>
       <div className="nav-dropdown-menu">
-        {items.map(({ id, label }) => (
-          <button
-            key={id}
-            className={`nav-dropdown-item${activeTab === id ? ' active' : ''}`}
-            onClick={() => { onTabChange(id); onLeave(); }}
-          >
-            {label}
-          </button>
+        {sections.map(({ title, items }) => (
+          <div className="nav-dropdown-section" key={title}>
+            <div className="nav-dropdown-section-head">
+              <span className="nav-dropdown-section-title">{title}</span>
+              <span className="nav-dropdown-section-divider" aria-hidden="true" />
+            </div>
+            {items.map(({ id, label }) => (
+              <button
+                key={id}
+                className={`nav-dropdown-item${activeTab === id ? ' active' : ''}`}
+                onClick={() => { onTabChange(id); onLeave(); }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         ))}
       </div>
     </div>
@@ -146,15 +211,6 @@ export default memo(function Header({ online, activeTab, onTabChange, onRefresh,
 
       {/* Center: Nav */}
       <div className="nav-bar">
-        {/* Overview — direct link */}
-        <button
-          className={`nav-tab${activeTab === 'OVERVIEW' ? ' active' : ''}`}
-          onClick={() => onTabChange('OVERVIEW')}
-          style={{ fontSize: 16, fontWeight: 400, letterSpacing: 0 }}
-        >
-          <NavTabContent text="OVERVIEW" />
-        </button>
-
         {/* Dropdown menus */}
         {['INDUSTRY', 'MARKET', 'LOGISTICS', 'SETTINGS'].map(group => (
           <NavDropdown
