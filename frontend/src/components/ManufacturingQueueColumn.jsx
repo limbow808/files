@@ -1,0 +1,297 @@
+import { memo, useCallback } from 'react';
+import { fmtISK } from '../utils/fmt';
+
+function formatSeconds(seconds) {
+  if (!seconds) return '—';
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`;
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;
+  return `${(seconds / 86400).toFixed(1)}d`;
+}
+
+function formatCountdown(targetTs) {
+  const secs = Math.max(0, targetTs - Math.floor(Date.now() / 1000));
+  if (secs <= 0) return 'NOW';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+}
+
+function Flag({ label, bg, color = '#000' }) {
+  return (
+    <span style={{
+      fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 0.5,
+      padding: '2px 6px', borderRadius: 2, background: bg, color, fontWeight: 700, flexShrink: 0,
+    }}>{label}</span>
+  );
+}
+
+function DetailRow({ label, value }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 11, borderBottom: '1px solid #0d0d0d' }}>
+      <span style={{ color: 'var(--dim)', letterSpacing: 0.3 }}>{label}</span>
+      <span style={{ fontFamily: 'var(--mono)', color: 'var(--text)' }}>{value}</span>
+    </div>
+  );
+}
+
+function DetailBlock({ label, value, color = 'var(--dim)' }) {
+  if (!value) return null;
+  return (
+    <div style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(255,255,255,0.03)', border: '1px solid #0d0d0d', borderRadius: 2 }}>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color, letterSpacing: 0.8, marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 11, color: 'var(--text)', lineHeight: 1.5 }}>{value}</div>
+    </div>
+  );
+}
+
+function DetailSection({ title, color = 'var(--dim)', children }) {
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0d0d0d' }}>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color, marginBottom: 4 }}>
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function fmtPct(value, digits = 2) {
+  const num = Number(value || 0);
+  const sign = num > 0 ? '+' : '';
+  return `${sign}${num.toFixed(digits)}%`;
+}
+
+function SlotGroupHeader({ startAt, slotFreedBy }) {
+  const isNow = !startAt || startAt <= Math.floor(Date.now() / 1000) + 30;
+  if (isNow) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '5px 10px', background: 'var(--bg)', borderBottom: '1px solid #0d0d0d',
+      }}>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: '#4cff91', fontWeight: 700 }}>START NOW</span>
+        <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #4cff9166, transparent)' }} />
+      </div>
+    );
+  }
+  const date = new Date(startAt * 1000);
+  const hhmm = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const countdown = formatCountdown(startAt);
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '5px 10px', background: 'var(--bg)', borderTop: '1px solid #0d0d0d', borderBottom: '1px solid #0d0d0d',
+    }}>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: '#ff9d3d', fontWeight: 700 }}>{hhmm}</span>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'rgba(255,157,61,0.8)', letterSpacing: 0.4 }}>
+        {slotFreedBy ? `slot freed after: ${slotFreedBy}` : 'slot available'}
+      </span>
+      <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #ff9d3d44, transparent)' }} />
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>{countdown}</span>
+    </div>
+  );
+}
+
+const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfgSlot, cycleConfig, isOpen, onToggle, checked, onCheck }) {
+  const profitPerCycle = item.profit_per_cycle || item.net_profit || 0;
+  const runsPerCycle = item.runs_per_cycle || 1;
+  const cycleWindowFit = item.cycle_window_fit || 'fits';
+  const saturationPct = item.market_saturation_pct || 0;
+  const daysToSell = item.days_to_sell || 0;
+  const exceeds = cycleWindowFit === 'exceeds';
+  const belowThreshold = !item.passes_profit_filter;
+  const saturated = !item.passes_saturation_filter;
+  const matReady = item.mats_ready !== false;
+  const capitalWarn = item.capital_warning === true;
+  const profitM = (profitPerCycle / 1_000_000).toFixed(1);
+  const missingMatCost = Number(item.missing_mats_est_cost || 0);
+  const batchRuns = Math.max(1, Number(item.rec_runs || item.runs_per_cycle || 1));
+  const jobCost = Number(item.job_cost || 0);
+  const jc = item.job_cost_breakdown;
+  const scaleCost = (value) => fmtISK(Number(value || 0));
+
+  const handleCheck = useCallback((e) => {
+    e.stopPropagation();
+    onCheck?.(!checked);
+  }, [checked, onCheck]);
+
+  return (
+    <div style={{ borderBottom: '1px solid #0d0d0d' }}>
+      <div
+        style={{
+          display: 'flex', flexDirection: 'column', padding: '6px 10px',
+          cursor: 'pointer', background: 'var(--table-row-bg)',
+          opacity: belowThreshold || saturated ? 0.6 : 1,
+        }}
+        onClick={onToggle}
+        onMouseEnter={e => { e.currentTarget.style.filter = 'brightness(1.15)'; }}
+        onMouseLeave={e => { e.currentTarget.style.filter = ''; }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          {/* Checkbox */}
+          <div onClick={handleCheck} style={{ flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={!!checked}
+              onChange={() => {}}
+              style={{ width: 12, height: 12, cursor: 'pointer', accentColor: '#4cff91', flexShrink: 0 }}
+            />
+          </div>
+          <span style={{ fontSize: 10, color: 'var(--dim)', flexShrink: 0, userSelect: 'none', display: 'inline-block', transition: 'transform 0.2s', transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)' }}>▼</span>
+          {item.output_id && (
+            <img src={`https://images.evetech.net/types/${item.output_id}/icon?size=32`} alt=""
+              style={{ width: 18, height: 18, opacity: 0.85, flexShrink: 0 }}
+              onError={e => { e.target.style.display = 'none'; }} />
+          )}
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{item.name}</span>
+          <div style={{ display: 'flex', gap: 3, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {!hasMfgSlot && <Flag label="NO SLOT" bg="#ff4700" />}
+            {item.is_fallback && <Flag label="FILLER" bg="#b0b0b0" />}
+            {capitalWarn && <Flag label="CAPITAL" bg="#ffd24d" />}
+            {exceeds && <Flag label="EXCEEDS CYCLE" bg="#ff4700" />}
+            {saturated && <Flag label={`SATURATED ${saturationPct.toFixed(0)}%`} bg="#ffd24d" />}
+            {belowThreshold && <Flag label="BELOW THRESHOLD" bg="#b0b0b0" />}
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingLeft: 36, marginTop: 3, gap: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>{runsPerCycle}× runs/cycle</span>
+            {!matReady && (
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: '#ff9d3d', letterSpacing: 0.6, flexShrink: 0 }}>
+                MATS
+              </span>
+            )}
+          </div>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: profitPerCycle >= 0 ? '#4cff91' : 'var(--accent)' }}>{profitM}M ISK/cycle</span>
+        </div>
+      </div>
+
+      {isOpen && (
+        <div style={{ background: 'var(--bg)', borderLeft: '3px solid #ff4700', padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div>
+              <DetailRow label="Duration" value={formatSeconds(item.duration_secs || item.duration_seconds || 0)} />
+              <DetailRow label="Net profit/run" value={`${((item.net_profit || 0) / 1_000_000).toFixed(1)}M`} />
+              <DetailRow label="Material cost" value={fmtISK(item.material_cost || 0)} />
+              <DetailRow label="Total job cost" value={jobCost > 0 ? fmtISK(jobCost) : '—'} />
+              {item.skill_time_bonus_pct > 0 && <DetailRow label="Skill time bonus" value={`−${item.skill_time_bonus_pct.toFixed(1)}%`} />}
+              {item.structure_job_time_bonus_pct > 0 && <DetailRow label="Structure time bonus" value={`−${Number(item.structure_job_time_bonus_pct).toFixed(1)}%`} />}
+              {item.me_bonus_pct > 0 && <DetailRow label="ME rig bonus" value={`−${item.me_bonus_pct}% mats`} />}
+              {item.te_bonus_pct > 0 && <DetailRow label="TE rig bonus" value={`−${item.te_bonus_pct}% time`} />}
+              {item.capital_share_pct > 0 && <DetailRow label="Capital lock" value={`${item.capital_share_pct.toFixed(1)}% of wallet`} />}
+            </div>
+            <div>
+              <DetailRow label="Market vol/day" value={(item.avg_daily_volume || 0).toFixed(1)} />
+              <DetailRow label="Saturation" value={`${saturationPct.toFixed(1)}%`} />
+              <DetailRow label="Days to sell" value={`${daysToSell.toFixed(1)}d`} />
+              <DetailRow label="Haul volume" value={`${Number(item.haul_volume_m3 || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} m3`} />
+              <DetailRow label="Haul ISK / m3" value={item.haul_isk_per_m3 ? fmtISK(item.haul_isk_per_m3) : '—'} />
+              <DetailRow label="Blueprint cap" value={`${item.direct_parallel_cap || 0} parallel`} />
+              <DetailRow label="Usable BPCs" value={`${item.direct_bpc_usable_parallel || 0}/${item.direct_bpc_count || 0}`} />
+              <DetailRow label="BPC runs available" value={`${item.direct_bpc_total_runs || 0}`} />
+            </div>
+          </div>
+          {jc && (
+            <DetailSection title="JOB COST" color="#7ec8ff">
+              <DetailRow label="Estimated item value (EIV)" value={scaleCost(jc.eiv)} />
+              <DetailRow label="System cost index" value={`${((Number(jc.sci || 0)) * 100).toFixed(2)}% EIV`} />
+              <DetailRow label="Job gross cost" value={scaleCost(jc.gross)} />
+              {(jc.gross_bonus_amount ?? 0) !== 0 && (
+                <>
+                  <DetailRow label="Structure role bonus" value={`${((Number(jc.role_bonus || 0)) * 100).toFixed(1)}%`} />
+                  {Number(jc.rig_bonus || 0) !== 0 && <DetailRow label="Rig bonus" value={`${((Number(jc.rig_bonus || 0)) * 100).toFixed(1)}%`} />}
+                  <DetailRow label="Bonuses" value={scaleCost(jc.gross_bonus_amount)} />
+                </>
+              )}
+              <DetailRow label="Total job gross cost" value={scaleCost(jc.gross_after_bonus)} />
+              <DetailRow label="Facility tax" value={`${((Number(jc.facility_tax_rate || 0)) * 100).toFixed(2)}% EIV · ${scaleCost(jc.facility_tax)}`} />
+              <DetailRow label="SCC surcharge" value={`${((Number(jc.scc_surcharge_rate || 0)) * 100).toFixed(2)}% EIV · ${scaleCost(jc.scc_surcharge)}`} />
+              <DetailRow label="Total taxes" value={scaleCost(jc.taxes_total ?? ((jc.facility_tax || 0) + (jc.scc_surcharge || 0)))} />
+              <DetailRow label="Total job cost" value={scaleCost(jc.total_job_cost || item.job_cost || 0)} />
+            </DetailSection>
+          )}
+          {item.material_breakdown?.length > 0 && (
+            <DetailSection title={`MATERIALS (${item.material_breakdown.length})`}>
+              {item.material_breakdown.slice(0, 5).map((m) => (
+                <DetailRow key={m.type_id} label={m.name || `Type ${m.type_id}`} value={`${((m.line_cost || 0) / 1_000_000).toFixed(1)}M`} />
+              ))}
+              {item.material_breakdown.length > 5 && (
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>+{item.material_breakdown.length - 5} more</span>
+              )}
+            </DetailSection>
+          )}
+          {item.mats_ready ? (
+            <div style={{ marginTop: 8, padding: '5px 8px', background: 'rgba(76,255,145,0.08)', border: '1px solid rgba(76,255,145,0.2)', borderRadius: 2 }}>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', letterSpacing: 0.4, background: '#4cff91', padding: '2px 6px', display: 'inline-block' }}>
+                IN STOCK
+              </span>
+            </div>
+          ) : missingMatCost > 0 && (
+            <div style={{ marginTop: 8, padding: '5px 8px', background: 'rgba(255,71,0,0.1)', border: '1px solid rgba(255,71,0,0.3)', borderRadius: 2 }}>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', letterSpacing: 0.4, background: '#ff4700', padding: '2px 6px', display: 'inline-block' }}>
+                MISSING MATS: {fmtISK(missingMatCost)}
+              </span>
+            </div>
+          )}
+          <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
+          {item.runner_up_name && (
+            <DetailBlock
+              label="RUNNER-UP"
+              value={`${item.runner_up_name} · ${((item.runner_up_profit_per_cycle || 0) / 1_000_000).toFixed(1)}M/cycle`}
+              color="#ff9d3d"
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
+export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJobs, freeSlots, onItemExpand, expandedId, checkedIds, onCheck }) {
+  const mfgItems = items?.filter(i => i.action_type === 'manufacture') || [];
+  const nowTs = Math.floor(Date.now() / 1000);
+
+  if (mfgItems.length === 0) {
+    return (
+      <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 0.8, textAlign: 'center' }}>
+        NO MANUFACTURING JOBS RECOMMENDED
+      </div>
+    );
+  }
+
+  // Group items by slot start time — items starting now vs. future slots
+  const groups = [];
+  let currentGroup = null;
+  for (const item of mfgItems) {
+    const isNow = !item.start_at || item.start_at <= nowTs + 30;
+    const groupKey = isNow ? 'now' : item.start_at;
+    if (!currentGroup || currentGroup.key !== groupKey) {
+      currentGroup = { key: groupKey, startAt: isNow ? null : item.start_at, slotFreedBy: item.slot_freed_by || null, items: [] };
+      groups.push(currentGroup);
+    }
+    currentGroup.items.push(item);
+  }
+
+  return (
+    <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+      {groups.map((group, gi) => (
+        <div key={group.key}>
+          <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+          {group.items.map((item, idx) => (
+            <ManufacturingQueueRow
+              key={item.rec_id || `${item.output_id}-${idx}`}
+              item={item}
+              hasMfgSlot={gi === 0 && idx < freeSlots}
+              cycleConfig={cycleConfig}
+              isOpen={expandedId === (item.rec_id || String(item.output_id))}
+              onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
+              checked={checkedIds?.has(item.rec_id || String(item.output_id))}
+              onCheck={(val) => onCheck?.(item.rec_id || String(item.output_id), val)}
+            />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+});

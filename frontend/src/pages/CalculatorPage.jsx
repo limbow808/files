@@ -1,0 +1,542 @@
+import { useState, useRef, Fragment, useMemo, useEffect, memo } from 'react';
+import { useApi } from '../hooks/useApi';
+import { useCalcProgress } from '../hooks/useCalcProgress';
+import { fmtISK, fmtVol, fmtDuration, toggleSet, roiTier, makeRoiScale } from '../utils/fmt';
+import CalcDetailPanel from '../components/CalcDetailPanel';
+import ShoppingList from '../components/ShoppingList';
+import EveText from '../components/EveText';
+import Loader from '../components/shared/Loader';
+import { API } from '../App';
+import { getFacilityLabel, getHubLabel } from '../utils/appSettings';
+
+const BP_FILTERS   = ['Personal', 'Corporate', 'Not Owned', 'BPOs', 'BPCs'];
+const TYPE_FILTERS = ['Ships', 'Modules', 'Charges', 'Drones', 'Rigs', 'Structures', 'Booster', 'Implants', 'Components', 'Other'];
+const TECH_FILTERS = ['I', 'II', 'III'];
+const SIZE_FILTERS = ['S', 'M', 'L', 'XL', 'U'];
+
+// Liquidity tier colour for avg_daily_volume
+function liqColor(vol) {
+  if (!vol || vol < 10)  return '#cc2200';
+  if (vol < 100)         return '#cc5500';
+  if (vol < 500)         return '#ccaa00';
+  return 'var(--text)';
+}
+
+const CALC_COLS = [
+  { key: 'name',             label: 'ITEM',     get: r => r.name,                                    align: 'left'  },
+  { key: 'tech',             label: 'TECH',     get: r => r.tech || '',                              align: 'right' },
+  { key: 'category',         label: 'CAT',      get: r => r.category || '',                          align: 'right' },
+  { key: 'me_level',         label: 'ME',       get: r => r.me_level ?? 0,                           align: 'right' },
+  { key: 'te_level',         label: 'TE',       get: r => r.te_level ?? 0,                           align: 'right' },
+  { key: 'duration',         label: 'DURATION', get: r => r.duration || 0,                           align: 'right' },
+  { key: 'avg_daily_volume', label: 'DEMAND',   get: r => r.avg_daily_volume || 0,                   align: 'right' },
+  { key: 'qty',              label: 'QTY',      get: r => r.output_qty || 1,                         align: 'right', noSort: true },
+  { key: 'runs',             label: 'RUNS',     get: r => 1,                                         align: 'right', noSort: true },
+  { key: 'cost',             label: 'COST',     get: r => (r.material_cost || 0) + (r.job_cost || 0), align: 'right' },
+  { key: 'gross_revenue',    label: 'REVENUE',  get: r => r.gross_revenue || 0,                      align: 'right' },
+  { key: 'tax',              label: 'TAX',      get: r => (r.sales_tax || 0) + (r.broker_fee || 0),  align: 'right' },
+  { key: 'net_profit',       label: 'PROFIT',   get: r => r.net_profit || 0,                         align: 'right' },
+  { key: 'roi',              label: 'ROI',      get: r => r.roi || 0,                                align: 'right' },
+  { key: 'isk_per_hour',     label: 'ISK/HR',   get: r => r.isk_per_hour || 0,                       align: 'right' },
+  { key: 'isk_per_m3',       label: 'ISK/M³',   get: r => r.isk_per_m3 || 0,                         align: 'right' },
+];
+
+function CalculatorPage({ refreshKey = 0, appSettings, onOpenSettings }) {
+  const [bpFilters,   setBpFilters]   = useState(new Set(BP_FILTERS));
+  const [typeFilters, setTypeFilters] = useState(new Set(TYPE_FILTERS));
+  const [techFilters, setTechFilters] = useState(new Set(TECH_FILTERS));
+  const [sizeFilters, setSizeFilters] = useState(new Set(SIZE_FILTERS));
+
+  const [minVolume, setMinVolume] = useState('');
+  const [search,    setSearch]    = useState('');
+
+  const [sortKey, setSortKey] = useState('net_profit');
+    const system = appSettings?.system || 'Korsiki';
+    const facility = appSettings?.facility || 'large';
+    const facilityTaxRate = appSettings?.facilityTaxRate ?? '0.10';
+    const rigBonusMfg = appSettings?.rigBonusMfg ?? '0';
+    const buyLoc = appSettings?.buyLoc || 'jita';
+    const sellLoc = appSettings?.sellLoc || 'jita';
+
+  const [sortDir, setSortDir] = useState(-1);
+
+  const [overrides,    setOverrides]    = useState({});
+  const [selectedIdx,  setSelectedIdx]  = useState(null);
+  const [checkedIds,   setCheckedIds]   = useState(new Set());
+  const [retryKey,            setRetryKey]            = useState(0);
+  const [showBadInvestments, setShowBadInvestments] = useState(false);
+
+  function toggleCheck(id, e) {
+    e.stopPropagation();
+    setCheckedIds(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  function buildUrl() {
+    const params = new URLSearchParams({ system, facility, sell_loc: sellLoc, buy_loc: buyLoc });
+    if (facilityTaxRate !== '') params.set('facility_tax_rate', parseFloat(facilityTaxRate) / 100);
+    if (rigBonusMfg !== '') params.set('rig_bonus_mfg', rigBonusMfg);
+    return `${API}/api/calculator?${params}`;
+  }
+
+  function buildAuditUrl() {
+    const params = new URLSearchParams({ system, facility, sell_loc: sellLoc, buy_loc: buyLoc });
+    if (facilityTaxRate !== '') params.set('facility_tax_rate', parseFloat(facilityTaxRate) / 100);
+    if (rigBonusMfg !== '') params.set('rig_bonus_mfg', rigBonusMfg);
+    return `${API}/api/calculator/audit?${params}`;
+  }
+
+  const calcUrl = useMemo(() => buildUrl(), [system, facility, sellLoc, buyLoc, facilityTaxRate, rigBonusMfg]);
+  const calcAuditUrl = useMemo(() => buildAuditUrl(), [system, facility, sellLoc, buyLoc, facilityTaxRate, rigBonusMfg]);
+
+  const { data: calcData, loading, error } = useApi(calcUrl, [calcUrl, refreshKey, retryKey]);
+  const { data: calcAuditData } = useApi(calcAuditUrl, [calcAuditUrl, refreshKey, retryKey]);
+  const progress = useCalcProgress(system, facility, loading && !calcData, {
+    facilityTaxRate,
+    rigBonusMfg,
+  });
+  const { data: skillsData } = useApi(`${API}/api/skills`, []);
+  const { data: esiBpData  } = useApi(`${API}/api/blueprints/esi`, []);
+  const { data: corpBpData } = useApi(`${API}/api/blueprints/corp`, []);
+  const charSkills = skillsData?.skills || null;
+
+  // Corp BP set: output_ids owned by the corp (from crest.db)
+  const corpBpIds = useMemo(() => new Set(corpBpData?.output_ids || []), [corpBpData]);
+
+  // Build ESI BP lookup: normalised lowercase product name → { hasBPO, hasBPC, hasPersonal }
+  // ESI names include " Blueprint" suffix — strip it to match calculator product names
+  // owner='personal' → personally held BP; owner='corp' → corp hangar only
+  const esiBpMap = useMemo(() => {
+    const map = {};
+    for (const bp of (esiBpData?.blueprints || [])) {
+      const key = bp.name.toLowerCase().replace(/\s+blueprint$/, '');
+      if (!map[key]) map[key] = { hasBPO: false, hasBPC: false, hasPersonal: false };
+      if (bp.bp_type === 'BPO')         map[key].hasBPO      = true;
+      else                               map[key].hasBPC      = true;
+      if (bp.owner === 'personal')       map[key].hasPersonal = true;
+    }
+    return map;
+  }, [esiBpData]);
+
+  function handleSort(key) {
+    if (sortKey === key) setSortDir(d => d * -1);
+    else { setSortKey(key); setSortDir(-1); }
+  }
+
+  const results = useMemo(() => {
+    const allBpOn = BP_FILTERS.every(f => bpFilters.has(f));
+    const col = CALC_COLS.find(c => c.key === sortKey);
+    const mv  = minVolume ? parseFloat(minVolume) : NaN;
+
+    const filtered = (calcData?.results || []).filter(r => {
+      if (search && !r.name.toLowerCase().includes(search.toLowerCase())) return false;
+      if (!techFilters.has(r.tech     || 'I'))     return false;
+      if (!sizeFilters.has(r.size     || 'U'))     return false;
+      if (!typeFilters.has(r.category || 'Other')) return false;
+
+      if (!allBpOn) {
+        const bpEntry  = esiBpMap[r.name?.toLowerCase()] ?? null;
+        const isOwned  = bpEntry?.hasPersonal ?? false;
+        const hasBPO   = bpEntry?.hasBPO  ?? false;
+        const hasBPC   = bpEntry?.hasBPC  ?? false;
+        const hasCorp  = corpBpIds.has(r.output_id);
+        const notOwned = !isOwned && !hasCorp;
+        let passes = false;
+        if (bpFilters.has('Personal')  && isOwned)   passes = true;
+        if (bpFilters.has('Corporate') && hasCorp)    passes = true;
+        if (bpFilters.has('Not Owned') && notOwned)   passes = true;
+        if (bpFilters.has('BPOs')      && hasBPO)     passes = true;
+        if (bpFilters.has('BPCs')      && hasBPC)     passes = true;
+        if (!passes) return false;
+      }
+
+      if (!isNaN(mv) && (r.avg_daily_volume || 0) < mv) return false;
+      return true;
+    });
+
+    return [...filtered].sort((a, b) => {
+      const av = col ? col.get(a) : 0;
+      const bv = col ? col.get(b) : 0;
+      if (typeof av === 'string') return sortDir * av.localeCompare(bv);
+      return sortDir * ((av || 0) - (bv || 0));
+    });
+  }, [calcData, search, techFilters, sizeFilters, typeFilters, bpFilters, corpBpIds, esiBpMap, minVolume, sortKey, sortDir]);
+
+  const [goodResults, badResults] = useMemo(() => {
+    const good = [], bad = [];
+    for (const r of results) {
+      ((r.net_profit || 0) > 0 ? good : bad).push(r);
+    }
+    return [good, bad];
+  }, [results]);
+
+  useEffect(() => setShowBadInvestments(false), [results]);
+
+  const visibleResults = showBadInvestments ? results : goodResults;
+
+  const visibilityAudit = useMemo(() => {
+    const backendReturnedTotal = calcData?.results?.length || 0;
+    const uiFilteredTotal = results.length;
+    const uiHiddenUnprofitableTotal = badResults.length;
+    const uiVisibleTotal = visibleResults.length;
+    const uiHiddenByClientFiltersTotal = Math.max(0, backendReturnedTotal - uiFilteredTotal);
+    const uiMissingVsBackend = Math.max(0, backendReturnedTotal - uiVisibleTotal);
+    return {
+      backendReturnedTotal,
+      uiFilteredTotal,
+      uiHiddenUnprofitableTotal,
+      uiVisibleTotal,
+      uiHiddenByClientFiltersTotal,
+      uiMissingVsBackend,
+    };
+  }, [calcData, results.length, badResults.length, visibleResults.length]);
+
+  const lastAuditSignatureRef = useRef('');
+
+  useEffect(() => {
+    if (loading || !calcData) return;
+
+    const filterSnapshot = {
+      search,
+      minVolume,
+      showBadInvestments,
+      bpFilters: [...bpFilters].sort(),
+      typeFilters: [...typeFilters].sort(),
+      techFilters: [...techFilters].sort(),
+      sizeFilters: [...sizeFilters].sort(),
+      sortKey,
+      sortDir,
+      generated_at: calcData.generated_at || 0,
+    };
+    const signature = JSON.stringify({ visibilityAudit, filterSnapshot });
+    if (signature === lastAuditSignatureRef.current) return;
+    lastAuditSignatureRef.current = signature;
+
+    console.groupCollapsed('[MFG AUDIT] visibility cross-reference');
+    console.log('Counts', visibilityAudit);
+    console.log('Filters', filterSnapshot);
+    if (calcAuditData?.counts) {
+      console.log('Backend audit', calcAuditData.counts);
+    }
+    console.groupEnd();
+  }, [
+    loading,
+    calcData,
+    calcAuditData,
+    visibilityAudit,
+    search,
+    minVolume,
+    showBadInvestments,
+    bpFilters,
+    typeFilters,
+    techFilters,
+    sizeFilters,
+    sortKey,
+    sortDir,
+  ]);
+
+  const roiScale = useMemo(() => makeRoiScale(results.map(r => r.roi || 0)), [results]);
+
+  const checkedItems = results.filter(r => checkedIds.has(r.output_id));
+
+  function getOverride(id, field, fallback) {
+    return overrides[id]?.[field] ?? fallback;
+  }
+  function setOverride(id, field, val) {
+    setOverrides(prev => ({ ...prev, [id]: { ...(prev[id] || {}), [field]: val } }));
+  }
+  // Raw string stored while typing; resolved to int ≥ 1 on blur
+  function getOverrideRaw(id, field, def) {
+    const v = overrides[id]?.[field];
+    return v !== undefined ? v : def;
+  }
+  function commitOverride(id, field, def) {
+    const raw = overrides[id]?.[field];
+    const n   = parseInt(raw, 10);
+    if (isNaN(n) || n < 1) setOverride(id, field, def);
+  }
+
+  const sciInfo = calcData?.sci != null
+    ? `SCI ${(calcData.sci * 100).toFixed(2)}% · ${calcData?.facility?.label || ''}`
+    : null;
+
+  return (
+    <div className="calc-page">
+
+      {/* Fixed top: filters + search */}
+      <div className="calc-top">
+        <div className="calc-filters">
+          {/* Row 1: inputs */}
+          <div className="calc-filters-inputs">
+            <div className="filter-group">
+              <span className="filter-label" title="Industry defaults now live in the header settings dropdown.">CONFIG</span>
+              <button className="btn" onClick={onOpenSettings} style={{ fontSize: 10, padding: '0 10px', height: 30 }}>
+                OPEN SETTINGS
+              </button>
+            </div>
+            <div className="filter-group" style={{ minWidth: 180 }}>
+              <span className="filter-label">SYSTEM</span>
+              <div className="calc-input" style={{ width: 180, display: 'flex', alignItems: 'center' }}>{system}</div>
+            </div>
+            <div className="filter-group" style={{ minWidth: 180 }}>
+              <span className="filter-label">STRUCTURE</span>
+              <div className="calc-input" style={{ width: 180, display: 'flex', alignItems: 'center' }}>{getFacilityLabel(facility)}</div>
+            </div>
+            <div className="filter-group" style={{ minWidth: 120 }}>
+              <span className="filter-label">FAC TAX %</span>
+              <div className="calc-input" style={{ width: 110, display: 'flex', alignItems: 'center' }}>{facilityTaxRate}</div>
+            </div>
+            <div className="filter-group" style={{ minWidth: 120 }}>
+              <span className="filter-label">BUY/SELL</span>
+              <div className="calc-input" style={{ width: 120, display: 'flex', alignItems: 'center' }}>{getHubLabel(buyLoc)} / {getHubLabel(sellLoc)}</div>
+            </div>
+            <div className="filter-group">
+              <span className="filter-label" title="Minimum average daily market volume. Filters out illiquid items that rarely sell. Leave blank to show all.">VOL</span>
+              <input className="calc-input" type="number" value={minVolume}
+                onChange={e => setMinVolume(e.target.value)} placeholder="0" style={{ width: 80 }} />
+            </div>
+
+          </div>
+
+          {/* Row 2: chip filters */}
+          <div className="calc-filters-chips">
+            {[
+              ['BPs',  BP_FILTERS,   bpFilters,   setBpFilters],
+              ['Type', TYPE_FILTERS, typeFilters, setTypeFilters],
+              ['Tech', TECH_FILTERS, techFilters, setTechFilters],
+              ['Size', SIZE_FILTERS, sizeFilters, setSizeFilters],
+            ].map(([label, opts, active, setActive]) => {
+              const allOn = opts.every(f => active.has(f));
+              return (
+                <div key={label} className="filter-group">
+                  <span
+                    className={`filter-label${allOn ? ' all-active' : ''}`}
+                    onClick={() => setActive(allOn ? new Set() : new Set(opts))}
+                    title={allOn ? `Deselect all ${label}` : `Select all ${label}`}
+                  >{label}</span>
+                  <div className="filter-options">
+                    {opts.map(f => (
+                      <button
+                        key={f}
+                        className={`chip${active.has(f) ? ' active' : ''}`}
+                        onClick={() => setActive(s => toggleSet(s, f))}
+                      >{f}</button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="calc-search-bar">
+          <span style={{ color: 'var(--dim)', fontSize: 11, letterSpacing: 2 }}>SEARCH</span>
+          <input
+            className="calc-search-input"
+            placeholder="Search items..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+          <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 1 }}>
+            {results.length} ITEM{results.length !== 1 ? 'S' : ''}
+          </span>
+          {calcData && (
+            <span
+              style={{
+                color: visibilityAudit.uiMissingVsBackend > 0 ? 'var(--accent)' : 'var(--dim)',
+                fontSize: 10,
+                letterSpacing: 1,
+              }}
+              title="Cross-reference of raw calculator rows vs UI-visible rows"
+            >
+              SRC {visibilityAudit.backendReturnedTotal} · VISIBLE {visibilityAudit.uiVisibleTotal} · HIDDEN {visibilityAudit.uiMissingVsBackend}
+            </span>
+          )}
+          {calcAuditData?.counts && (
+            <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 1 }} title="Server-side audit breakdown from /api/calculator/audit">
+              DB {calcAuditData.counts.source_blueprints_total} · EXCL {calcAuditData.counts.hard_excluded_total}
+            </span>
+          )}
+          {sciInfo && (
+            <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 1, marginLeft: 'auto' }}>{sciInfo}</span>
+          )}
+          {charSkills && (
+            <span style={{ color: '#00cc66', fontSize: 10, letterSpacing: 1 }}>● SKILLS LOADED</span>
+          )}
+        </div>
+      </div>
+
+      {/* Scrollable item table */}
+      <div className="calc-body">
+        <table className="calc-table">
+          <thead>
+            <tr>
+              <th className="check-cell" title="Add to Shopping List">✓</th>
+              {CALC_COLS.map(c => (
+                <th
+                  key={c.key}
+                  style={{ textAlign: c.align, cursor: c.noSort ? 'default' : 'pointer', userSelect: 'none' }}
+                  onClick={() => !c.noSort && handleSort(c.key)}
+                >
+                  {c.label}
+                  {!c.noSort && sortKey === c.key && (
+                    <span className="sort-arrow">{sortDir === -1 ? '▼' : '▲'}</span>
+                  )}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? null : (
+              visibleResults.map((r, i) => {
+                const isSel    = selectedIdx === i;
+                const isChk    = checkedIds.has(r.output_id);
+                const qty      = Math.max(1, parseInt(getOverrideRaw(r.output_id, 'qty',  r.output_qty), 10) || 1);
+                const runs     = Math.max(1, parseInt(getOverrideRaw(r.output_id, 'runs', 1),             10) || 1);
+                const totalTax = (r.sales_tax || 0) + (r.broker_fee || 0);
+                const roi      = r.roi || 0;
+                const tier     = roiScale.tier(roi);
+
+                return (
+                  <Fragment key={r.output_id ?? i}>
+                    <tr
+                      className={`${tier} row-profitable${isSel ? ' row-selected' : ''}`}
+                      onClick={() => setSelectedIdx(p => p === i ? null : i)}
+                    >
+                      <td className="check-cell" onClick={e => toggleCheck(r.output_id, e)}>
+                        <input
+                          className="row-check"
+                          type="checkbox"
+                          checked={isChk}
+                          onChange={() => {}}
+                          onClick={e => toggleCheck(r.output_id, e)}
+                        />
+                      </td>
+                      <td style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 1, textAlign: 'left' }} title={r.name}>
+                        <div className="item-cell">
+                          <img
+                            className="item-icon"
+                            src={`https://images.evetech.net/types/${r.output_id}/icon?size=32`}
+                            alt=""
+                            onError={e => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'block'; }}
+                          />
+                          <span className="item-icon-placeholder" style={{ display: 'none' }} />
+                          <span
+                            className="item-name"
+                            title="Click to copy name"
+                            onClick={e => {
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(r.name);
+                            }}
+                            style={{ cursor: 'copy' }}
+                          >{r.name}</span>
+                        </div>
+                      </td>
+                      <td style={{ color: 'var(--dim)' }}>{r.tech || '—'}</td>
+                      <td style={{ color: 'var(--dim)', fontSize: 10 }}>{r.category || '—'}</td>
+                      <td>{r.me_level ?? '—'}</td>
+                      <td>{r.te_level ?? '—'}</td>
+                      <td style={{ color: 'var(--dim)' }}>{fmtDuration(r.duration)}</td>
+                      <td style={{ color: liqColor(r.avg_daily_volume) }}>
+                        {r.avg_daily_volume ? fmtVol(r.avg_daily_volume) : '—'}
+                        {(r.avg_daily_volume || 0) > 0 && (r.avg_daily_volume || 0) < 10 && (
+                          <span style={{ marginLeft: 5, fontSize: 8, letterSpacing: 1, color: '#cc2200', opacity: 0.85 }}>LOW</span>
+                        )}
+                      </td>
+                      <td onClick={e => e.stopPropagation()}>
+                        <input className="inline-num" type="number" min="1"
+                          value={getOverrideRaw(r.output_id, 'qty', r.output_qty)}
+                          onChange={e => setOverride(r.output_id, 'qty', e.target.value)}
+                          onBlur={() => commitOverride(r.output_id, 'qty', r.output_qty)} />
+                      </td>
+                      <td onClick={e => e.stopPropagation()}>
+                        <input className="inline-num" type="number" min="1"
+                          value={getOverrideRaw(r.output_id, 'runs', 1)}
+                          onChange={e => setOverride(r.output_id, 'runs', e.target.value)}
+                          onBlur={() => commitOverride(r.output_id, 'runs', 1)} />
+                      </td>
+                      <td style={{ color: 'var(--dim)' }}>{fmtISK((r.material_cost + r.job_cost) * runs)}</td>
+                      <td>{fmtISK(r.gross_revenue * runs)}</td>
+                      <td style={{ color: 'var(--dim)' }}>{fmtISK(totalTax * runs)}</td>
+                      <td className="profit-val">{fmtISK(r.net_profit * runs)}</td>
+                      <td className="profit-val">{roi.toFixed(1)}%</td>
+                      <td>{fmtISK(r.isk_per_hour)}</td>
+                      <td>{r.isk_per_m3 ? fmtISK(r.isk_per_m3) : '—'}</td>
+                    </tr>
+                    {isSel && <CalcDetailPanel item={r} runs={runs} charSkills={charSkills} roiColorFn={roiScale.color} />}
+                  </Fragment>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+
+        {!loading && error && (
+          <div style={{ padding: '32px 20px', color: 'var(--accent)', textAlign: 'center', letterSpacing: 2, fontSize: 11 }}>
+            COULD NOT REACH SERVER — Is <code style={{ color: 'var(--text)' }}>python server.py</code> running?
+            <div style={{ marginTop: 12 }}>
+              <button className="btn" onClick={() => setRetryKey(k => k + 1)} style={{ fontSize: 11 }}>⟳ RETRY</button>
+            </div>
+          </div>
+        )}
+        {!loading && !showBadInvestments && badResults.length > 0 && (
+          <div
+            onClick={() => setShowBadInvestments(true)}
+            style={{
+              padding: '10px 16px', textAlign: 'center', cursor: 'pointer',
+              borderTop: '1px solid var(--border)', color: 'var(--dim)',
+              fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2,
+              background: 'var(--bg)',
+            }}
+            onMouseEnter={e => e.currentTarget.style.color = 'var(--text)'}
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--dim)'}
+          >
+            ▼ SHOW {badResults.length} UNPROFITABLE ITEMS
+          </div>
+        )}
+
+        {!loading && !error && results.length === 0 && calcData && (
+          <div style={{ padding: '32px 20px', color: 'var(--dim)', textAlign: 'center', letterSpacing: 2, fontSize: 11 }}>
+            NO ITEMS MATCH CURRENT FILTERS
+          </div>
+        )}
+        {loading && !calcData && (
+          <div style={{ padding: '40px 20px', textAlign: 'center', fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', letterSpacing: 2 }}>
+            {progress && progress.stage === 'prices' ? (
+              <div>
+                <EveText text="FETCHING MARKET DATA…" scramble={true} wave={true} speed={30} steps={8} />
+              </div>
+            ) : progress && progress.stage === 'calc' ? (
+              <div>
+                <div style={{ color: 'var(--text)', marginBottom: 8, fontSize: 12, letterSpacing: 1 }}>
+                  <EveText text={progress.msg} scramble={true} steps={6} speed={25} />
+                </div>
+                <div style={{ color: 'var(--dim)', fontSize: 10 }}>
+                  {progress.done} / {progress.total}
+                </div>
+                <div style={{ marginTop: 10, width: 240, margin: '10px auto 0', height: 2, background: 'var(--border)', position: 'relative' }}>
+                  <div className="eve-bar-glow" style={{
+                    position: 'absolute', left: 0, top: 0, bottom: 0,
+                    width: `${Math.round((progress.done / progress.total) * 100)}%`,
+                    background: 'var(--accent)', transition: 'width 0.3s'
+                  }} />
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8 }}>
+                <Loader size="md" variant="shimmer" label="LOADING" />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <ShoppingList checkedItems={checkedItems} overrides={overrides} playerSystem={system} />
+    </div>
+  );
+}
+
+export default memo(CalculatorPage);

@@ -1,9 +1,0 @@
-
-lsof -ti:3000 | xargs kill -9 2>/dev/null; sleep 1 && npx vite --port 3000 &
-
-npx vite --port 3000 &
-
-pyinstrument server.py
-
-Powershell:
-Stop-Process -Id (Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue).OwningProcess -Force -ErrorAction SilentlyContinue; npx vite --port 3000
