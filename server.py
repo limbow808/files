@@ -1487,9 +1487,37 @@ def api_top_performers():
 
     Uses the most recently computed calculator cache; also cross-references the
     ESI orders and industry jobs caches for live signals.
+    
+    Query params for cycle-based recommendations:
+      - cycle_duration_hours: float (default 12) — job cycle window in hours
+      - min_profit_per_cycle: float (default 100M ISK) — filter threshold
+      - max_sell_days_tolerance: float (default 7) — saturation limit in days
+      - success_warn_threshold: float (default 0.34) — warn if invention < this
     """
     import math, sqlite3 as _sq
-    from calculator import calculate_industry_job_cost
+    from calculator import calculate_industry_job_cost, score_inventory_by_cycle, CONFIG as CALC_CONFIG
+
+    # ── Parse cycle configuration from query params ───────────────────────────
+    try:
+        cycle_duration_hours = float(request.args.get("cycle_duration_hours", CALC_CONFIG["default_cycle_duration_hours"]))
+        min_profit_per_cycle = float(request.args.get("min_profit_per_cycle", CALC_CONFIG["default_min_profit_per_cycle"]))
+        max_sell_days_tolerance = float(request.args.get("max_sell_days_tolerance", CALC_CONFIG["default_max_sell_days_tolerance"]))
+        success_warn_threshold = float(request.args.get("success_warn_threshold", CALC_CONFIG["default_success_warn_threshold"]))
+        weight_by_velocity = request.args.get("weight_by_velocity", "true").lower() == "true"
+    except ValueError:
+        # Fallback to defaults if invalid params
+        cycle_duration_hours = CALC_CONFIG["default_cycle_duration_hours"]
+        min_profit_per_cycle = CALC_CONFIG["default_min_profit_per_cycle"]
+        max_sell_days_tolerance = CALC_CONFIG["default_max_sell_days_tolerance"]
+        success_warn_threshold = CALC_CONFIG["default_success_warn_threshold"]
+        weight_by_velocity = True
+    
+    cycle_config = {
+        "cycle_duration_hours": cycle_duration_hours,
+        "min_profit_per_cycle": min_profit_per_cycle,
+        "max_sell_days_tolerance": max_sell_days_tolerance,
+        "success_warn_threshold": success_warn_threshold,
+    }
 
     # ── Auto-refresh ESI blueprint cache if stale ─────────────────────────────
     # The BP cache is only refreshed when BpFinder is visited; top-performers
@@ -1680,10 +1708,29 @@ def api_top_performers():
             if pid and secs > 0:
                 actively_producing[pid] = actively_producing.get(pid, 0) + (j.get("runs") or 1)
 
+    # ── Slot timeline from active ESI manufacturing jobs ──────────────────────
+    mfg_end_times = sorted(
+        int(j["end_ts"]) for j in _ESI_JOBS_CACHE.get("jobs", [])
+        if j.get("activity_id") in (1, 9, 11) and j.get("end_ts", 0) > now_ts
+    )
+    running_mfg  = len(mfg_end_times)
+    max_jobs     = _get_max_jobs(running_fallback=running_mfg)
+    free_slots   = max(0, max_jobs - running_mfg)
+
+    # ── Science (research) slots ───────────────────────────────────────────────
+    sci_end_times = sorted(
+        int(j["end_ts"]) for j in _ESI_JOBS_CACHE.get("jobs", [])
+        if j.get("activity_id") in (3, 4, 5, 8) and j.get("end_ts", 0) > now_ts
+    )
+    running_science = len(sci_end_times)
+    max_science     = _get_max_science_jobs(running_fallback=running_science)
+    free_science    = max(0, max_science - running_science)
+
     # ── Score and filter results ───────────────────────────────────────────────
     URGENCY_HORIZON_DAYS = 7    # >7 days supply → near-zero urgency
     BPO_COPY_PENALTY     = 0.70 # BPOs score 30% lower (copy overhead, 40-day waits)
     MIN_DAILY_VOLUME     = 0.5  # hard gate — items selling <0.5/day are dropped entirely
+    vel_factors: dict[int, float] = {}  # populated after candidates loop; default 1.0 inside loop
 
     candidates = []
     for r in all_results:
@@ -1817,7 +1864,18 @@ def api_top_performers():
                 _unit = (_m.get("line_cost") or 0) / max(1, _m.get("quantity") or 1)
                 missing_mats_est_cost += _unit * (_needed - _have)
 
-        candidates.append({
+        # ── Cycle-based recommendation scoring ────────────────────────────────
+        cycle_action_type = "copy_first" if needs_copy else "manufacture"
+        cycle_score = score_inventory_by_cycle(
+            profit_dict=r,
+            cycle_config=cycle_config,
+            action_type=cycle_action_type,
+            success_chance=1.0,  # Default for non-invention; updated for invent_first below
+            available_slots=free_slots if not needs_copy else free_science,
+            sell_velocity_multiplier=vel_factors.get(len(candidates), 1.0) if weight_by_velocity else 1.0,
+        )
+
+        candidate_item = {
             "name":              r["name"],
             "output_id":         out_id,
             "tech":              r.get("tech", "I"),
@@ -1849,6 +1907,14 @@ def api_top_performers():
             "mats_ready":        mats_ready,
             "missing_mats_est_cost": round(missing_mats_est_cost),
             "_score":            score,
+            # ── Cycle-based recommendation metrics ────────────────────────────
+            "profit_per_cycle":       cycle_score.get("profit_per_cycle", 0),
+            "runs_per_cycle":         cycle_score.get("runs_per_cycle", 0),
+            "cycle_window_fit":       cycle_score.get("cycle_window_fit", "exceeds"),
+            "market_saturation_pct":  cycle_score.get("market_saturation_pct", 0),
+            "passes_profit_filter":   cycle_score.get("passes_profit_filter", False),
+            "passes_saturation_filter": cycle_score.get("passes_saturation_filter", False),
+            "cycle_flags":            cycle_score.get("flags", {}),
             # ── calc detail for queue planner inline breakdown ──────────────
             "material_cost":       r.get("material_cost", 0),
             "job_cost":            r.get("job_cost", 0),
@@ -1861,7 +1927,8 @@ def api_top_performers():
             "job_formula_version": r.get("job_formula_version", 2),
             "duration":            r.get("time_seconds", 0) or r.get("duration", 0),
             "material_breakdown":  r.get("material_breakdown", []),
-        })
+        }
+        candidates.append(candidate_item)
 
     # ── Sell-velocity percentile factor ─────────────────────────────────────
     # Items with personal sell history → ranked by avg_days_to_sell (real data).
@@ -1888,7 +1955,6 @@ def api_top_performers():
         for i, c in enumerate(candidates)
         if c["output_id"] not in personal_vel
     ]
-    vel_factors: dict[int, float] = {}
     vel_factors.update(_vel_percentile_factors(history_group, 0.5, 1.5))
     vel_factors.update(_vel_percentile_factors(nohist_group,  0.75, 1.25))
     for i, c in enumerate(candidates):
@@ -1898,24 +1964,6 @@ def api_top_performers():
         c["_has_sell_history"] = c["output_id"] in personal_vel
 
     candidates.sort(key=lambda x: x["_score"], reverse=True)
-
-    # ── Slot timeline from active ESI manufacturing jobs ──────────────────────
-    mfg_end_times = sorted(
-        int(j["end_ts"]) for j in _ESI_JOBS_CACHE.get("jobs", [])
-        if j.get("activity_id") in (1, 9, 11) and j.get("end_ts", 0) > now_ts
-    )
-    running_mfg  = len(mfg_end_times)
-    max_jobs     = _get_max_jobs(running_fallback=running_mfg)
-    free_slots   = max(0, max_jobs - running_mfg)
-
-    # ── Science (research) slots ───────────────────────────────────────────────
-    sci_end_times = sorted(
-        int(j["end_ts"]) for j in _ESI_JOBS_CACHE.get("jobs", [])
-        if j.get("activity_id") in (3, 4, 5, 8) and j.get("end_ts", 0) > now_ts
-    )
-    running_science = len(sci_end_times)
-    max_science     = _get_max_science_jobs(running_fallback=running_science)
-    free_science    = max(0, max_science - running_science)
 
     # ── Duplicate expansion ────────────────────────────────────────────────────
     # Expand high-value candidates into multiple slots with a score decay.
@@ -2046,6 +2094,8 @@ def api_top_performers():
         "max_science":      max_science,
         "running_science":  running_science,
         "free_science":     free_science,
+        # Echo back cycle config for UI sync
+        "cycle_config":     cycle_config,
     })
 
 

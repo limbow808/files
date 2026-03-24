@@ -64,6 +64,13 @@ CONFIG = {
     # because their SDE mats are wrong / they're not player-craftable BPOs.
     # 5.0 = materials must be ≥20% of sale price. Increase cautiously.
     "max_rev_mat_ratio":   5.0,
+
+    # ── Job Cycle Recommendation Defaults ────────────────────────────────────
+    # User can override these via query params in api/top-performers
+    "default_cycle_duration_hours":       12,         # 2x daily login (12h cycles)
+    "default_min_profit_per_cycle":       100_000_000, # ISK — filter below this
+    "default_max_sell_days_tolerance":    7.0,        # days — saturation limit
+    "default_success_warn_threshold":     0.34,       # 34% — flag if invention lower
 }
 
 
@@ -383,6 +390,148 @@ def _recommended_runs(avg_daily_volume, output_qty: int, time_seconds: int) -> d
         "max_per_day":   max_per_day,
         "days_to_sell":  days_to_sell,
         "saturation_pct": saturation_pct,
+    }
+
+
+def score_inventory_by_cycle(
+    profit_dict: dict,
+    cycle_config: dict,
+    action_type: str = "manufacture",
+    success_chance: float = 1.0,
+    available_slots: int = 1000,
+    sell_velocity_multiplier: float = 1.0,
+) -> dict:
+    """
+    Score a single item for queue recommendations based on job cycles.
+    
+    Replaces ISK/hr metric with ISK per cycle (fixed time window).
+    Designed for 2x/day login cadence (e.g., 12h cycles).
+    
+    Args:
+        profit_dict:              Output from calculate_profit()
+        cycle_config:             Dict with:
+                                    - cycle_duration_hours: float (e.g., 12)
+                                    - min_profit_per_cycle: float (ISK threshold)
+                                    - max_sell_days_tolerance: float (saturation limit)
+                                    - success_warn_threshold: float (0.0-1.0)
+        action_type:              "manufacture", "copy_first", or "invent_first"
+        success_chance:           For invention jobs, 0.0-1.0 (default 1.0 for non-invention)
+        available_slots:          Total free manufacturing/science/invention slots
+        sell_velocity_multiplier: 1.0–2.0x boost based on personal sell history
+    
+    Returns:
+        Dict: {
+            "runs":                  Recommended runs to queue
+            "profit_per_cycle":      Expected ISK from this item in one cycle
+            "profit_per_run":        ISK per single run
+            "runs_per_cycle":        How many runs fit in cycle duration
+            "cycle_window_fit":      "fits" or "exceeds"
+            "market_saturation_pct": % of daily volume if recommendation queued
+            "passes_profit_filter":  Bool — exceeds min threshold
+            "passes_saturation_filter": Bool — within sell days tolerance
+            "flags": {
+                "has_below_min_profit": Bool
+                "success_risky":        Bool — if success_chance <= threshold
+                "exceeds_cycle":        Bool — job duration > cycle duration
+            }
+        }
+    """
+    if not profit_dict:
+        return {
+            "runs": 0,
+            "profit_per_cycle": 0,
+            "profit_per_run": 0,
+            "runs_per_cycle": 0,
+            "cycle_window_fit": "exceeds",
+            "market_saturation_pct": 0,
+            "passes_profit_filter": False,
+            "passes_saturation_filter": False,
+            "flags": {
+                "has_below_min_profit": True,
+                "success_risky": False,
+                "exceeds_cycle": True,
+            }
+        }
+    
+    import math
+    
+    # ── Extract cycle parameters ─────────────────────────────────────────────
+    cycle_hours = cycle_config.get("cycle_duration_hours", CONFIG["default_cycle_duration_hours"])
+    cycle_seconds = cycle_hours * 3600
+    min_profit_threshold = cycle_config.get("min_profit_per_cycle", CONFIG["default_min_profit_per_cycle"])
+    max_sell_days = cycle_config.get("max_sell_days_tolerance", CONFIG["default_max_sell_days_tolerance"])
+    success_threshold = cycle_config.get("success_warn_threshold", CONFIG["default_success_warn_threshold"])
+    
+    # ── Extract item parameters from profit dict ──────────────────────────────
+    net_profit = profit_dict.get("net_profit", 0)
+    output_qty = profit_dict.get("output_qty", 1)
+    job_time_seconds = profit_dict.get("time_seconds", 0)
+    avg_daily_volume = profit_dict.get("avg_daily_volume", 0) or 1  # Avoid division by zero
+    
+    profit_per_run = net_profit / output_qty if output_qty > 0 else 0
+    
+    # ── Calculate runs that fit in one cycle ─────────────────────────────────
+    if job_time_seconds <= 0:
+        runs_per_cycle = 1
+        cycle_window_fit = "fits"
+    else:
+        runs_per_cycle = int(cycle_seconds / job_time_seconds)
+        cycle_window_fit = "fits" if job_time_seconds <= cycle_seconds else "exceeds"
+    
+    # Cap runs at 0 if job exceeds cycle
+    if cycle_window_fit == "exceeds":
+        runs_per_cycle = 0
+    
+    # ── Calculate expected profit accounting for success chance ───────────────
+    expected_profit_per_cycle = (profit_per_run * runs_per_cycle * output_qty) * success_chance
+    
+    # ── Apply sell velocity multiplier (personal sell speed boost) ────────────
+    adjusted_profit_per_cycle = expected_profit_per_cycle * sell_velocity_multiplier
+    
+    # ── Calculate market saturation ──────────────────────────────────────────
+    total_output = (runs_per_cycle * output_qty) if runs_per_cycle > 0 else 0
+    days_to_sell = (total_output / avg_daily_volume) if avg_daily_volume > 0 else 999
+    market_saturation_pct = round((total_output / avg_daily_volume) * 100, 1) if avg_daily_volume > 0 else 0
+    
+    # ── Apply bulletproof filters ────────────────────────────────────────────
+    passes_profit_filter = adjusted_profit_per_cycle >= min_profit_threshold
+    passes_saturation_filter = days_to_sell <= max_sell_days
+    success_risky = success_chance <= success_threshold and action_type == "invent_first"
+    
+    # ── Final runs recommendation ────────────────────────────────────────────
+    recommended_runs = runs_per_cycle
+    
+    # Filter 1: Don't queue below profit threshold
+    if not passes_profit_filter:
+        recommended_runs = 0
+    
+    # Filter 2: Cap if market saturation exceeds tolerance
+    if not passes_saturation_filter and recommended_runs > 0:
+        # Find how many runs fit within tolerance
+        safe_runs = max(1, int((max_sell_days * avg_daily_volume) / output_qty)) if output_qty > 0 else 1
+        recommended_runs = min(recommended_runs, safe_runs)
+    
+    # Filter 3: Cap at available slots (no overcommit)
+    recommended_runs = min(recommended_runs, available_slots)
+    
+    # Recalculate final profit with capped runs
+    final_profit_per_cycle = (profit_per_run * recommended_runs * output_qty) * success_chance * sell_velocity_multiplier
+    
+    return {
+        "runs":                  recommended_runs,
+        "profit_per_cycle":      round(final_profit_per_cycle, 0),
+        "profit_per_run":        round(profit_per_run, 0),
+        "runs_per_cycle":        runs_per_cycle,
+        "cycle_window_fit":      cycle_window_fit,
+        "market_saturation_pct": market_saturation_pct,
+        "days_to_sell":          round(days_to_sell, 1),
+        "passes_profit_filter":  passes_profit_filter,
+        "passes_saturation_filter": passes_saturation_filter,
+        "flags": {
+            "has_below_min_profit": not passes_profit_filter,
+            "success_risky":        success_risky,
+            "exceeds_cycle":        cycle_window_fit == "exceeds",
+        }
     }
 
 

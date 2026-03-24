@@ -1,9 +1,13 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useGlobalTick } from '../hooks/useGlobalTick';
 import { useApi } from '../hooks/useApi';
 import { fmtISK, fmtDuration, roiColor } from '../utils/fmt';
 import { LoadingState } from './ui';
+import QueuePlannerSettings, { loadCycleConfig, saveCycleConfig } from './QueuePlannerSettings';
+import ScienceQueueColumn from './ScienceQueueColumn';
+import ManufacturingQueueColumn from './ManufacturingQueueColumn';
 import { API } from '../App';
+
 
 const OWN_COLORS = {
   personal: { fill: '#4cff91', label: 'PERS' },
@@ -39,7 +43,7 @@ function SlotDots({ total, occupied, activeColor }) {
   );
 }
 
-function SlotHeaderBar({ maxJobs, runningJobs, freeSlots, maxScience, runningScience, freeScience, lastRefresh, loading, refetch }) {
+function SlotHeaderBar({ maxJobs, runningJobs, freeSlots, maxScience, runningScience, freeScience, lastRefresh, loading, refetch, cycleConfig, onSettingsOpen }) {
   const nowSec  = Math.floor(Date.now() / 1000);
   const minsAgo = lastRefresh != null ? Math.floor((nowSec - lastRefresh) / 60) : null;
   const mfgFreeColor = freeSlots   > 0 ? '#4cff91' : 'var(--accent)';
@@ -78,11 +82,26 @@ function SlotHeaderBar({ maxJobs, runningJobs, freeSlots, maxScience, runningSci
 
       {/* Timestamp + refresh — pushed right */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        {cycleConfig && (
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)', letterSpacing: 1 }}>
+            {cycleConfig.cycle_duration_hours}h CYCLE
+          </span>
+        )}
         {minsAgo != null && (
           <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>
             {minsAgo === 0 ? 'JUST NOW' : `${minsAgo}m AGO`}
           </span>
         )}
+        <button
+          onClick={() => onSettingsOpen?.()}
+          style={{
+            background: 'none', border: 'none',
+            color: 'var(--dim)', fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 1,
+            padding: '4px 6px', cursor: 'pointer',
+            borderRadius: 2, transition: 'color 0.2s',
+          }}
+          title="Settings"
+        >⚙</button>
         <button
           onClick={refetch}
           disabled={loading}
@@ -550,38 +569,55 @@ function QueueDetailExpanded({ item, calcItem }) {
   );
 }
 
-// ── Queue Planner View (extracted from ManufacturingJobs) ─────────────────────
+// ── Queue Planner View — 2-column layout ─────────────────────────────────────
 
 export default function QueuePlannerView() {
+  // ── Settings and cycle config ────────────────────────────────────────────
+  const [cycleConfig, setCycleConfig] = useState(loadCycleConfig());
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Build query params from cycle config
+  const queryParams = useMemo(() => {
+    const params = new URLSearchParams({
+      cycle_duration_hours: cycleConfig.cycle_duration_hours,
+      min_profit_per_cycle: cycleConfig.min_profit_per_cycle,
+      max_sell_days_tolerance: cycleConfig.max_sell_days_tolerance,
+      success_warn_threshold: cycleConfig.success_warn_threshold,
+      weight_by_velocity: cycleConfig.weight_by_velocity ? 'true' : 'false',
+    });
+    return params.toString();
+  }, [cycleConfig]);
+
   const { data: tpData, loading: tpLoading, error: tpError, refetch } =
-    useApi(`${API}/api/top-performers`, []);
+    useApi(`${API}/api/top-performers?${queryParams}`, [cycleConfig]);
   const { data: calcData } = useApi(`${API}/api/calculator?system=Korsiki&facility=large`, []);
-  const [expandedId,  setExpandedId]  = useState(null);
+  
+  const [expandedId, setExpandedId] = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
-  const [graduated,   setGraduated]  = useState([]);
+  const [graduated, setGraduated] = useState([]);
   const prevSciIds = useRef(new Set());
 
-  const items          = tpData?.items         || [];
-  const maxJobs        = tpData?.max_jobs       ?? 1;
-  const runningJobs    = tpData?.running_jobs   ?? 0;
-  const freeSlots      = tpData?.free_slots     ?? 0;
-  const maxScience     = tpData?.max_science    ?? 0;
+  const items = tpData?.items || [];
+  const maxJobs = tpData?.max_jobs ?? 1;
+  const runningJobs = tpData?.running_jobs ?? 0;
+  const freeSlots = tpData?.free_slots ?? 0;
+  const maxScience = tpData?.max_science ?? 0;
   const runningScience = tpData?.running_science ?? 0;
-  const freeScience    = tpData?.free_science   ?? 0;
+  const freeScience = tpData?.free_science ?? 0;
 
-  const sciItems = useMemo(() => items.filter(i => i.action_type === 'copy_first'), [items]);
-  const mfgItems = useMemo(() => items.filter(i => i.action_type === 'manufacture'), [items]);
-  const maxIskHr = useMemo(
-    () => Math.max(1, ...items.map(i => i.adj_isk_per_hour ?? i.isk_per_hour ?? 0)),
-    [items],
+  // Split items into science (copy + invent) and manufacturing
+  const sciItems = useMemo(() => 
+    items.filter(i => i.action_type === 'copy_first' || i.action_type === 'invent_first'), 
+    [items]
   );
+  const mfgItems = useMemo(() => items.filter(i => i.action_type === 'manufacture'), [items]);
 
   useEffect(() => {
     if (!tpData) return;
     setLastRefresh(Math.floor(Date.now() / 1000));
 
     // Detect items that graduated from SCI → MFG since last refresh
-    const newSciIds  = new Set(sciItems.map(i => i.output_id));
+    const newSciIds = new Set(sciItems.map(i => i.output_id));
     const mfgNameMap = new Map(mfgItems.map(i => [i.output_id, i.name]));
     const grad = [];
     prevSciIds.current.forEach(id => {
@@ -590,13 +626,18 @@ export default function QueuePlannerView() {
     if (grad.length) setGraduated(grad);
     else setGraduated([]);
     prevSciIds.current = newSciIds;
-  }, [tpData]);
+  }, [tpData, sciItems, mfgItems]);
 
   const calcMap = useMemo(() => {
     const m = {};
     (calcData?.results || []).forEach(r => { m[r.output_id] = r; });
     return m;
   }, [calcData]);
+
+  const handleConfigChange = useCallback((newConfig) => {
+    saveCycleConfig(newConfig);
+    setCycleConfig(newConfig);
+  }, []);
 
   if (tpLoading && !tpData) return <LoadingState label="LOADING QUEUE" sub="TOP PERFORMERS" />;
   if (tpError) return (
@@ -610,70 +651,53 @@ export default function QueuePlannerView() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+      {/* Settings Modal */}
+      <QueuePlannerSettings
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onConfigChange={handleConfigChange}
+        currentCycleConfig={cycleConfig}
+      />
 
+      {/* Header with slot info and settings button */}
       <SlotHeaderBar
         maxJobs={maxJobs} runningJobs={runningJobs} freeSlots={freeSlots}
         maxScience={maxScience} runningScience={runningScience} freeScience={freeScience}
         lastRefresh={lastRefresh} loading={tpLoading} refetch={refetch}
+        cycleConfig={cycleConfig} onSettingsOpen={() => setSettingsOpen(true)}
       />
 
-      <QueueColumnHeaders />
+      {/* 2-Column Layout */}
+      <div style={{ display: 'flex', flex: 1, minHeight: 0, gap: 0, borderTop: '1px solid var(--border)' }}>
+        {/* Left Column: Science Queue (copy + invent) */}
+        <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '4px 10px', background: 'var(--bg2)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            SCIENCE QUEUE · {cycleConfig.cycle_duration_hours}h / {cycleConfig.min_profit_per_cycle / 1_000_000 | 0}M ISK/cycle
+          </div>
+          <ScienceQueueColumn
+            items={sciItems}
+            cycleConfig={cycleConfig}
+            maxScience={maxScience}
+            freeScience={freeScience}
+            onItemExpand={setExpandedId}
+            expandedId={expandedId}
+          />
+        </div>
 
-      {/* Scrollable body */}
-      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-
-        {/* SCI QUEUE section */}
-        {sciItems.length > 0 && (
-          <>
-            <SectionHeader
-              label="SCI QUEUE" count={sciItems.length}
-              rightLabel="COPY FIRST — NEEDS SCIENCE SLOT"
-              accentColor="#4da6ff"
-            />
-            {sciItems.map((item, i) => (
-              <QueueRow
-                key={item.output_id}
-                item={item}
-                globalIdx={items.indexOf(item)}
-                queueType="sci"
-                hasSciSlot={i < freeScience}
-                runningScience={runningScience}
-                isOpen={expandedId === item.output_id}
-                onToggle={() => setExpandedId(expandedId === item.output_id ? null : item.output_id)}
-                calcItem={calcMap[item.output_id] ?? item}
-                maxIskHr={maxIskHr}
-              />
-            ))}
-          </>
-        )}
-
-        {/* Graduated strip — appears after refresh when copy items moved to MFG */}
-        <GraduatedStrip names={graduated} />
-
-        {/* MFG QUEUE section */}
-        {mfgItems.length > 0 && (
-          <>
-            <SectionHeader
-              label="MFG QUEUE" count={mfgItems.length}
-              rightLabel="READY TO INSTALL"
-              accentColor="#ff4700"
-            />
-            {mfgItems.map(item => (
-              <QueueRow
-                key={item.output_id}
-                item={item}
-                globalIdx={items.indexOf(item)}
-                queueType="mfg"
-                hasSciSlot={false}
-                runningScience={runningScience}
-                isOpen={expandedId === item.output_id}
-                onToggle={() => setExpandedId(expandedId === item.output_id ? null : item.output_id)}
-                calcItem={calcMap[item.output_id] ?? item}
-                maxIskHr={maxIskHr}
-              />
-            ))}
-          </>
-        )}
+        {/* Right Column: Manufacturing Queue */}
+        <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div style={{ padding: '4px 10px', background: 'var(--bg2)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            MANUFACTURING QUEUE · Profit/cycle
+          </div>
+          <ManufacturingQueueColumn
+            items={mfgItems}
+            cycleConfig={cycleConfig}
+            maxJobs={maxJobs}
+            freeSlots={freeSlots}
+            onItemExpand={setExpandedId}
+            expandedId={expandedId}
+          />
+        </div>
       </div>
     </div>
   );
