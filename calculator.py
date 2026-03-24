@@ -53,8 +53,11 @@ CONFIG = {
 
     # ── Sanity filter thresholds ─────────────────────────────────────────────
     # Items where total raw material cost is below this are skipped.
-    # Catches gift ships / LP-store items whose SDE blueprint has trivial mats.
-    "min_material_cost":   10_000,   # ISK
+    # Catches truly zero-cost SDE entries (gift ships with no real mats).
+    # Cheap T1 ammo/charges (e.g. Scourge Light Missile) costs ~2–8k ISK per run
+    # and must pass; those items are still visible even when unprofitable.
+    # Zero-material gift ships are also caught by max_rev_mat_ratio below.
+    "min_material_cost":   100,      # ISK
 
     # Items where (sell revenue / material cost) exceeds this are skipped.
     # Real manufacturing has tight margins; faction/officer items show up here

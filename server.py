@@ -1285,6 +1285,195 @@ def api_calculator():
             _calc_computing.discard(cache_key)
 
 
+@app.route("/api/calculator/audit", methods=["GET"])
+def api_calculator_audit():
+    """
+    Return count breakdowns for the manufacturing calculator pipeline.
+    Baseline for "missing" is the raw /api/calculator response before UI filters.
+    """
+    try:
+        from pricer import get_prices_bulk
+        from calculator import CONFIG, apply_me
+        import sqlite3 as _sq
+
+        system_param = request.args.get("system", "").strip()
+        facility_param = request.args.get("facility", "station").strip().lower()
+        structure_id_param = request.args.get("structure_id", "").strip()
+        facility_tax_param = request.args.get("facility_tax_rate", "").strip()
+        rig_bonus_mfg_param = request.args.get("rig_bonus_mfg", "").strip()
+
+        cache_key = _calc_cache_key(
+            system_param,
+            facility_param,
+            structure_id_param,
+            facility_tax_param,
+            rig_bonus_mfg_param,
+        )
+
+        # Ensure calculator cache exists for this exact parameter set.
+        if not _calc_is_fresh(cache_key):
+            api_calculator()
+
+        payload = _calc_cache.get(cache_key)
+        if not payload:
+            fresh_key = next(
+                (k for k, v in _calc_cache.items() if (time.time() - v.get("generated_at", 0)) < CALC_CACHE_TTL),
+                None,
+            )
+            if fresh_key:
+                cache_key = fresh_key
+                payload = _calc_cache.get(cache_key)
+
+        if not payload:
+            return jsonify({"error": "calculator cache unavailable"}), 503
+
+        _upgrade_calc_payload_formula(payload)
+
+        # Source totals from DB (when present).
+        source_blueprints_total = None
+        source_after_hard_exclusions = 0
+        hard_excluded_total = None
+        try:
+            _db = os.path.join(_HERE, "crest.db")
+            if os.path.exists(_db):
+                _con = _sq.connect(_db)
+                _cur = _con.cursor()
+                source_blueprints_total = int(_cur.execute("SELECT COUNT(*) FROM blueprints").fetchone()[0])
+                _con.close()
+        except Exception:
+            source_blueprints_total = None
+
+        # Reproduce pre-check gates used by calculate_profit to expose counts by reason.
+        all_blueprints = load_blueprints()
+        source_after_hard_exclusions = len(all_blueprints)
+        if source_blueprints_total is None:
+            source_blueprints_total = source_after_hard_exclusions
+        hard_excluded_total = max(0, source_blueprints_total - source_after_hard_exclusions)
+
+        all_type_ids = set()
+        output_ids = set()
+        for bp in all_blueprints:
+            oid = bp.get("output_id")
+            if oid:
+                output_ids.add(oid)
+                all_type_ids.add(oid)
+            for mat in bp.get("materials", []):
+                tid = mat.get("type_id")
+                if tid:
+                    all_type_ids.add(tid)
+        all_type_ids.update(MINERALS.values())
+
+        try:
+            from invention import _all_datacore_type_ids
+            all_type_ids.update(_all_datacore_type_ids())
+        except Exception:
+            pass
+
+        prices = get_prices_bulk(list(all_type_ids), history_ids=list(output_ids))
+
+        facility_cfg = _facility_config(facility_param)
+        try:
+            structure_me_bonus = float(facility_cfg.get("me_bonus", 0) or 0)
+        except Exception:
+            structure_me_bonus = 0.0
+
+        min_material_cost = float(CONFIG.get("min_material_cost", 10_000) or 10_000)
+        max_rev_mat_ratio = float(CONFIG.get("max_rev_mat_ratio", 5.0) or 5.0)
+
+        no_materials = 0
+        missing_output_price = 0
+        missing_input_price = 0
+        low_material_cost = 0
+        high_rev_mat_ratio = 0
+        pass_prechecks = 0
+        seen_passed_output_ids = set()
+
+        for bp in all_blueprints:
+            mats = bp.get("materials") or []
+            if not mats:
+                no_materials += 1
+                continue
+
+            output_id = bp.get("output_id")
+            if output_id not in prices:
+                missing_output_price += 1
+                continue
+
+            me_level = int(bp.get("me_level", 0) or 0)
+            output_qty = int(bp.get("output_qty", 1) or 1)
+
+            material_cost = 0.0
+            has_missing_input = False
+            for mat in mats:
+                tid = mat.get("type_id")
+                if tid not in prices:
+                    has_missing_input = True
+                    break
+                actual_qty = apply_me(int(mat.get("quantity", 0) or 0), me_level, structure_me_bonus)
+                material_cost += float(prices[tid].get("sell") or 0) * actual_qty
+
+            if has_missing_input:
+                missing_input_price += 1
+                continue
+
+            if material_cost < min_material_cost:
+                low_material_cost += 1
+                continue
+
+            gross_revenue = float(prices[output_id].get("buy") or 0) * output_qty
+            rev_mat_ratio = (gross_revenue / material_cost) if material_cost > 0 else 9999.0
+            if rev_mat_ratio > max_rev_mat_ratio:
+                high_rev_mat_ratio += 1
+                continue
+
+            pass_prechecks += 1
+            seen_passed_output_ids.add(output_id)
+
+        pre_dedupe_candidates = pass_prechecks
+        estimated_unique_outputs_pre_dedupe = len(seen_passed_output_ids)
+        estimated_dedupe_removed = max(0, pre_dedupe_candidates - estimated_unique_outputs_pre_dedupe)
+
+        calc_rows_returned = len(payload.get("results") or [])
+
+        min_volume = float(request.args.get("min_volume", "0") or 0)
+        if min_volume > 0:
+            after_min_volume = len([
+                r for r in (payload.get("results") or [])
+                if (r.get("avg_daily_volume") or 0) >= min_volume
+            ])
+        else:
+            after_min_volume = calc_rows_returned
+
+        return jsonify({
+            "counts": {
+                "source_blueprints_total": source_blueprints_total,
+                "source_after_hard_exclusions": source_after_hard_exclusions,
+                "hard_excluded_total": hard_excluded_total,
+                "failed_no_materials": no_materials,
+                "failed_missing_output_price": missing_output_price,
+                "failed_missing_input_price": missing_input_price,
+                "failed_min_material_cost": low_material_cost,
+                "failed_high_rev_mat_ratio": high_rev_mat_ratio,
+                "passed_profit_prechecks": pass_prechecks,
+                "estimated_pre_dedupe_rows": pre_dedupe_candidates,
+                "estimated_unique_outputs_pre_dedupe": estimated_unique_outputs_pre_dedupe,
+                "estimated_dedupe_removed": estimated_dedupe_removed,
+                "calc_rows_returned": calc_rows_returned,
+                "calc_rows_after_min_volume": after_min_volume,
+                "min_volume_filter": min_volume,
+            },
+            "meta": {
+                "cache_key": cache_key,
+                "generated_at": int(payload.get("generated_at") or time.time()),
+                "formula_version": int(payload.get("job_formula_version", 0) or 0),
+            },
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/top-performers", methods=["GET"])
 def api_top_performers():
     """

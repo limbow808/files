@@ -24,6 +24,7 @@ const AUTO_REFRESH_MS = 5 * 60 * 1000;
 export default function App() {
   const [refreshKey,   setRefreshKey]   = useState(0);
   const [refreshing,   setRefreshing]   = useState(false);
+  const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [activeTab,    setActiveTab]    = useState('OVERVIEW');
   const [booted,       setBooted]       = useState(false);
   // Lazy mount: only mount a tab's page the first time the user visits it.
@@ -53,9 +54,18 @@ export default function App() {
   }, [backendAlive, booted]);
 
   useEffect(() => {
-    timerRef.current = setInterval(() => setRefreshKey(k => k + 1), AUTO_REFRESH_MS);
+    timerRef.current = setInterval(() => {
+      setRefreshKey(k => k + 1);
+      setLastRefreshAt(Date.now());
+    }, AUTO_REFRESH_MS);
     return () => clearInterval(timerRef.current);
   }, []);
+
+  useEffect(() => {
+    if (!scanLoading && !scanError) {
+      setLastRefreshAt(prev => prev ?? Date.now());
+    }
+  }, [scanLoading, scanError]);
 
   // Mount the tab's page on first visit, keep it mounted forever after.
   const handleTabChange = useCallback((tab) => {
@@ -74,6 +84,7 @@ export default function App() {
     setRefreshing(true);
     await refetch();
     setRefreshing(false);
+    setLastRefreshAt(Date.now());
   }
 
   // Show boot screen only when backend is confirmed unreachable (not just slow to ping)
@@ -90,6 +101,7 @@ export default function App() {
           onTabChange={handleTabChange}
           onRefresh={handleRefresh}
           refreshing={refreshing || scanLoading}
+          lastRefreshAt={lastRefreshAt}
         />
         <div className="app-content">
           <div style={{ display: activeTab === 'OVERVIEW' ? 'contents' : 'none' }}>

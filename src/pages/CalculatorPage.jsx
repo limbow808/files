@@ -62,8 +62,7 @@ function CalculatorPage({ refreshKey = 0 }) {
 
   const [system,    setSystem]    = useState('Korsiki');
   const [facility,  setFacility]  = useState('large');
-  const [structureId, setStructureId] = useState('');
-  const [facilityTaxRate, setFacilityTaxRate] = useState('0.001');
+  const [facilityTaxRate, setFacilityTaxRate] = useState('0.1'); // stored as %, sent to API as decimal
   const [rigBonusMfg, setRigBonusMfg] = useState('0');
   const [buyLoc,    setBuyLoc]    = useState('jita');
   const [sellLoc,   setSellLoc]   = useState('jita');
@@ -92,15 +91,21 @@ function CalculatorPage({ refreshKey = 0 }) {
 
   function buildUrl() {
     const params = new URLSearchParams({ system, facility, sell_loc: sellLoc, buy_loc: buyLoc });
-    if (structureId.trim()) params.set('structure_id', structureId.trim());
-    if (facilityTaxRate !== '') params.set('facility_tax_rate', facilityTaxRate);
+    if (facilityTaxRate !== '') params.set('facility_tax_rate', parseFloat(facilityTaxRate) / 100);
     if (rigBonusMfg !== '') params.set('rig_bonus_mfg', rigBonusMfg);
     return `${API}/api/calculator?${params}`;
   }
 
+  function buildAuditUrl() {
+    const params = new URLSearchParams({ system, facility, sell_loc: sellLoc, buy_loc: buyLoc });
+    if (facilityTaxRate !== '') params.set('facility_tax_rate', parseFloat(facilityTaxRate) / 100);
+    if (rigBonusMfg !== '') params.set('rig_bonus_mfg', rigBonusMfg);
+    return `${API}/api/calculator/audit?${params}`;
+  }
+
   const { data: calcData, loading, error } = useApi(buildUrl(), [refreshKey, retryKey]);
+  const { data: calcAuditData } = useApi(buildAuditUrl(), [refreshKey, retryKey]);
   const progress = useCalcProgress(system, facility, loading && !calcData, {
-    structureId,
     facilityTaxRate,
     rigBonusMfg,
   });
@@ -183,6 +188,67 @@ function CalculatorPage({ refreshKey = 0 }) {
 
   const visibleResults = showBadInvestments ? results : goodResults;
 
+  const visibilityAudit = useMemo(() => {
+    const backendReturnedTotal = calcData?.results?.length || 0;
+    const uiFilteredTotal = results.length;
+    const uiHiddenUnprofitableTotal = badResults.length;
+    const uiVisibleTotal = visibleResults.length;
+    const uiHiddenByClientFiltersTotal = Math.max(0, backendReturnedTotal - uiFilteredTotal);
+    const uiMissingVsBackend = Math.max(0, backendReturnedTotal - uiVisibleTotal);
+    return {
+      backendReturnedTotal,
+      uiFilteredTotal,
+      uiHiddenUnprofitableTotal,
+      uiVisibleTotal,
+      uiHiddenByClientFiltersTotal,
+      uiMissingVsBackend,
+    };
+  }, [calcData, results.length, badResults.length, visibleResults.length]);
+
+  const lastAuditSignatureRef = useRef('');
+
+  useEffect(() => {
+    if (loading || !calcData) return;
+
+    const filterSnapshot = {
+      search,
+      minVolume,
+      showBadInvestments,
+      bpFilters: [...bpFilters].sort(),
+      typeFilters: [...typeFilters].sort(),
+      techFilters: [...techFilters].sort(),
+      sizeFilters: [...sizeFilters].sort(),
+      sortKey,
+      sortDir,
+      generated_at: calcData.generated_at || 0,
+    };
+    const signature = JSON.stringify({ visibilityAudit, filterSnapshot });
+    if (signature === lastAuditSignatureRef.current) return;
+    lastAuditSignatureRef.current = signature;
+
+    console.groupCollapsed('[MFG AUDIT] visibility cross-reference');
+    console.log('Counts', visibilityAudit);
+    console.log('Filters', filterSnapshot);
+    if (calcAuditData?.counts) {
+      console.log('Backend audit', calcAuditData.counts);
+    }
+    console.groupEnd();
+  }, [
+    loading,
+    calcData,
+    calcAuditData,
+    visibilityAudit,
+    search,
+    minVolume,
+    showBadInvestments,
+    bpFilters,
+    typeFilters,
+    techFilters,
+    sizeFilters,
+    sortKey,
+    sortDir,
+  ]);
+
   const roiScale = useMemo(() => makeRoiScale(results.map(r => r.roi || 0)), [results]);
 
   const checkedItems = results.filter(r => checkedIds.has(r.output_id));
@@ -218,7 +284,7 @@ function CalculatorPage({ refreshKey = 0 }) {
           <div className="calc-filters-inputs">
             <div className="filter-group">
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-                <span className="filter-label">SYS</span>
+                <span className="filter-label" title="Manufacturing system. Determines the System Cost Index (SCI) used for job installation fees.">SYS</span>
                 {sysSci?.sci != null && !sysSci?.notFound && (
                   <span style={{ fontFamily: 'var(--mono)', fontSize: 8, letterSpacing: 1, color: 'var(--accent)' }}>
                     TAX {(sysSci.sci * 100).toFixed(1)}%
@@ -228,34 +294,26 @@ function CalculatorPage({ refreshKey = 0 }) {
               <SystemInput value={system} onChange={setSystem} onSciChange={setSysSci} />
             </div>
             <div className="filter-group">
-              <span className="filter-label">FAC</span>
+              <span className="filter-label" title="Facility type. Determines the structure role bonus applied to manufacturing job cost and the structure ME bonus.">FAC</span>
               <select className="calc-input" value={facility} onChange={e => setFacility(e.target.value)} style={{ width: 160 }}>
                 {FACILITY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             </div>
             <div className="filter-group">
-              <span className="filter-label">STRUCT</span>
-              <input
-                className="calc-input"
-                value={structureId}
-                onChange={e => setStructureId(e.target.value.replace(/\D/g, ''))}
-                placeholder="structure_id"
-                style={{ width: 160 }}
-              />
-            </div>
-            <div className="filter-group">
-              <span className="filter-label">FAC TAX</span>
+              <span className="filter-label" title="Facility tax rate in % (e.g. 0.1 = 0.1%). Set by the structure owner. Applied on top of the SCC surcharge. Minimum 0.01%.">FAC TAX %</span>
               <input
                 className="calc-input"
                 type="number"
-                step="0.0001"
+                step="0.01"
+                min="0.01"
+                max="100"
                 value={facilityTaxRate}
                 onChange={e => setFacilityTaxRate(e.target.value)}
-                style={{ width: 90 }}
+                style={{ width: 80 }}
               />
             </div>
             <div className="filter-group">
-              <span className="filter-label">RIG</span>
+              <span className="filter-label" title="Additive manufacturing rig bonus on the gross SCI component (e.g. -0.02 for a 2% reduction). Use negative values for a cost reduction.">RIG</span>
               <input
                 className="calc-input"
                 type="number"
@@ -267,19 +325,19 @@ function CalculatorPage({ refreshKey = 0 }) {
               />
             </div>
             <div className="filter-group">
-              <span className="filter-label">BUY</span>
+              <span className="filter-label" title="Market hub used to price input materials (what you pay to buy components).">BUY</span>
               <select className="calc-input" value={buyLoc} onChange={e => setBuyLoc(e.target.value)}>
                 {MARKET_HUBS.map(h => <option key={h} value={h}>{h.charAt(0).toUpperCase() + h.slice(1)}</option>)}
               </select>
             </div>
             <div className="filter-group">
-              <span className="filter-label">SELL</span>
+              <span className="filter-label" title="Market hub used to price the manufactured output (where you plan to sell).">SELL</span>
               <select className="calc-input" value={sellLoc} onChange={e => setSellLoc(e.target.value)}>
                 {MARKET_HUBS.map(h => <option key={h} value={h}>{h.charAt(0).toUpperCase() + h.slice(1)}</option>)}
               </select>
             </div>
             <div className="filter-group">
-              <span className="filter-label">VOL</span>
+              <span className="filter-label" title="Minimum average daily market volume. Filters out illiquid items that rarely sell. Leave blank to show all.">VOL</span>
               <input className="calc-input" type="number" value={minVolume}
                 onChange={e => setMinVolume(e.target.value)} placeholder="0" style={{ width: 80 }} />
             </div>
@@ -339,6 +397,23 @@ function CalculatorPage({ refreshKey = 0 }) {
           <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 1 }}>
             {results.length} ITEM{results.length !== 1 ? 'S' : ''}
           </span>
+          {calcData && (
+            <span
+              style={{
+                color: visibilityAudit.uiMissingVsBackend > 0 ? 'var(--accent)' : 'var(--dim)',
+                fontSize: 10,
+                letterSpacing: 1,
+              }}
+              title="Cross-reference of raw calculator rows vs UI-visible rows"
+            >
+              SRC {visibilityAudit.backendReturnedTotal} · VISIBLE {visibilityAudit.uiVisibleTotal} · HIDDEN {visibilityAudit.uiMissingVsBackend}
+            </span>
+          )}
+          {calcAuditData?.counts && (
+            <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 1 }} title="Server-side audit breakdown from /api/calculator/audit">
+              DB {calcAuditData.counts.source_blueprints_total} · EXCL {calcAuditData.counts.hard_excluded_total}
+            </span>
+          )}
           {sciInfo && (
             <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 1, marginLeft: 'auto' }}>{sciInfo}</span>
           )}

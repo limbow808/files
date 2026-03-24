@@ -1,12 +1,12 @@
 import { memo, useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { useClock } from '../hooks/useClock';
 import EveText from './EveText';
+import logoSrc from '../../images/logo/logo.png';
 
 const DROPDOWN_OPEN_WIDTH = 180;
 
 // Maps each tab ID to its top-level nav group
 const TAB_GROUP = {
-  OVERVIEW:          'INDUSTRY',
   QUEUE_PLANNER:     'INDUSTRY',
   TOP_PERFORMERS:    'INDUSTRY',
   MANUFACTURING:     'INDUSTRY',
@@ -25,12 +25,6 @@ const TAB_GROUP = {
 
 const DROPDOWNS = {
   INDUSTRY: [
-    {
-      title: 'Dashboard',
-      items: [
-        { id: 'OVERVIEW', label: 'Overview' },
-      ],
-    },
     {
       title: 'Planning',
       items: [
@@ -167,7 +161,7 @@ function NavDropdown({ group, activeTab, onTabChange, openGroup, closingGroup, o
               <button
                 key={id}
                 className={`nav-dropdown-item${activeTab === id ? ' active' : ''}`}
-                onClick={() => { onTabChange(id); onLeave(); }}
+                onClick={() => onTabChange(id)}
               >
                 {label}
               </button>
@@ -179,11 +173,19 @@ function NavDropdown({ group, activeTab, onTabChange, openGroup, closingGroup, o
   );
 }
 
-export default memo(function Header({ online, activeTab, onTabChange, onRefresh, refreshing }) {
+export default memo(function Header({ online, activeTab, onTabChange, onRefresh, refreshing, lastRefreshAt }) {
   const clock = useClock();
+  const [now, setNow] = useState(Date.now());
   const [openGroup, setOpenGroup]     = useState(null);
   const [closingGroup, setClosingGroup] = useState(null);
   const closeTimer = useRef(null);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const minutesAgo = lastRefreshAt ? Math.max(0, Math.floor((now - lastRefreshAt) / 60000)) : null;
 
   const handleEnter = (group) => {
     clearTimeout(closeTimer.current);
@@ -200,50 +202,67 @@ export default memo(function Header({ online, activeTab, onTabChange, onRefresh,
   useEffect(() => () => clearTimeout(closeTimer.current), []);
 
   return (
-    <div id="crest-header" style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gridTemplateRows: 'auto 1px', alignItems: 'stretch' }}>
+    <div id="crest-header">
 
-      {/* Left: EVE clock */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 14 }}>
-        <div className="clock-text" style={{ color: 'var(--text2)', fontSize: 11, letterSpacing: 1.5, fontWeight: 300 }}>
-          <EveText text={clock} scramble={false} wave={false} />
-        </div>
-      </div>
-
-      {/* Center: Nav */}
-      <div className="nav-bar">
-        {/* Dropdown menus */}
-        {['INDUSTRY', 'MARKET', 'LOGISTICS', 'SETTINGS'].map(group => (
-          <NavDropdown
-            key={group}
-            group={group}
-            activeTab={activeTab}
-            onTabChange={onTabChange}
-            openGroup={openGroup}
-            closingGroup={closingGroup}
-            onEnter={handleEnter}
-            onLeave={handleLeave}
-          />
-        ))}
-      </div>
-
-      {/* Right: status dot + refresh */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', paddingRight: 14, gap: 2 }}>
-        <span className={`dot ${online ? 'dot-green' : 'dot-red'} eve-dot-pulse`} />
+      {/* Logo row */}
+      <div className="header-logo-row">
         <button
-          className={`header-scan-btn${refreshing ? ' header-scan-btn--active' : ''}`}
-          onClick={onRefresh}
-          disabled={refreshing}
-          style={{ padding: '0 10px', letterSpacing: 0, fontSize: 11, fontWeight: 300 }}
-          title="Re-fetch Jita market prices and recalculate all blueprint profits"
+          className={`header-logo-btn${activeTab === 'OVERVIEW' ? ' active' : ''}`}
+          onClick={() => onTabChange('OVERVIEW')}
+          title="Overview"
         >
-          <span className={`scan-label-main${refreshing ? ' scan-label-shimmer' : ''}`}>
-            {refreshing ? 'FETCHING\u2026' : 'REFRESH MARKET'}
-          </span>
+          <img src={logoSrc} alt="CREST" className="header-logo-img" />
         </button>
       </div>
 
-      {/* Accent line — explicit 2nd grid row, spans all columns */}
-      <div className="eve-header-line" style={{ gridColumn: '1 / -1', gridRow: 2 }} />
+      {/* Nav / subheader row */}
+      <div className="header-nav-row">
+
+        {/* Left: status dot + refresh */}
+        <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 14, gap: 8 }}>
+          <span className={`dot ${online ? 'dot-green' : 'dot-red'} eve-dot-pulse`} />
+          <button
+            className={`header-scan-btn${refreshing ? ' header-scan-btn--active' : ''}`}
+            onClick={onRefresh}
+            disabled={refreshing}
+            style={{ padding: '0 10px', letterSpacing: 0, fontSize: 11, fontWeight: 300 }}
+            title="Re-fetch Jita market prices and recalculate all blueprint profits"
+          >
+            <span className={`scan-label-main${refreshing ? ' scan-label-shimmer' : ''}`}>
+              {refreshing ? 'FETCHING…' : 'REFRESH MARKET'}
+            </span>
+          </button>
+          {minutesAgo !== null && (
+            <span className="header-refresh-age">{minutesAgo} min ago</span>
+          )}
+        </div>
+
+        {/* Center: Nav */}
+        <div className="nav-bar">
+          {['INDUSTRY', 'MARKET', 'LOGISTICS', 'SETTINGS'].map(group => (
+            <NavDropdown
+              key={group}
+              group={group}
+              activeTab={activeTab}
+              onTabChange={onTabChange}
+              openGroup={openGroup}
+              closingGroup={closingGroup}
+              onEnter={handleEnter}
+              onLeave={handleLeave}
+            />
+          ))}
+        </div>
+
+        {/* Right: EVE clock */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', paddingRight: 14, gap: 10 }}>
+          <div className="clock-text" style={{ color: 'var(--text2)', fontSize: 11, letterSpacing: 1.5, fontWeight: 300 }}>
+            <EveText text={clock} scramble={false} wave={false} />
+          </div>
+        </div>
+
+        {/* Accent line — 2nd grid row, spans all columns */}
+        <div className="eve-header-line" style={{ gridColumn: '1 / -1', gridRow: 2 }} />
+      </div>
     </div>
   );
 });

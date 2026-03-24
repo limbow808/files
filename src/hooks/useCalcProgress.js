@@ -23,9 +23,8 @@ export function useCalcProgress(system, facility, enabled, context = {}) {
     }
 
     const params = new URLSearchParams({ system, facility });
-    if (context.structureId) params.set('structure_id', context.structureId);
     if (context.facilityTaxRate !== undefined && context.facilityTaxRate !== '') {
-      params.set('facility_tax_rate', String(context.facilityTaxRate));
+      params.set('facility_tax_rate', String(parseFloat(context.facilityTaxRate) / 100));
     }
     if (context.rigBonusMfg !== undefined && context.rigBonusMfg !== '') {
       params.set('rig_bonus_mfg', String(context.rigBonusMfg));
@@ -54,7 +53,7 @@ export function useCalcProgress(system, facility, enabled, context = {}) {
       es.close();
       esRef.current = null;
     };
-  }, [system, facility, enabled, context.structureId, context.facilityTaxRate, context.rigBonusMfg]);
+  }, [system, facility, enabled, context.facilityTaxRate, context.rigBonusMfg]);
 
   return progress;
 }
