@@ -10,8 +10,13 @@ import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/a
 
 
 const OWN_COLORS = {
-  personal: { fill: '#4cff91', label: 'PERS' },
-  corp:     { fill: '#B0B0B0', label: 'CORP' },
+  personal_bpo: { fill: '#4cff91', label: 'PERS BPO' },
+  personal_bpc: { fill: '#4cff91', label: 'PERS BPC' },
+  corp_bpo:     { fill: '#B0B0B0', label: 'CORP BPO' },
+  corp_bpc:     { fill: '#B0B0B0', label: 'CORP BPC' },
+  // legacy fallbacks
+  personal:     { fill: '#4cff91', label: 'PERS' },
+  corp:         { fill: '#B0B0B0', label: 'CORP' },
 };
 
 function OwnBadge({ kind }) {
@@ -338,7 +343,26 @@ function GraduatedStrip({ names }) {
 // ── Queue Detail Expanded ─────────────────────────────────────────────────────
 
 function QueueDetailExpanded({ item, calcItem }) {
-  const materials = calcItem?.material_breakdown || [];
+  const runs = Math.max(1, Number(item?.rec_runs || 1));
+  const materials = useMemo(() => {
+    const source = item?.material_breakdown?.length ? item.material_breakdown : (calcItem?.material_breakdown || []);
+    return source.map(material => {
+      const perRunQty = Number(material.quantity || 0);
+      const haveQty = material.have_qty != null ? Number(material.have_qty || 0) : null;
+      const neededQtyTotal = material.needed_qty_total != null ? Number(material.needed_qty_total || 0) : perRunQty * runs;
+      const totalLineCost = material.total_line_cost != null ? Number(material.total_line_cost || 0) : Number(material.line_cost || 0) * runs;
+      return {
+        ...material,
+        have_qty: haveQty,
+        needed_qty_total: neededQtyTotal,
+        total_line_cost: totalLineCost,
+      };
+    });
+  }, [calcItem?.material_breakdown, item?.material_breakdown, runs]);
+  const totalMaterialsCost = useMemo(
+    () => materials.reduce((sum, material) => sum + Number(material.total_line_cost || 0), 0),
+    [materials]
+  );
   const tierClr   = roiColor(item.roi);
   const netProfitShown = item?.adj_net_profit ?? item?.net_profit;
   const iskHrShown = item?.adj_isk_per_hour ?? item?.isk_per_hour;
@@ -356,25 +380,34 @@ function QueueDetailExpanded({ item, calcItem }) {
 
         {/* Materials */}
         <div>
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', marginBottom: 6 }}>◈ REQUIRED MATERIALS</div>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 2, color: 'var(--dim)', marginBottom: 6 }}>
+            ◈ MATERIALS ({materials.length})
+          </div>
           {materials.length > 0 ? materials.map((m, i) => (
             <div key={i} style={{
-              display: 'grid', gridTemplateColumns: '1fr auto auto',
+              display: 'grid', gridTemplateColumns: '1fr auto',
               gap: 8, padding: '2px 0', fontSize: 10, borderBottom: '1px solid #0d0d0d',
             }}>
               <span style={{ fontFamily: 'var(--mono)', color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {m.name || `Type ${m.type_id}`}
               </span>
-              <span style={{ fontFamily: 'var(--mono)', color: 'var(--dim)', textAlign: 'right' }}>
-                {new Intl.NumberFormat('en-US').format(m.quantity)}
-              </span>
-              <span style={{ fontFamily: 'var(--mono)', color: 'var(--dim)', textAlign: 'right', minWidth: 52 }}>
-                {fmtISK(m.line_cost)}
+              <span style={{ fontFamily: 'var(--mono)', color: 'var(--dim)', textAlign: 'right', minWidth: 88 }}>
+                {m.have_qty != null
+                  ? `${new Intl.NumberFormat('en-US').format(m.have_qty)}/${new Intl.NumberFormat('en-US').format(m.needed_qty_total)}`
+                  : `${new Intl.NumberFormat('en-US').format(m.needed_qty_total)}`}
               </span>
             </div>
           )) : (
             <div style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 1 }}>
               {calcItem ? 'NO MATERIAL DATA' : 'RUN CALCULATOR FOR MATERIAL DATA'}
+            </div>
+          )}
+          {materials.length > 0 && (
+            <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)' }}>TOTAL</span>
+              <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>
+                {fmtISK(totalMaterialsCost)}
+              </span>
             </div>
           )}
         </div>
@@ -818,9 +851,11 @@ function PlannerFilterBar({ cycleConfig, maxJobs, mfgCount, startNowCount, queue
   const sellDays = Number(cycleConfig?.max_sell_days_tolerance || 0);
   const countCorpOwn = Boolean(cycleConfig?.count_corp_original_blueprints_as_own);
   const weightVelocity = Boolean(cycleConfig?.weight_by_velocity);
+  const includeBelowThreshold = Boolean(cycleConfig?.include_below_threshold_items);
   const underfilled = Number(mfgCount || 0) < Number(maxJobs || 0);
   const usingCustomFilters = (
     Number(cycleConfig?.min_profit_per_cycle || 0) !== Number(DEFAULT_APP_SETTINGS.min_profit_per_cycle)
+    || Boolean(cycleConfig?.include_below_threshold_items) !== Boolean(DEFAULT_APP_SETTINGS.include_below_threshold_items)
     || Number(cycleConfig?.max_sell_days_tolerance || 0) !== Number(DEFAULT_APP_SETTINGS.max_sell_days_tolerance)
     || Boolean(cycleConfig?.count_corp_original_blueprints_as_own) !== Boolean(DEFAULT_APP_SETTINGS.count_corp_original_blueprints_as_own)
     || Boolean(cycleConfig?.weight_by_velocity) !== Boolean(DEFAULT_APP_SETTINGS.weight_by_velocity)
@@ -838,11 +873,11 @@ function PlannerFilterBar({ cycleConfig, maxJobs, mfgCount, startNowCount, queue
         MFG {mfgCount}/{maxJobs} RETURNED
       </span>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
-        {startNowCount} NOW · {queuedCount} QUEUED · {totalItems} TOTAL ITEMS
+        {startNowCount} NOW · {queuedCount} PLANNED LATER · {totalItems} TOTAL ITEMS
       </span>
       <div style={{ width: 1, alignSelf: 'stretch', background: 'rgba(255,255,255,0.08)' }} />
       <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
-        FILTERS: MIN {minProfitM}M/CYCLE · SELL ≤ {sellDays}D · CORP BPO {countCorpOwn ? 'OWN' : 'COPY-ONLY'} · {weightVelocity ? 'VELOCITY ON' : 'VELOCITY OFF'}
+        FILTERS: MIN {minProfitM}M/CYCLE · {includeBelowThreshold ? 'FILL BELOW THRESHOLD' : 'IDLE BELOW THRESHOLD'} · SELL ≤ {sellDays}D · CORP BPO {countCorpOwn ? 'OWN' : 'COPY-ONLY'} · {weightVelocity ? 'VELOCITY ON' : 'VELOCITY OFF'}
       </span>
       {usingCustomFilters && (
         <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#ff9d3d' }}>
@@ -886,7 +921,7 @@ function MultibuyBar({ checkedCount, totalIsk, mats, onCopy, onClear }) {
 
 // ── Queue Planner View — 2-column layout ─────────────────────────────────────
 
-export default function QueuePlannerView({ appSettings }) {
+export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, refreshNonce = 0 }) {
   const [checkedIds, setCheckedIds] = useState(new Set());
   const [plannerRefreshNonce, setPlannerRefreshNonce] = useState(0);
   const jobsSignalRef = useRef(null);
@@ -909,6 +944,7 @@ export default function QueuePlannerView({ appSettings }) {
       cycle_duration_hours:    cycleConfig.cycle_duration_hours,
       structure_job_time_bonus_pct: cycleConfig.structureJobTimeBonusPct ?? 0,
       min_profit_per_cycle:    cycleConfig.min_profit_per_cycle,
+      include_below_threshold_items: cycleConfig.include_below_threshold_items ? 'true' : 'false',
       max_sell_days_tolerance: cycleConfig.max_sell_days_tolerance,
       target_isk_per_m3:       cycleConfig.target_isk_per_m3 ?? 0,
       weight_by_velocity:      cycleConfig.weight_by_velocity ? 'true' : 'false',
@@ -924,13 +960,18 @@ export default function QueuePlannerView({ appSettings }) {
     return params.toString();
   }, [cycleConfig, plannerStructureType]);
 
-  const topPerformersUrl = useMemo(
-    () => `${API}/api/top-performers?${queryParams}&refresh_nonce=${plannerRefreshNonce}`,
-    [plannerRefreshNonce, queryParams]
+  const effectiveRefreshNonce = useMemo(
+    () => `${refreshNonce}:${plannerRefreshNonce}`,
+    [refreshNonce, plannerRefreshNonce]
+  );
+
+  const plannerUrl = useMemo(
+    () => `${API}/api/job-planner?${queryParams}&refresh_nonce=${encodeURIComponent(effectiveRefreshNonce)}`,
+    [effectiveRefreshNonce, queryParams]
   );
 
   const { data: tpData, loading: tpLoading, error: tpError, refetch } =
-    useApi(topPerformersUrl, [topPerformersUrl]);
+    useApi(plannerUrl, [plannerUrl]);
   const { data: calcData } = useApi(`${API}/api/calculator?${calcQueryParams}`, [calcQueryParams]);
 
   const [expandedId, setExpandedId] = useState(null);
@@ -941,7 +982,7 @@ export default function QueuePlannerView({ appSettings }) {
   useEffect(() => {
     setCheckedIds(new Set());
     setExpandedId(null);
-  }, [plannerStructureType, cycleConfig.cycle_duration_hours, cycleConfig.structureJobTimeBonusPct, cycleConfig.haul_capacity_m3, cycleConfig.target_isk_per_m3, cycleConfig.min_profit_per_cycle, cycleConfig.max_sell_days_tolerance, cycleConfig.count_corp_original_blueprints_as_own, cycleConfig.weight_by_velocity, cycleConfig.rig_1, cycleConfig.rig_2]);
+  }, [plannerStructureType, cycleConfig.cycle_duration_hours, cycleConfig.structureJobTimeBonusPct, cycleConfig.haul_capacity_m3, cycleConfig.target_isk_per_m3, cycleConfig.min_profit_per_cycle, cycleConfig.include_below_threshold_items, cycleConfig.max_sell_days_tolerance, cycleConfig.count_corp_original_blueprints_as_own, cycleConfig.weight_by_velocity, cycleConfig.rig_1, cycleConfig.rig_2]);
 
   const items        = tpData?.items || [];
   const maxJobs      = tpData?.max_jobs ?? 1;
@@ -954,27 +995,29 @@ export default function QueuePlannerView({ appSettings }) {
   const blockedItems = tpData?.blocked_items || [];
 
   const sciItems = useMemo(() =>
-    items.filter(i => i.action_type === 'copy_first' || i.action_type === 'invent_first' || i.action_type === 'copy_then_invent'),
+    items.filter(i => i.action_type === 'copy_first' || i.action_type === 'invent_first' || i.action_type === 'copy_then_invent' || i.action_type === 'idle_science'),
     [items]);
-  const mfgItems = useMemo(() => items.filter(i => i.action_type === 'manufacture'), [items]);
+  const mfgItems = useMemo(() => items.filter(i => i.action_type === 'manufacture' || i.action_type === 'idle_manufacture'), [items]);
+  const realSciItems = useMemo(() => sciItems.filter(i => !i.is_idle), [sciItems]);
+  const realMfgItems = useMemo(() => mfgItems.filter(i => !i.is_idle), [mfgItems]);
   const startNowMfgCount = useMemo(() => {
     const nowTs = Math.floor(Date.now() / 1000);
-    return mfgItems.filter(i => !i.start_at || i.start_at <= nowTs + 30).length;
-  }, [mfgItems]);
-  const queuedMfgCount = Math.max(0, mfgItems.length - startNowMfgCount);
+    return realMfgItems.filter(i => !i.start_at || i.start_at <= nowTs + 30).length;
+  }, [realMfgItems]);
+  const queuedMfgCount = Math.max(0, realMfgItems.length - startNowMfgCount);
 
   useEffect(() => {
     if (!tpData) return;
     setLastRefresh(Math.floor(Date.now() / 1000));
-    const newSciIds  = new Set(sciItems.map(i => i.output_id));
-    const mfgNameMap = new Map(mfgItems.map(i => [i.output_id, i.name]));
+    const newSciIds  = new Set(realSciItems.map(i => i.output_id));
+    const mfgNameMap = new Map(realMfgItems.map(i => [i.output_id, i.name]));
     const grad = [];
     prevSciIds.current.forEach(id => {
       if (!newSciIds.has(id) && mfgNameMap.has(id)) grad.push(mfgNameMap.get(id));
     });
     setGraduated(grad.length ? grad : []);
     prevSciIds.current = newSciIds;
-  }, [tpData, sciItems, mfgItems]);
+  }, [tpData, realSciItems, realMfgItems]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1102,9 +1145,12 @@ export default function QueuePlannerView({ appSettings }) {
     setPlannerRefreshNonce(value => value + 1);
   }, []);
 
-  if (tpLoading && !tpData) return <LoadingState label="LOADING QUEUE" sub="TOP PERFORMERS" />;
+  if (tpLoading && !tpData) return <LoadingState label="LOADING QUEUE" sub="JOB PLANNER" />;
   if (tpError) return (
     <div style={{ padding: '12px 16px', color: '#ff4444', fontSize: 11, letterSpacing: 1 }}>⚠ ESI ERROR</div>
+  );
+  if (tpData?.status === 'esi_loading') return (
+    <LoadingState label="LOADING BLUEPRINTS" sub="WAITING FOR ESI DATA" />
   );
   if (!items.length) return (
     <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 10, letterSpacing: 1.5, textAlign: 'center' }}>

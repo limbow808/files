@@ -18,7 +18,72 @@ function PortraitPlaceholder({ name }) {
   );
 }
 
-function CharacterCard({ char, charStats, onRemove, color, index = 0 }) {
+const CORP_BP_ACCESS_META = {
+  auto: {
+    label: 'AUTO',
+    hint: 'Use live ESI access when available.',
+    accent: 'var(--dim)',
+    bg: 'rgba(148,163,184,0.08)',
+    symbol: '·',
+  },
+  allow: {
+    label: 'ALLOW',
+    hint: 'Whitelist this character for org blueprints.',
+    accent: '#7bd389',
+    bg: 'rgba(123,211,137,0.12)',
+    symbol: '✓',
+  },
+  block: {
+    label: 'BLOCK',
+    hint: 'Blacklist this character from org blueprints.',
+    accent: 'var(--accent)',
+    bg: 'rgba(255,71,0,0.12)',
+    symbol: '✕',
+  },
+};
+
+function CorpBpAccessControl({ value = 'auto', saving = false, onChange }) {
+  const current = CORP_BP_ACCESS_META[value] || CORP_BP_ACCESS_META.auto;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 196 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 2 }}>ORG BPS</span>
+        <span style={{ color: current.accent, fontSize: 10, letterSpacing: 2 }}>{current.symbol} {current.label}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {Object.entries(CORP_BP_ACCESS_META).map(([mode, meta]) => {
+          const active = mode === value;
+          return (
+            <button
+              key={mode}
+              className="btn"
+              title={meta.hint}
+              disabled={saving}
+              onClick={() => onChange(mode)}
+              style={{
+                flex: 1,
+                padding: '4px 8px',
+                fontSize: 10,
+                letterSpacing: 1.5,
+                borderColor: active ? meta.accent : 'var(--border)',
+                color: active ? meta.accent : 'var(--dim)',
+                background: active ? meta.bg : 'transparent',
+                opacity: saving && !active ? 0.55 : 1,
+              }}
+            >
+              {meta.symbol} {meta.label}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ color: 'var(--dim)', fontSize: 10, lineHeight: 1.35 }}>
+        {saving ? 'Saving org BP access…' : current.hint}
+      </div>
+    </div>
+  );
+}
+
+function CharacterCard({ char, charStats, onRemove, onCorpBpAccessChange, corpBpAccessSaving, color, index = 0 }) {
   const [confirming, setConfirming] = useState(false);
   const [imgError,   setImgError]   = useState(false);
 
@@ -50,7 +115,8 @@ function CharacterCard({ char, charStats, onRemove, color, index = 0 }) {
       </div>
 
       {/* Info */}
-      <div style={{ flex: 1, padding: '8px 14px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+      <div style={{ flex: 1, padding: '8px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
         <div style={{ fontFamily: 'var(--mono)', fontSize: 14, letterSpacing: 2, color: 'var(--text)', display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0, display: 'inline-block' }} />
           {char.character_name}
@@ -73,6 +139,12 @@ function CharacterCard({ char, charStats, onRemove, color, index = 0 }) {
             <span style={{ color: 'var(--dim)', fontSize: 10 }}>{char.character_id}</span>
           </div>
         </div>
+        </div>
+        <CorpBpAccessControl
+          value={char.corp_bp_access || 'auto'}
+          saving={corpBpAccessSaving}
+          onChange={(mode) => onCorpBpAccessChange(char.character_id, mode)}
+        />
       </div>
 
       {/* Remove */}
@@ -97,11 +169,13 @@ function CharacterCard({ char, charStats, onRemove, color, index = 0 }) {
 export default function CharactersPage() {
   const [characters, setCharacters] = useState([]);
   const [stats,      setStats]      = useState({});  // charId → { wallet, active_jobs }
+  const [corpBpAccessSaving, setCorpBpAccessSaving] = useState({});
   const [loading,    setLoading]    = useState(true);
   const [adding,     setAdding]     = useState(false);
   const [addStatus,  setAddStatus]  = useState(null); // null | 'waiting' | 'done' | 'error'
   const [addMsg,     setAddMsg]     = useState('');
-  const pollRef = useRef(null);
+  const pollRef     = useRef(null);
+  const resolvedRef = useRef(false);
 
   async function fetchStats(charId) {
     try {
@@ -134,6 +208,7 @@ export default function CharactersPage() {
     setAdding(true);
     setAddStatus('waiting');
     setAddMsg('Opening EVE SSO in your browser…');
+    resolvedRef.current = false;
     try {
       const r = await fetch(`${API}/api/characters/add`, { method: 'POST' });
       const { state, error } = await r.json();
@@ -143,7 +218,9 @@ export default function CharactersPage() {
         try {
           const pr = await fetch(`${API}/api/characters/poll/${state}`);
           const pd = await pr.json();
+          if (resolvedRef.current) return; // stale response — already handled
           if (pd.status === 'done') {
+            resolvedRef.current = true;
             clearInterval(pollRef.current);
             setAddStatus('done');
             setAddMsg(`${pd.character.character_name} added successfully`);
@@ -151,6 +228,7 @@ export default function CharactersPage() {
             fetchCharacters();
             setTimeout(() => { setAddStatus(null); setAddMsg(''); }, 3000);
           } else if (pd.status === 'error') {
+            resolvedRef.current = true;
             clearInterval(pollRef.current);
             setAddStatus('error');
             setAddMsg(pd.message || 'OAuth error');
@@ -167,6 +245,34 @@ export default function CharactersPage() {
     await fetch(`${API}/api/characters/${charId}`, { method: 'DELETE' });
     setCharacters(prev => prev.filter(c => c.character_id !== charId));
     setStats(prev => { const next = { ...prev }; delete next[charId]; return next; });
+  }
+
+  async function handleCorpBpAccessChange(charId, mode) {
+    const previous = characters.find(c => c.character_id === charId)?.corp_bp_access || 'auto';
+    if (previous === mode) return;
+    setCorpBpAccessSaving(prev => ({ ...prev, [charId]: true }));
+    setCharacters(prev => prev.map(char => (
+      char.character_id === charId ? { ...char, corp_bp_access: mode } : char
+    )));
+    try {
+      const r = await fetch(`${API}/api/characters/${charId}/corp-bp-access`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+      const updated = d.character || {};
+      setCharacters(prev => prev.map(char => (
+        char.character_id === charId ? { ...char, corp_bp_access: updated.corp_bp_access || mode } : char
+      )));
+    } catch {
+      setCharacters(prev => prev.map(char => (
+        char.character_id === charId ? { ...char, corp_bp_access: previous } : char
+      )));
+    } finally {
+      setCorpBpAccessSaving(prev => ({ ...prev, [charId]: false }));
+    }
   }
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
@@ -252,6 +358,8 @@ export default function CharactersPage() {
               char={char}
               charStats={stats[char.character_id] ?? null}
               onRemove={handleRemove}
+              onCorpBpAccessChange={handleCorpBpAccessChange}
+              corpBpAccessSaving={Boolean(corpBpAccessSaving[char.character_id])}
               color={charColor(char.character_id)}
               index={idx}
             />

@@ -259,7 +259,7 @@ def _select_invention_character_profile(
     science_skill_1_name: str | None,
     science_skill_2_name: str | None,
     encryption_skill_name: str | None,
-) -> tuple[dict[str, int], dict | None, bool, list[dict]]:
+) -> tuple[dict[str, int], dict | None, bool, list[dict], list[dict]]:
     profiles = _get_character_skill_profiles()
     required_skills = [
         {
@@ -294,7 +294,7 @@ def _select_invention_character_profile(
                     "required_level": required["level"],
                     "actual_level": actual,
                 })
-        return aggregated, None, len(missing) == 0, missing
+            return aggregated, None, len(missing) == 0, missing, []
 
     eligible_profiles = []
     for profile in profiles:
@@ -312,10 +312,10 @@ def _select_invention_character_profile(
 
     if eligible_profiles:
         best_profile = max(eligible_profiles, key=_profile_score)
-        return dict(best_profile.get("skills") or {}), dict(best_profile), True, []
+        return dict(best_profile.get("skills") or {}), dict(best_profile), True, [], [dict(profile) for profile in eligible_profiles]
 
     best_profile = max(profiles, key=_profile_score)
-    return dict(best_profile.get("skills") or {}), dict(best_profile), False, _missing_for_profile(best_profile)
+    return dict(best_profile.get("skills") or {}), dict(best_profile), False, _missing_for_profile(best_profile), []
 
 
 # ── Invention data per T2 blueprint ──────────────────────────────────────────
@@ -469,9 +469,10 @@ def calculate_invention_cost(
     selected_profile = None
     can_start_invention = True
     missing_required_skills: list[dict] = []
+    eligible_profiles: list[dict] = []
 
     if skill_levels is None:
-        skill_levels, selected_profile, can_start_invention, missing_required_skills = _select_invention_character_profile(
+        skill_levels, selected_profile, can_start_invention, missing_required_skills, eligible_profiles = _select_invention_character_profile(
             invention_skills,
             science_skill_1_name,
             science_skill_2_name,
@@ -519,6 +520,15 @@ def calculate_invention_cost(
         "missing_required_skills": missing_required_skills,
         "selected_character_id": selected_profile.get("character_id") if selected_profile else None,
         "selected_character_name": selected_profile.get("character_name") if selected_profile else None,
+        "eligible_character_ids": [str(profile.get("character_id")) for profile in eligible_profiles if profile.get("character_id")],
+        "eligible_characters": [
+            {
+                "character_id": str(profile.get("character_id")),
+                "character_name": profile.get("character_name"),
+            }
+            for profile in eligible_profiles
+            if profile.get("character_id")
+        ],
         "datacore_costs": {
             "dc1_type_id": dc1_id,
             "dc1_qty":     dc1_qty,

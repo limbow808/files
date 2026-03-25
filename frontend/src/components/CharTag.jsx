@@ -3,7 +3,7 @@
  * Usage: <CharTag name="Varggg" color="#4da6ff" />
  */
 
-export default function CharTag({ name, color, style = {} }) {
+export default function CharTag({ name, color, bordered = true, style = {} }) {
   if (!name) return null;
   return (
     <span style={{
@@ -12,8 +12,8 @@ export default function CharTag({ name, color, style = {} }) {
       gap: 5,
       fontFamily: 'var(--mono)',
       fontSize: 11,
-      padding: '2px 8px',
-      border: '1px solid var(--border)',
+      padding: bordered ? '2px 8px' : 0,
+      border: bordered ? '1px solid var(--border)' : 'none',
       background: 'transparent',
       color: 'var(--dim)',
       whiteSpace: 'nowrap',

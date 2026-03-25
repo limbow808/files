@@ -28,11 +28,11 @@ import requests
 import esi_client as _esi
 
 from blueprints import load_blueprints, MINERALS
-from calculator import calculate_all
+from calculator import calculate_all, CONFIG as CALC_CONFIG
 from database import (
     save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history,
     sync_open_orders, get_sell_history_stats,
-    upsert_craft_jobs, get_craft_log, get_craft_stats,
+    upsert_craft_jobs, get_craft_log, get_craft_stats, get_craft_timeline,
     get_sell_velocity_by_type_id,
 )
 import alert_scanner as _alert_scanner
@@ -229,6 +229,8 @@ def _scan_is_fresh() -> bool:
 # ── Calculator cache (keyed by facility+system params, TTL 30 min) ───────────
 _calc_cache: dict = {}
 CALC_CACHE_TTL = 1800  # 30 minutes
+_PLANNER_REFRESH_NONCES: dict[str, str] = {}
+_PLANNER_REFRESH_NONCES_LOCK = threading.Lock()
 
 # Dedup guard — prevents duplicate full-compute runs for the same cache key.
 # If a thread is already computing key X, new arrivals wait for it instead of
@@ -258,7 +260,12 @@ _MIN_OUTPUT_PRICE_COVERAGE_COUNT = 500
 
 
 def _load_calc_cache_from_disk() -> None:
-    """Load persisted calculator cache from disk; discard stale entries."""
+    """Load persisted calculator cache from disk.
+
+    Fresh entries remain eligible for normal calculator responses. Older entries
+    are still restored as last-known-good planner fallbacks when a live
+    recalculation is temporarily unavailable after restart.
+    """
     global _calc_cache, _calc_ready
     try:
         if not os.path.exists(_CALC_CACHE_PATH):
@@ -266,12 +273,21 @@ def _load_calc_cache_from_disk() -> None:
         with open(_CALC_CACHE_PATH, "r", encoding="utf-8") as _f:
             saved: dict = json.load(_f)
         now   = time.time()
-        fresh = {k: v for k, v in saved.items()
-                 if (now - v.get("generated_at", 0)) < CALC_CACHE_TTL}
-        _calc_cache.update(fresh)
-        if fresh:
+        fresh_count = 0
+        stale_count = 0
+        for key, entry in saved.items():
+            generated_at = float(entry.get("generated_at", 0) or 0)
+            if (now - generated_at) < CALC_CACHE_TTL:
+                fresh_count += 1
+            else:
+                stale_count += 1
+            _calc_cache[key] = entry
+        if _calc_cache:
             _calc_ready = True
-            print(f"  [cache] Restored {len(fresh)} calculator result(s) from disk.")
+            print(
+                f"  [cache] Restored {len(_calc_cache)} calculator result(s) from disk "
+                f"({fresh_count} fresh, {stale_count} stale fallback)."
+            )
     except Exception as _e:
         print(f"  [cache] Could not load disk cache: {_e}")
 
@@ -286,6 +302,84 @@ def _save_calc_cache_to_disk() -> None:
         os.replace(_tmp_path, _CALC_CACHE_PATH)
     except Exception as _e:
         print(f"  [cache] Could not save disk cache: {_e}")
+
+
+# ── ESI state disk cache ─────────────────────────────────────────────────────
+# Persists blueprint ownership, industry jobs, and character slot details so the
+# Queue Planner can assign items immediately after a server restart — even if
+# the live ESI refresh hasn't completed yet.
+_ESI_STATE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "esi_state_cache.json")
+
+
+def _save_esi_state_to_disk() -> None:
+    """Persist current ESI blueprint, jobs, and slot caches to a single file."""
+    try:
+        payload = {
+            "bp":    {"data": _ESI_BP_CACHE,              "ts": _ESI_BP_CACHE_TS},
+            "jobs":  {"data": _ESI_JOBS_CACHE,            "ts": _ESI_JOBS_CACHE_TS},
+            "slots": {"data": _CHAR_SLOT_DETAILS_CACHE,   "ts": _CHAR_SLOT_DETAILS_CACHE_TS},
+        }
+        _dir = os.path.dirname(_ESI_STATE_CACHE_PATH)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=_dir, delete=False) as _f:
+            json.dump(payload, _f)
+            _tmp_path = _f.name
+        os.replace(_tmp_path, _ESI_STATE_CACHE_PATH)
+    except Exception as _e:
+        print(f"  [esi-cache] Could not save ESI state to disk: {_e}")
+
+
+def _load_esi_state_from_disk() -> None:
+    """Restore ESI caches from disk so the planner works immediately after restart."""
+    global _ESI_BP_CACHE, _ESI_BP_CACHE_TS
+    global _ESI_JOBS_CACHE, _ESI_JOBS_CACHE_TS
+    global _CHAR_SLOT_DETAILS_CACHE, _CHAR_SLOT_DETAILS_CACHE_TS
+    global _MAX_JOBS_CACHE, _MAX_JOBS_CACHE_TS, _MAX_SCIENCE_JOBS_CACHE, _MAX_SCIENCE_JOBS_CACHE_TS
+    try:
+        if not os.path.exists(_ESI_STATE_CACHE_PATH):
+            return
+        with open(_ESI_STATE_CACHE_PATH, "r", encoding="utf-8") as _f:
+            saved = json.load(_f)
+
+        bp_section    = saved.get("bp") or {}
+        jobs_section  = saved.get("jobs") or {}
+        slots_section = saved.get("slots") or {}
+
+        bp_data   = bp_section.get("data") or {}
+        bp_ts     = float(bp_section.get("ts") or 0)
+        jobs_data = jobs_section.get("data") or {}
+        jobs_ts   = float(jobs_section.get("ts") or 0)
+        slots_data = slots_section.get("data") or {}
+        slots_ts   = float(slots_section.get("ts") or 0)
+
+        parts = []
+
+        if bp_data and bp_data.get("blueprints"):
+            _ESI_BP_CACHE    = bp_data
+            _ESI_BP_CACHE_TS = bp_ts
+            parts.append(f"{len(bp_data['blueprints'])} blueprints")
+
+        if jobs_data and isinstance(jobs_data.get("jobs"), list):
+            _ESI_JOBS_CACHE    = jobs_data
+            _ESI_JOBS_CACHE_TS = jobs_ts
+            parts.append(f"{len(jobs_data['jobs'])} jobs")
+
+        if slots_data:
+            _CHAR_SLOT_DETAILS_CACHE    = slots_data
+            _CHAR_SLOT_DETAILS_CACHE_TS = slots_ts
+            total_mfg = sum(int(d.get("mfg_slots", 0) or 0) for d in slots_data.values())
+            total_sci = sum(int(d.get("science_slots", 0) or 0) for d in slots_data.values())
+            if total_mfg > 0:
+                _MAX_JOBS_CACHE    = total_mfg
+                _MAX_JOBS_CACHE_TS = slots_ts
+            if total_sci > 0:
+                _MAX_SCIENCE_JOBS_CACHE    = total_sci
+                _MAX_SCIENCE_JOBS_CACHE_TS = slots_ts
+            parts.append(f"{len(slots_data)} characters")
+
+        if parts:
+            print(f"  [esi-cache] Restored ESI state from disk ({', '.join(parts)}).")
+    except Exception as _e:
+        print(f"  [esi-cache] Could not load ESI state from disk: {_e}")
 
 
 def _output_price_coverage(prices: dict, output_ids: set) -> tuple[int, int, float]:
@@ -352,6 +446,22 @@ def _calc_is_fresh(key: str) -> bool:
     return (time.time() - entry.get("generated_at", 0)) < CALC_CACHE_TTL
 
 
+def _consume_planner_refresh_nonce(cache_key: str, refresh_nonce: str) -> bool:
+    nonce = (refresh_nonce or "").strip()
+    if not nonce:
+        return False
+    with _PLANNER_REFRESH_NONCES_LOCK:
+        previous = _PLANNER_REFRESH_NONCES.get(cache_key)
+        if previous == nonce:
+            return False
+        _PLANNER_REFRESH_NONCES[cache_key] = nonce
+        if len(_PLANNER_REFRESH_NONCES) > 32:
+            oldest_key = next(iter(_PLANNER_REFRESH_NONCES))
+            if oldest_key != cache_key:
+                _PLANNER_REFRESH_NONCES.pop(oldest_key, None)
+        return True
+
+
 def _upgrade_calc_payload_formula(payload: dict) -> None:
     """
     Retroactively correct cached calculator results to the latest job/invention metadata.
@@ -380,6 +490,7 @@ def _upgrade_calc_payload_formula(payload: dict) -> None:
             invention_detail.get("can_start_invention") is None
             or invention_detail.get("required_skills") is None
             or invention_detail.get("missing_required_skills") is None
+            or invention_detail.get("eligible_character_ids") is None
         )
 
         if int(r.get("job_formula_version", 0) or 0) >= 2 and r.get("job_cost_breakdown") and not needs_invention_upgrade:
@@ -612,6 +723,25 @@ def api_characters_remove(character_id):
         from characters import remove_character
         removed = remove_character(character_id)
         return jsonify({"ok": removed})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/characters/<character_id>/corp-bp-access", methods=["PUT"])
+async def api_character_corp_bp_access(character_id):
+    """Update org blueprint access override for a character."""
+    try:
+        from characters import set_corp_bp_access
+        global _ESI_BP_CACHE, _ESI_BP_CACHE_TS
+
+        payload = await request.get_json(silent=True) or {}
+        mode = payload.get("mode")
+        updated = set_corp_bp_access(character_id, mode)
+        _ESI_BP_CACHE = {}
+        _ESI_BP_CACHE_TS = 0
+        return jsonify({"ok": True, "character": updated})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1602,8 +1732,9 @@ def api_calculator_audit():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/top-performers", methods=["GET"])
-def api_top_performers():
+@app.route("/api/job-planner", methods=["GET"])
+def api_job_planner():
+    global _ESI_BP_CACHE, _ESI_BP_CACHE_TS
     """
     Return up to 20 manufacturing items where the player/corp owns a BP,
     ranked by a smart composite score that factors in:
@@ -1619,9 +1750,10 @@ def api_top_performers():
     Query params for cycle-based recommendations:
       - cycle_duration_hours: float (default 12) — job cycle window in hours
       - min_profit_per_cycle: float (default 100M ISK) — filter threshold
-      - max_sell_days_tolerance: float (default 7) — saturation limit in days
-            - target_isk_per_m3: float (default 0) — soft haul-density preference, 0 disables it
-            - count_corp_original_blueprints_as_own: bool (default false) — allow corp BPOs in direct manufacturing queue
+    - max_sell_days_tolerance: float (default 7) — saturation limit in days
+    - include_below_threshold_items: bool (default true) — allow low-profit filler instead of leaving slots idle
+    - target_isk_per_m3: float (default 0) — soft haul-density preference, 0 disables it
+    - count_corp_original_blueprints_as_own: bool (default false) — allow corp BPOs in direct manufacturing queue
     """
     import math, sqlite3 as _sq
     from calculator import calculate_industry_job_cost, score_inventory_by_cycle, CONFIG as CALC_CONFIG
@@ -1631,6 +1763,7 @@ def api_top_performers():
         cycle_duration_hours = float(request.args.get("cycle_duration_hours", CALC_CONFIG["default_cycle_duration_hours"]))
         structure_job_time_bonus_pct = max(0.0, min(95.0, float(request.args.get("structure_job_time_bonus_pct", 0) or 0)))
         min_profit_per_cycle = float(request.args.get("min_profit_per_cycle", CALC_CONFIG["default_min_profit_per_cycle"]))
+        include_below_threshold_items = request.args.get("include_below_threshold_items", "true").lower() == "true"
         max_sell_days_tolerance = float(request.args.get("max_sell_days_tolerance", CALC_CONFIG["default_max_sell_days_tolerance"]))
         target_isk_per_m3 = max(0.0, float(request.args.get("target_isk_per_m3", 0) or 0))
         success_warn_threshold = float(request.args.get("success_warn_threshold", CALC_CONFIG["default_success_warn_threshold"]))
@@ -1641,6 +1774,7 @@ def api_top_performers():
         cycle_duration_hours = CALC_CONFIG["default_cycle_duration_hours"]
         structure_job_time_bonus_pct = 0.0
         min_profit_per_cycle = CALC_CONFIG["default_min_profit_per_cycle"]
+        include_below_threshold_items = True
         max_sell_days_tolerance = CALC_CONFIG["default_max_sell_days_tolerance"]
         target_isk_per_m3 = 0.0
         success_warn_threshold = CALC_CONFIG["default_success_warn_threshold"]
@@ -1651,11 +1785,13 @@ def api_top_performers():
     calc_facility_param = request.args.get("facility", "large").strip().lower() or "large"
     calc_facility_tax_param = request.args.get("facility_tax_rate", "").strip()
     calc_rig_bonus_mfg_param = request.args.get("rig_bonus_mfg", "").strip()
+    planner_refresh_nonce = request.args.get("refresh_nonce", "").strip()
     
     cycle_config = {
         "cycle_duration_hours": cycle_duration_hours,
         "structure_job_time_bonus_pct": structure_job_time_bonus_pct,
         "min_profit_per_cycle": min_profit_per_cycle,
+        "include_below_threshold_items": include_below_threshold_items,
         "max_sell_days_tolerance": max_sell_days_tolerance,
         "target_isk_per_m3": target_isk_per_m3,
         "success_warn_threshold": success_warn_threshold,
@@ -1690,13 +1826,13 @@ def api_top_performers():
     }.get(_structure_type, "NPC Station")
 
     # ── Auto-refresh ESI blueprint cache if stale ─────────────────────────────
-    # The BP cache is only refreshed when BpFinder is visited; top-performers
+    # The BP cache is only refreshed when BpFinder is visited; job-planner
     # reads it directly so needs to ensure it's current.
     if not _ESI_BP_CACHE or (time.time() - _ESI_BP_CACHE_TS) >= _ESI_BP_TTL:
         try:
             api_blueprints_esi()
         except Exception as _e:
-            print(f"[top-performers] BP cache refresh failed: {_e}")
+            print(f"[job-planner] BP cache refresh failed: {_e}")
 
     # ── Auto-refresh assets cache if stale ───────────────────────────────────
     # Assets contain BPCs tracked via is_blueprint_copy; refresh so we pick
@@ -1705,7 +1841,7 @@ def api_top_performers():
         try:
             api_assets()
         except Exception as _e:
-            print(f"[top-performers] Assets cache refresh failed: {_e}")
+            print(f"[job-planner] Assets cache refresh failed: {_e}")
 
     # ── Auto-refresh industry jobs cache if stale ────────────────────────────
     # The planner reads slot occupancy directly from the jobs cache, so after
@@ -1715,7 +1851,7 @@ def api_top_performers():
         try:
             api_industry_jobs()
         except Exception as _e:
-            print(f"[top-performers] Jobs cache refresh failed: {_e}")
+            print(f"[job-planner] Jobs cache refresh failed: {_e}")
 
     # ── Auto-refresh orders cache if stale ───────────────────────────────────
     # Planner urgency and supply coverage depend on live sell-order state.
@@ -1723,7 +1859,7 @@ def api_top_performers():
         try:
             api_orders()
         except Exception as _e:
-            print(f"[top-performers] Orders cache refresh failed: {_e}")
+            print(f"[job-planner] Orders cache refresh failed: {_e}")
 
     # ── Ensure calculator cache exists for this exact planner context ───────
     preferred_key_exact = _calc_cache_key(
@@ -1733,11 +1869,20 @@ def api_top_performers():
         calc_facility_tax_param,
         calc_rig_bonus_mfg_param,
     )
+    if _consume_planner_refresh_nonce(preferred_key_exact, planner_refresh_nonce):
+        _calc_cache.pop(preferred_key_exact, None)
+        _ESI_BP_CACHE.clear()
+        _ESI_BP_CACHE_TS = 0
+        try:
+            from invention import invalidate_invention_cache
+            invalidate_invention_cache()
+        except Exception as _e:
+            print(f"[job-planner] Invention cache refresh failed: {_e}")
     if not _calc_is_fresh(preferred_key_exact):
         try:
             api_calculator()
         except Exception as _e:
-            print(f"[top-performers] Calculator cache refresh failed: {_e}")
+            print(f"[job-planner] Calculator cache refresh failed: {_e}")
 
     # ── Prefer the planner's default calculator context, then fall back ─────
     planner_facility_key = {
@@ -1785,6 +1930,12 @@ def api_top_performers():
         pass
 
     # ── Build owned blueprint_id sets (BPO vs BPC tracked separately) ─────────
+    #    Guard: if ESI blueprint data is still empty after auto-refresh + disk
+    #    restore, return a clear status rather than generating idle-only output.
+    if not _ESI_BP_CACHE or not _ESI_BP_CACHE.get("blueprints"):
+        return jsonify({"items": [], "status": "esi_loading",
+                        "message": "Waiting for blueprint data from ESI — please retry in a few seconds."})
+
     personal_bpo_bp_ids: set = set()   # personal BPOs — original, need copying
     personal_bpc_bp_ids: set = set()   # personal BPCs — ready to manufacture
     corp_bp_ids: set         = set()
@@ -1793,18 +1944,42 @@ def api_top_performers():
     personal_bpc_count: dict[int, int] = {}  # type_id → # of personal BPCs in ESI
     personal_bpc_runs_by_bp_id: dict[int, list[int]] = {}  # bp type_id → individual BPC run counts
     corp_bpo_count:     dict[int, int] = {}  # type_id → # of corp BPOs in ESI
+    # Per-type character tracking: type_id → set of (character_id, character_name)
+    _char_owners_by_tid: dict[int, set] = {}
+    personal_bpo_count_by_tid_character: dict[int, dict[str, int]] = {}
+    personal_bpc_count_by_tid_character: dict[int, dict[str, int]] = {}
 
     for bp in _ESI_BP_CACHE.get("blueprints", []):
         tid = bp.get("type_id")
         if not tid:
             continue
+        _cid = bp.get("character_id")
+        _cname = bp.get("character_name")
+        # Track which authenticated characters can access this blueprint.
+        access_characters = list(bp.get("access_characters") or [])
+        if access_characters:
+            for access in access_characters:
+                access_cid = str(access.get("character_id") or "")
+                access_cname = access.get("character_name") or f"Char {access_cid}"
+                if access_cid:
+                    _char_owners_by_tid.setdefault(tid, set()).add((access_cid, access_cname))
+        elif bp.get("owner") != "corp" and _cid and _cname:
+            _char_owners_by_tid.setdefault(tid, set()).add((_cid, _cname))
         if bp.get("owner") == "personal":
             if bp.get("bp_type") == "BPO" or bp.get("runs", -1) == -1:
                 personal_bpo_bp_ids.add(tid)
                 personal_bpo_count[tid] = personal_bpo_count.get(tid, 0) + 1
+                if _cid:
+                    _cid_str = str(_cid)
+                    per_char = personal_bpo_count_by_tid_character.setdefault(tid, {})
+                    per_char[_cid_str] = per_char.get(_cid_str, 0) + 1
             else:
                 personal_bpc_bp_ids.add(tid)
                 personal_bpc_count[tid] = personal_bpc_count.get(tid, 0) + 1
+                if _cid:
+                    _cid_str = str(_cid)
+                    per_char = personal_bpc_count_by_tid_character.setdefault(tid, {})
+                    per_char[_cid_str] = per_char.get(_cid_str, 0) + 1
                 try:
                     personal_bpc_runs_by_bp_id.setdefault(tid, []).append(max(0, int(bp.get("runs") or 0)))
                 except Exception:
@@ -1836,6 +2011,8 @@ def api_top_performers():
     corp_bpo_count_by_output: dict[int, int] = {}
     bpc_count_by_output: dict[int, int] = {}  # output_id → # of BPCs in hand
     bpc_runs_by_output: dict[int, list[int]] = {}  # output_id → individual BPC run counts
+    personal_bpo_count_by_output_character: dict[int, dict[str, int]] = {}
+    personal_bpc_count_by_output_character: dict[int, dict[str, int]] = {}
 
     try:
         db_path = os.path.join(os.path.dirname(__file__), "crest.db")
@@ -1853,17 +2030,34 @@ def api_top_performers():
                 _count = personal_bpo_count.get(bp_id, 0)
                 personal_bpo_count_by_output[out_id] = personal_bpo_count_by_output.get(out_id, 0) + _count
                 bpo_count_by_output[out_id] = bpo_count_by_output.get(out_id, 0) + _count
+                for _char_id, _char_count in personal_bpo_count_by_tid_character.get(bp_id, {}).items():
+                    per_char = personal_bpo_count_by_output_character.setdefault(out_id, {})
+                    per_char[_char_id] = per_char.get(_char_id, 0) + int(_char_count or 0)
             if bp_id in personal_bpc_bp_ids:
                 personal_bpc_output_ids.add(out_id)
                 bpc_count_by_output[out_id] = bpc_count_by_output.get(out_id, 0) + personal_bpc_count.get(bp_id, 0)
                 bpc_runs_by_output.setdefault(out_id, []).extend(personal_bpc_runs_by_bp_id.get(bp_id, []))
+                for _char_id, _char_count in personal_bpc_count_by_tid_character.get(bp_id, {}).items():
+                    per_char = personal_bpc_count_by_output_character.setdefault(out_id, {})
+                    per_char[_char_id] = per_char.get(_char_id, 0) + int(_char_count or 0)
             if bp_id in corp_bp_ids:
                 corp_output_ids.add(out_id)
                 _count = corp_bpo_count.get(bp_id, 1)
                 corp_bpo_count_by_output[out_id] = corp_bpo_count_by_output.get(out_id, 0) + _count
                 bpo_count_by_output[out_id] = bpo_count_by_output.get(out_id, 0) + _count
     except Exception as e:
-        print(f"[top-performers] DB error: {e}")
+        print(f"[job-planner] DB error: {e}")
+
+    # Build output_id → list of characters who own the blueprint
+    characters_by_output: dict[int, list[dict]] = {}
+    for bp_tid, char_set in _char_owners_by_tid.items():
+        out_id = output_id_by_blueprint_id.get(bp_tid)
+        if not out_id:
+            continue
+        for cid, cname in char_set:
+            chars = characters_by_output.setdefault(out_id, [])
+            if not any(c["character_id"] == cid for c in chars):
+                chars.append({"character_id": cid, "character_name": cname})
 
     personal_output_ids = personal_bpo_output_ids | personal_bpc_output_ids
     owned_output_ids    = personal_output_ids | corp_output_ids
@@ -1972,9 +2166,33 @@ def api_top_performers():
         if j.get("activity_id") in (1, 9, 11)
         and now_ts < int(j.get("end_ts", 0)) <= _horizon_ts
     )
+    character_slot_details = _get_character_slot_details()
+    running_mfg_by_character: dict[str, int] = {}
+    running_science_by_character: dict[str, int] = {}
+    for job in _ESI_JOBS_CACHE.get("jobs", []):
+        if int(job.get("end_ts") or 0) <= now_ts:
+            continue
+        char_id = str(job.get("character_id") or "")
+        if not char_id:
+            continue
+        if job.get("activity_id") in (1, 9, 11):
+            running_mfg_by_character[char_id] = running_mfg_by_character.get(char_id, 0) + 1
+        elif job.get("activity_id") in (3, 4, 5, 8):
+            running_science_by_character[char_id] = running_science_by_character.get(char_id, 0) + 1
     running_mfg  = len(mfg_end_times)
     max_jobs     = _get_max_jobs(running_fallback=running_mfg)
     free_slots   = max(0, max_jobs - running_mfg)
+    free_mfg_slots_by_character: dict[str, dict] = {}
+    for char_id, details in character_slot_details.items():
+        total_slots = int(details.get("mfg_slots", 0) or 0)
+        free_count = max(0, total_slots - running_mfg_by_character.get(char_id, 0))
+        if free_count <= 0:
+            continue
+        free_mfg_slots_by_character[char_id] = {
+            "character_id": char_id,
+            "character_name": details.get("character_name", f"Char {char_id}"),
+            "remaining": free_count,
+        }
 
     # ── Science (research) slots ───────────────────────────────────────────────
     sci_end_times = sorted(
@@ -1984,6 +2202,17 @@ def api_top_performers():
     running_science = len(sci_end_times)
     max_science     = _get_max_science_jobs(running_fallback=running_science)
     free_science    = max(0, max_science - running_science)
+    free_science_slots_by_character: dict[str, dict] = {}
+    for char_id, details in character_slot_details.items():
+        total_slots = int(details.get("science_slots", 0) or 0)
+        free_count = max(0, total_slots - running_science_by_character.get(char_id, 0))
+        if free_count <= 0:
+            continue
+        free_science_slots_by_character[char_id] = {
+            "character_id": char_id,
+            "character_name": details.get("character_name", f"Char {char_id}"),
+            "remaining": free_count,
+        }
 
     # ── Planner opportunity model ─────────────────────────────────────────────
     cycle_seconds = max(3600, int(cycle_duration_hours * 3600))
@@ -2221,16 +2450,28 @@ def api_top_performers():
         missing_mats_est_cost = 0.0
         inbound_total_m3 = 0.0
         inbound_missing_m3 = 0.0
+        planner_material_breakdown = []
         for material in result.get("material_breakdown", []):
             needed = (material.get("quantity") or 0) * rec_runs
             unit_volume = float(material.get("volume_m3") or 0.0)
             inbound_total_m3 += unit_volume * needed
             have = _assets.get(material["type_id"], _assets.get(str(material["type_id"]), 0)) or 0
+            covered = min(have, needed)
+            missing = max(0, needed - have)
+            unit_cost = (material.get("line_cost") or 0) / max(1, material.get("quantity") or 1)
+            planner_material_breakdown.append({
+                **dict(material),
+                "have_qty": have,
+                "covered_qty": covered,
+                "needed_qty_total": needed,
+                "missing_qty": missing,
+                "total_line_cost": unit_cost * needed,
+                "missing_line_cost": unit_cost * missing,
+            })
             if have < needed:
                 mats_ready = False
-                unit_cost = (material.get("line_cost") or 0) / max(1, material.get("quantity") or 1)
-                missing_mats_est_cost += unit_cost * (needed - have)
-                inbound_missing_m3 += unit_volume * (needed - have)
+                missing_mats_est_cost += unit_cost * missing
+                inbound_missing_m3 += unit_volume * missing
 
         output_volume_m3 = float(result.get("volume") or 0.0)
         outbound_volume_m3 = output_volume_m3 * total_output_units
@@ -2260,10 +2501,12 @@ def api_top_performers():
             selection_score *= 0.35
 
         ownership = []
-        if out_id in personal_output_ids:
-            ownership.append("personal")
+        if out_id in personal_bpo_output_ids:
+            ownership.append("personal_bpo")
+        if out_id in personal_bpc_output_ids:
+            ownership.append("personal_bpc")
         if out_id in corp_output_ids:
-            ownership.append("corp")
+            ownership.append("corp_bpo")
 
         return {
             "name":              result["name"],
@@ -2298,6 +2541,10 @@ def api_top_performers():
                 "exceeds_cycle": cycle_fit == "exceeds",
             },
             "ownership":         ownership,
+            "characters":        characters_by_output.get(out_id, []),
+            "character_personal_bpo_counts": dict(personal_bpo_count_by_output_character.get(out_id, {}) or {}),
+            "character_personal_bpc_counts": dict(personal_bpc_count_by_output_character.get(out_id, {}) or {}),
+            "corp_bpo_count":    int(corp_bpo_count_by_output.get(out_id, 0) or 0),
             "supply_qty":        sell_qty,
             "supply_days":       round(supply_days, 1),
             "producing_qty":     producing_qty,
@@ -2336,7 +2583,7 @@ def api_top_performers():
             "estimated_item_value_per_run": round(estimated_item_value_per_run),
             "job_formula_version": result.get("job_formula_version", 2),
             "duration":          result.get("time_seconds", 0) or result.get("duration", 0),
-            "material_breakdown": result.get("material_breakdown", []),
+            "material_breakdown": planner_material_breakdown,
             "skill_time_bonus_pct": round((1.0 - _MFG_TIME_MODIFIER) * 100, 1),
             "structure_job_time_bonus_pct": round(structure_job_time_bonus_pct, 1),
             "structure_name":    _structure_name,
@@ -2502,16 +2749,42 @@ def api_top_performers():
         profit_scale = _clamp((adjusted_profit / base_profit) if base_profit > 0 else 0.0, 0.0, 1.25)
 
         candidate = dict(base_item)
+        source_ownership = []
+        if t1_output_id in personal_bpo_output_ids:
+            source_ownership.append("personal_bpo")
+        if t1_output_id in personal_bpc_output_ids:
+            source_ownership.append("personal_bpc")
+        if t1_output_id in corp_output_ids:
+            source_ownership.append("corp_bpo")
+        invention_eligible_character_ids = list(inv_detail.get("eligible_character_ids") or [])
+        if not invention_eligible_character_ids and inv_detail.get("selected_character_id"):
+            invention_eligible_character_ids = [str(inv_detail.get("selected_character_id"))]
+        invention_eligible_characters = list(inv_detail.get("eligible_characters") or [])
+        if not invention_eligible_characters and inv_detail.get("selected_character_id"):
+            invention_eligible_characters = [{
+                "character_id": str(inv_detail.get("selected_character_id")),
+                "character_name": inv_detail.get("selected_character_name") or f"Char {inv_detail.get('selected_character_id')}",
+            }]
         candidate.update({
             "action_type": action_type,
             "t1_blueprint_id": t1_bp_id,
+            "source_output_id": t1_output_id,
             "has_t1_bpc": has_t1_bpc,
+            "invention_eligible_character_ids": invention_eligible_character_ids,
+            "invention_eligible_characters": invention_eligible_characters,
+            "preferred_invention_character_id": str(inv_detail.get("selected_character_id")) if inv_detail.get("selected_character_id") else None,
+            "preferred_invention_character_name": inv_detail.get("selected_character_name"),
             "invention_success_chance": success_chance,
             "inv_output_runs_per_bpc": runs_per_bpc,
             "source_bpc_count": len(t1_bpc_runs),
             "source_bpc_total_runs": t1_bpc_total_runs,
             "source_bpc_usable_parallel": t1_bpc_usable_parallel,
             "source_bpo_count": int(personal_bpo_count.get(t1_bp_id, 0) + corp_bpo_count.get(t1_bp_id, 0) or 0),
+            "characters": characters_by_output.get(t1_output_id, []) if t1_output_id else [],
+            "ownership": source_ownership,
+            "character_personal_bpo_counts": dict(personal_bpo_count_by_output_character.get(t1_output_id, {}) or {}),
+            "character_personal_bpc_counts": dict(personal_bpc_count_by_output_character.get(t1_output_id, {}) or {}),
+            "corp_bpo_count": int(corp_bpo_count_by_output.get(t1_output_id, 0) or 0) if t1_output_id else 0,
             "copy_time_secs": copy_secs_total,
             "copy_job_cost": round(copy_job_cost_total),
             "copy_job_cost_per_run": round(copy_job_cost_total / max(1, invent_jobs_needed)),
@@ -2684,13 +2957,19 @@ def api_top_performers():
     mfg_items_raw = _expand_candidates(premium_mfg_pool, max_jobs)
     if len(mfg_items_raw) < max_jobs:
         seen_rec_ids = {item["rec_id"] for item in mfg_items_raw}
-        fallback_pool = [item for item in fallback_mfg_candidates if item["rec_id"] not in seen_rec_ids]
+        fallback_pool = [
+            item for item in fallback_mfg_candidates
+            if item["rec_id"] not in seen_rec_ids
+            and (include_below_threshold_items or item.get("passes_profit_filter"))
+        ]
         mfg_items_raw.extend(_expand_candidates(fallback_pool, max_jobs - len(mfg_items_raw)))
     if len(mfg_items_raw) < max_jobs:
         seen_rec_ids = {item["rec_id"] for item in mfg_items_raw}
         emergency_pool: list[dict] = []
         for item in mfg_candidates:
             if item["rec_id"] in seen_rec_ids:
+                continue
+            if not include_below_threshold_items and not item.get("passes_profit_filter"):
                 continue
             emergency_item = dict(item)
             emergency_item["is_fallback"] = True
@@ -2703,7 +2982,10 @@ def api_top_performers():
         mfg_items_raw.extend(_expand_candidates(emergency_pool, max_jobs - len(mfg_items_raw)))
     mfg_items_raw = mfg_items_raw[:max_jobs]
 
-    science_pool = [item for item in science_candidates if float(item.get("profit_per_cycle", 0) or 0) > 0]
+    science_pool = [
+        item for item in science_candidates
+        if item.get("passes_profit_filter") and float(item.get("profit_per_cycle", 0) or 0) > 0
+    ]
     sci_items_raw = _expand_candidates(science_pool, max_science)[:max_science]
 
     # ── Fallback science tier: fill remaining science slots with lower-profit  ─
@@ -2716,6 +2998,8 @@ def api_top_performers():
         emergency_sci_pool: list[dict] = []
         for item in science_candidates:
             if str(item.get("rec_id") or "") in sci_seen_rec_ids:
+                continue
+            if not include_below_threshold_items and not item.get("passes_profit_filter"):
                 continue
             emergency_item = dict(item)
             emergency_item["is_fallback"] = True
@@ -2838,6 +3122,277 @@ def api_top_performers():
             r["slot_freed_by"]   = None
         r["manufacture_at"] = r["start_at"]
         items.append(r)
+
+    shared_personal_bpo_remaining = {
+        int(out_id): {str(char_id): int(count or 0) for char_id, count in (per_char or {}).items()}
+        for out_id, per_char in personal_bpo_count_by_output_character.items()
+    }
+    shared_personal_bpc_remaining = {
+        int(out_id): {str(char_id): int(count or 0) for char_id, count in (per_char or {}).items()}
+        for out_id, per_char in personal_bpc_count_by_output_character.items()
+    }
+    shared_corp_bpo_remaining = {
+        int(out_id): int(count or 0)
+        for out_id, count in corp_bpo_count_by_output.items()
+    }
+    slot_maps = {
+        "science": free_science_slots_by_character,
+        "manufacturing": free_mfg_slots_by_character,
+    }
+    idle_blockers = {
+        "science": {},
+        "manufacturing": {},
+    }
+
+    def _record_idle_blocker(slot_kind: str, char_id: str, reason_key: str) -> None:
+        slot_blockers = idle_blockers.setdefault(slot_kind, {})
+        blocked = slot_blockers.setdefault(char_id, {"blueprint_busy": 0, "blueprint_missing": 0})
+        blocked[reason_key] = int(blocked.get(reason_key, 0) or 0) + 1
+
+    def _mark_candidate_blockers(item: dict, slot_kind: str, reason_key: str) -> None:
+        slot_map = slot_maps.get(slot_kind, {})
+        personal_bpo_chars = set((item.get("character_personal_bpo_counts") or {}).keys())
+        personal_bpc_chars = set((item.get("character_personal_bpc_counts") or {}).keys())
+        known_access_chars = {str(c.get("character_id") or "") for c in (item.get("characters") or []) if c.get("character_id")}
+        candidate_ids = set()
+        if slot_kind == "manufacturing":
+            candidate_ids.update(personal_bpo_chars)
+            candidate_ids.update(personal_bpc_chars)
+            if "corp_bpo" in (item.get("ownership") or []):
+                candidate_ids.update(known_access_chars)
+        elif item.get("action_type") in ("copy_first", "copy_then_invent"):
+            candidate_ids.update(personal_bpo_chars)
+            if "corp_bpo" in (item.get("ownership") or []):
+                candidate_ids.update(known_access_chars)
+        else:
+            candidate_ids.update(known_access_chars)
+        for char_id in candidate_ids:
+            if not char_id or int(slot_map.get(char_id, {}).get("remaining", 0) or 0) <= 0:
+                continue
+            _record_idle_blocker(slot_kind, char_id, reason_key)
+
+    def _candidate_options_for_item(item: dict, slot_kind: str) -> list[dict]:
+        slot_map = slot_maps.get(slot_kind, {})
+        access_output_id = int(item.get("source_output_id") or item.get("output_id") or 0)
+        ownership = item.get("ownership") or []
+        action_type = item.get("action_type")
+        invention_eligible_ids = {str(char_id) for char_id in (item.get("invention_eligible_character_ids") or []) if char_id}
+        known_access_chars = {str(c.get("character_id") or "") for c in (item.get("characters") or []) if c.get("character_id")}
+        options = []
+
+        for char_id, slot_info in slot_map.items():
+            remaining = int(slot_info.get("remaining", 0) or 0)
+            if remaining <= 0:
+                continue
+            access_kind = None
+            access_priority = 9
+            if slot_kind == "manufacturing":
+                if int((shared_personal_bpc_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
+                    access_kind = "personal_bpc"
+                    access_priority = 0
+                elif int((shared_personal_bpo_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
+                    access_kind = "personal_bpo"
+                    access_priority = 2
+                elif "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) > 0:
+                    access_kind = "corp_bpo"
+                    access_priority = 1
+            elif action_type == "copy_first":
+                if int((shared_personal_bpo_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
+                    access_kind = "personal_bpo"
+                    access_priority = 0
+                elif "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) > 0:
+                    access_kind = "corp_bpo"
+                    access_priority = 1
+            elif action_type == "copy_then_invent":
+                if int((shared_personal_bpo_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
+                    access_kind = "personal_bpo"
+                    access_priority = 0
+                elif "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) > 0:
+                    access_kind = "corp_bpo"
+                    access_priority = 1
+            else:
+                character_ids = {str(c.get("character_id") or "") for c in (item.get("characters") or [])}
+                if invention_eligible_ids and char_id not in invention_eligible_ids:
+                    access_kind = None
+                elif int((shared_personal_bpc_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
+                    access_kind = "personal_bpc"
+                    access_priority = 0
+                elif char_id in character_ids:
+                    access_kind = "character"
+                    access_priority = 0
+
+            if access_kind is None:
+                continue
+
+            options.append({
+                "character_id": char_id,
+                "character_name": slot_info.get("character_name", f"Char {char_id}"),
+                "remaining": remaining,
+                "access_kind": access_kind,
+                "access_priority": access_priority,
+            })
+
+        options.sort(key=lambda option: (
+            int(option.get("access_priority", 9) or 9),
+            -int(option.get("remaining", 0) or 0),
+            str(option.get("character_name", "")),
+        ))
+        return options
+
+    def _consume_access(item: dict, chosen: dict) -> None:
+        access_output_id = int(item.get("source_output_id") or item.get("output_id") or 0)
+        char_id = str(chosen.get("character_id") or "")
+        access_kind = chosen.get("access_kind")
+        if access_kind == "personal_bpo":
+            per_char = shared_personal_bpo_remaining.setdefault(access_output_id, {})
+            per_char[char_id] = max(0, int(per_char.get(char_id, 0) or 0) - 1)
+        elif access_kind == "personal_bpc":
+            per_char = shared_personal_bpc_remaining.setdefault(access_output_id, {})
+            per_char[char_id] = max(0, int(per_char.get(char_id, 0) or 0) - 1)
+        elif access_kind == "corp_bpo":
+            shared_corp_bpo_remaining[access_output_id] = max(0, int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) - 1)
+
+    def _choose_invention_character(item: dict) -> dict | None:
+        eligible_ids = [str(char_id) for char_id in (item.get("invention_eligible_character_ids") or []) if char_id]
+        if not eligible_ids:
+            return None
+        preferred_id = str(item.get("preferred_invention_character_id") or "")
+        eligible_chars = {
+            str(char.get("character_id") or ""): {
+                "character_id": str(char.get("character_id") or ""),
+                "character_name": char.get("character_name") or f"Char {char.get('character_id')}",
+            }
+            for char in (item.get("invention_eligible_characters") or [])
+            if char.get("character_id")
+        }
+        if preferred_id and preferred_id in eligible_chars:
+            return dict(eligible_chars[preferred_id])
+        if preferred_id and preferred_id in eligible_ids:
+            return {
+                "character_id": preferred_id,
+                "character_name": item.get("preferred_invention_character_name") or f"Char {preferred_id}",
+            }
+        for char_id in eligible_ids:
+            if char_id in eligible_chars:
+                return dict(eligible_chars[char_id])
+            slot_info = free_science_slots_by_character.get(char_id) or free_mfg_slots_by_character.get(char_id) or {}
+            return {
+                "character_id": char_id,
+                "character_name": slot_info.get("character_name") or f"Char {char_id}",
+            }
+        return None
+
+    assignment_priority = {
+        "manufacture": 0,
+        "invent_first": 1,
+        "copy_then_invent": 2,
+        "copy_first": 3,
+    }
+    assignable_items = sorted(
+        list(items),
+        key=lambda item: (
+            -float(item.get("_selection_score", 0) or 0),
+            assignment_priority.get(str(item.get("action_type") or ""), 9),
+            str(item.get("name") or ""),
+        ),
+    )
+    for item in assignable_items:
+        slot_kind = "manufacturing" if item.get("action_type") == "manufacture" else "science"
+        item["assigned_character"] = None
+        item["slot_assignment_kind"] = slot_kind
+        item["copy_character"] = None
+        item["invent_character"] = None
+        if item.get("action_type") == "copy_then_invent":
+            options = _candidate_options_for_item(item, slot_kind)
+            inventor = _choose_invention_character(item)
+            if not inventor:
+                _mark_candidate_blockers(item, slot_kind, "blueprint_missing")
+                item["characters"] = []
+                continue
+            if not options:
+                _mark_candidate_blockers(item, slot_kind, "blueprint_busy")
+                item["characters"] = []
+                continue
+            chosen = options[0]
+            slot_maps[slot_kind][chosen["character_id"]]["remaining"] = max(
+                0,
+                int(slot_maps[slot_kind][chosen["character_id"]].get("remaining", 0) or 0) - 1,
+            )
+            _consume_access(item, chosen)
+            item["assigned_character"] = {
+                "character_id": chosen["character_id"],
+                "character_name": chosen["character_name"],
+            }
+            item["copy_character"] = dict(item["assigned_character"])
+            item["invent_character"] = dict(inventor)
+            item["characters"] = [dict(item["assigned_character"])]
+            item["assignment_access_kind"] = chosen.get("access_kind")
+            continue
+        options = _candidate_options_for_item(item, slot_kind)
+        if not options:
+            _mark_candidate_blockers(item, slot_kind, "blueprint_busy")
+            item["characters"] = []
+            continue
+        chosen = options[0]
+        slot_maps[slot_kind][chosen["character_id"]]["remaining"] = max(
+            0,
+            int(slot_maps[slot_kind][chosen["character_id"]].get("remaining", 0) or 0) - 1,
+        )
+        _consume_access(item, chosen)
+        item["assigned_character"] = {
+            "character_id": chosen["character_id"],
+            "character_name": chosen["character_name"],
+        }
+        if item.get("action_type") == "copy_first":
+            item["copy_character"] = dict(item["assigned_character"])
+        elif item.get("action_type") == "invent_first":
+            item["invent_character"] = dict(item["assigned_character"])
+        item["characters"] = [dict(item["assigned_character"])]
+        item["assignment_access_kind"] = chosen.get("access_kind")
+
+    def _build_idle_items(slot_kind: str, slot_map: dict[str, dict]) -> list[dict]:
+        idle_items: list[dict] = []
+        for char_id, slot_info in sorted(slot_map.items(), key=lambda item: str(item[1].get("character_name", ""))):
+            remaining = int(slot_info.get("remaining", 0) or 0)
+            if remaining <= 0:
+                continue
+            blocker = idle_blockers.get(slot_kind, {}).get(char_id, {}) or {}
+            if int(blocker.get("blueprint_busy", 0) or 0) > 0:
+                reason = "Only usable blueprint is already reserved by another queued job."
+            else:
+                reason = (
+                    "No eligible science job remains for this character."
+                    if slot_kind == "science"
+                    else "No eligible manufacturing job remains for this character."
+                )
+            action_type = "idle_science" if slot_kind == "science" else "idle_manufacture"
+            for idle_idx in range(remaining):
+                idle_items.append({
+                    "rec_id": f"{action_type}:{char_id}:{idle_idx}",
+                    "action_type": action_type,
+                    "is_idle": True,
+                    "name": "IDLE",
+                    "why": reason,
+                    "idle_reason": reason,
+                    "profit_per_cycle": 0,
+                    "runs_per_cycle": 0,
+                    "characters": [{
+                        "character_id": char_id,
+                        "character_name": slot_info.get("character_name", f"Char {char_id}"),
+                    }],
+                    "assigned_character": {
+                        "character_id": char_id,
+                        "character_name": slot_info.get("character_name", f"Char {char_id}"),
+                    },
+                    "slot_assignment_kind": slot_kind,
+                    "ownership": [],
+                    "start_at": now_ts if slot_kind == "manufacturing" else None,
+                    "slot_freed_by": None,
+                })
+        return idle_items
+
+    items = [item for item in items if item.get("assigned_character")]
+    items = _build_idle_items("science", free_science_slots_by_character) + items + _build_idle_items("manufacturing", free_mfg_slots_by_character)
 
     # ── Wallet capital risk ───────────────────────────────────────────────────
     CAPITAL_WARN_THRESHOLD = 0.40
@@ -4735,6 +5290,8 @@ _QUEUE_PLANNER_CANDIDATES_TS:    float = 0
 _MAX_JOBS_CACHE:    int   = 0
 _MAX_JOBS_CACHE_TS: float = 0.0
 _MAX_JOBS_TTL             = 1800  # 30 min
+_CHAR_SLOT_DETAILS_CACHE: dict  = {}
+_CHAR_SLOT_DETAILS_CACHE_TS: float = 0.0
 
 # science/research slots cached alongside mfg slots
 _MAX_SCIENCE_JOBS_CACHE:    int   = 0
@@ -4929,7 +5486,7 @@ def api_blueprints_esi():
             return cid, char_name, headers, bps_out, corp_id
 
         all_bps = []
-        char_corp_info = []  # [(cid, char_name, headers, corp_id), ...]
+        char_corp_info = []  # [(cid, char_name, headers, corp_id, corp_bp_access), ...]
 
         with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
             futures = [pool.submit(_fetch_personal, cid, h) for cid, h in auth_headers]
@@ -4937,46 +5494,92 @@ def api_blueprints_esi():
                 cid, char_name, headers, bps, corp_id = f.result()
                 all_bps.extend(bps)
                 if corp_id:
-                    char_corp_info.append((cid, char_name, headers, corp_id))
+                    corp_bp_access = str(char_records.get(cid, {}).get("corp_bp_access") or "auto").strip().lower()
+                    if corp_bp_access not in {"auto", "allow", "block"}:
+                        corp_bp_access = "auto"
+                    char_corp_info.append((cid, char_name, headers, corp_id, corp_bp_access))
+
+        corp_access_by_corp_id: dict[int, list[dict]] = {}
+        corp_fetch_seed_by_corp_id: dict[int, tuple[str, str, dict, list]] = {}
+        corp_allow_overrides_by_corp_id: dict[int, list[dict]] = {}
+        corp_esi_reachable_any = False
+
+        for cid, char_name, headers, corp_id, corp_bp_access in char_corp_info:
+            if not corp_id:
+                continue
+            if corp_bp_access == "allow":
+                allow_chars = corp_allow_overrides_by_corp_id.setdefault(corp_id, [])
+                if not any(str(member.get("character_id") or "") == str(cid) for member in allow_chars):
+                    allow_chars.append({"character_id": str(cid), "character_name": char_name})
+            try:
+                cr = req.get(
+                    f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
+                    headers=headers, params={"page": 1}, timeout=15
+                )
+            except Exception:
+                continue
+            if not cr.ok:
+                continue
+
+            corp_esi_reachable_any = True
+            if corp_bp_access != "block":
+                access_chars = corp_access_by_corp_id.setdefault(corp_id, [])
+                if not any(str(member.get("character_id") or "") == str(cid) for member in access_chars):
+                    access_chars.append({"character_id": str(cid), "character_name": char_name})
+
+            if corp_id not in corp_fetch_seed_by_corp_id:
+                try:
+                    first_page = list(cr.json() or [])
+                except Exception:
+                    first_page = []
+                corp_fetch_seed_by_corp_id[corp_id] = (str(cid), char_name, headers, first_page)
+
+        for corp_id, allow_chars in corp_allow_overrides_by_corp_id.items():
+            access_chars = corp_access_by_corp_id.setdefault(corp_id, [])
+            for allow_char in allow_chars:
+                allow_cid = str(allow_char.get("character_id") or "")
+                if allow_cid and not any(str(member.get("character_id") or "") == allow_cid for member in access_chars):
+                    access_chars.append(dict(allow_char))
 
         # ── Corp blueprints (deduplicated by corp_id) ──
-        seen_corp_ids = set()
         corp_esi_loaded_any = False
-        for cid, char_name, headers, corp_id in char_corp_info:
-            if corp_id in seen_corp_ids:
-                continue
-            seen_corp_ids.add(corp_id)
-            esi_corp_ok = False
+        for corp_id, (cid, char_name, headers, first_page_bps) in corp_fetch_seed_by_corp_id.items():
+            access_characters = list(corp_access_by_corp_id.get(corp_id, []))
             page = 1
+            page_bps = list(first_page_bps or [])
             while True:
-                try:
-                    cr = req.get(
-                        f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
-                        headers=headers, params={"page": page}, timeout=15
-                    )
-                except Exception:
-                    break
-                if not cr.ok:
-                    break
-                esi_corp_ok = True
-                page_bps = cr.json()
+                if page > 1:
+                    try:
+                        cr = req.get(
+                            f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
+                            headers=headers, params={"page": page}, timeout=15
+                        )
+                    except Exception:
+                        break
+                    if not cr.ok:
+                        break
+                    page_bps = cr.json()
+
                 if not page_bps:
                     break
+
                 corp_esi_loaded_any = True
                 for bp in page_bps:
-                    bp["_character_id"]   = cid
+                    bp["_character_id"] = cid
                     bp["_character_name"] = char_name
-                    bp["_owner"]          = "corp"
-                    bp["_corp_id"]        = corp_id
+                    bp["_owner"] = "corp"
+                    bp["_corp_id"] = corp_id
+                    bp["_access_characters"] = access_characters
                     all_bps.append(bp)
                 if len(page_bps) < 1000:
                     break
                 page += 1
 
-        if not corp_esi_loaded_any and CORP_BPO_TYPE_IDS:
+        if not corp_esi_reachable_any and CORP_BPO_TYPE_IDS:
             fallback_cid = char_corp_info[0][0] if char_corp_info else None
             fallback_name = char_corp_info[0][1] if char_corp_info else "corp"
             fallback_corp_id = char_corp_info[0][3] if char_corp_info else None
+            fallback_access_characters = list(corp_access_by_corp_id.get(fallback_corp_id, []))
             print(f"  [esi-bps] No corp ESI blueprint data available - using static corp_BPOs fallback once ({len(CORP_BPO_TYPE_IDS)} BPOs)")
             for tid in CORP_BPO_TYPE_IDS:
                 all_bps.append({
@@ -4990,6 +5593,7 @@ def api_blueprints_esi():
                     "_character_name": fallback_name,
                     "_owner": "corp",
                     "_corp_id": fallback_corp_id,
+                    "_access_characters": fallback_access_characters,
                 })
 
         if not all_bps:
@@ -5022,6 +5626,12 @@ def api_blueprints_esi():
 
         result = []
         for bp in all_bps:
+            access_characters = list(bp.get("_access_characters") or [])
+            if not access_characters and bp.get("_owner") != "corp" and bp.get("_character_id"):
+                access_characters = [{
+                    "character_id": str(bp["_character_id"]),
+                    "character_name": bp.get("_character_name") or f"Char {bp['_character_id']}",
+                }]
             result.append({
                 "type_id":        bp["type_id"],
                 "name":           names.get(bp["type_id"], f"Type {bp['type_id']}"),
@@ -5034,11 +5644,14 @@ def api_blueprints_esi():
                 "character_id":   bp["_character_id"],
                 "character_name": bp["_character_name"],
                 "owner":          bp["_owner"],
+                "corp_id":        bp.get("_corp_id"),
+                "access_characters": access_characters,
             })
 
         result.sort(key=lambda x: x["name"])
         _ESI_BP_CACHE = {"blueprints": result, "count": len(result)}
         _ESI_BP_CACHE_TS = time.time()
+        threading.Thread(target=_save_esi_state_to_disk, daemon=True).start()
         return jsonify(_ESI_BP_CACHE)
 
     except Exception as e:
@@ -5413,6 +6026,7 @@ def api_industry_jobs():
         result.sort(key=lambda x: x["seconds_remaining"])
         _ESI_JOBS_CACHE = {"jobs": result, "count": len(result)}
         _ESI_JOBS_CACHE_TS = time.time()
+        threading.Thread(target=_save_esi_state_to_disk, daemon=True).start()
         running_jobs = sum(1 for j in result if j.get("activity_id") in (1, 9, 11) and (j.get("end_ts") or 0) > now_ts)
         running_science = sum(1 for j in result if j.get("activity_id") in (3, 4, 5, 8) and (j.get("end_ts") or 0) > now_ts)
         _record_utilization_snapshot(
@@ -5579,6 +6193,39 @@ def api_craft_log():
                 except Exception as _e:
                     print(f"  [craft-log] mat cost failed: {_e}")
 
+                # ── T2 overhead: datacores + invention job + copy job, amortised per run ─
+                t2_inv_data: dict[int, dict] = {}
+                try:
+                    from invention import calculate_invention_cost as _calc_inv
+                    from calculator import calculate_industry_job_cost as _calc_job_cost
+                    _cdb2 = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+                    _cdb2.row_factory = _sq.Row
+                    ph_t2 = ",".join("?" * len(product_ids))
+                    t2_rows = _cdb2.execute(
+                        f"""
+                        SELECT b.output_id,
+                               bi.base_success_chance, bi.output_runs_per_bpc
+                        FROM blueprints b
+                        JOIN blueprint_invention bi ON bi.t2_blueprint_id = b.blueprint_id
+                        WHERE b.output_id IN ({ph_t2})
+                        """,
+                        product_ids,
+                    ).fetchall()
+                    _cdb2.close()
+                    for row in t2_rows:
+                        pid2     = row["output_id"]
+                        pname    = names.get(pid2, f"Type {pid2}")
+                        inv_res  = _calc_inv(pname, prices=market_prices)
+                        if inv_res is None:
+                            continue
+                        t2_inv_data[pid2] = {
+                            "success_chance":        float(inv_res.get("success_chance") or float(row["base_success_chance"] or 0.34)),
+                            "runs_per_bpc":          max(1, int(row["output_runs_per_bpc"] or 10)),
+                            "datacore_cost_per_run": float(inv_res.get("cost_per_run") or 0.0),
+                        }
+                except Exception as _t2e:
+                    print(f"  [craft-log] T2 overhead lookup failed: {_t2e}")
+
                 to_store = []
                 for j in raw_jobs:
                     pid   = j.get("product_type_id")
@@ -5588,8 +6235,38 @@ def api_craft_log():
                     cpu   = mat_cost_per_unit.get(pid)
                     mat   = round(cpu * runs, 2) if cpu is not None else None
                     rev   = round(sell * runs, 2) if sell is not None else None
-                    prof  = round(rev - mat, 2) if (rev is not None and mat is not None) else None
-                    mgn   = round(prof / mat * 100, 2) if (prof is not None and mat and mat > 0) else None
+
+                    # T2 overhead: invention datacores + inv job fee + copy job fee
+                    overhead_cost = None
+                    t2 = t2_inv_data.get(pid) if pid else None
+                    if t2:
+                        try:
+                            from calculator import calculate_industry_job_cost as _calc_job_cost
+                            _eiv     = float(mat_cost_per_unit.get(pid) or 0.0)
+                            _sys_id  = str(j.get("solar_system_id") or "")
+                            _inv_sci = _resolve_sci(_sys_id, activity="invention")
+                            _cpy_sci = _resolve_sci(_sys_id, activity="copying")
+                            _sc      = max(t2["success_chance"], 1e-9)
+                            _rpb     = t2["runs_per_bpc"]
+                            _inv_job = float((_calc_job_cost(
+                                activity="invention", eiv=_eiv, sci=_inv_sci,
+                                cfg={"facility_tax_rate": 0.001, "scc_surcharge_rate": 0.04,
+                                     "invention_activity_multiplier": 0.02},
+                            ).get("total_job_cost") or 0.0)) / _sc / _rpb
+                            _cpy_job = float((_calc_job_cost(
+                                activity="copying", eiv=_eiv, sci=_cpy_sci,
+                                cfg={"facility_tax_rate": 0.001, "scc_surcharge_rate": 0.04,
+                                     "copying_activity_multiplier": 0.02},
+                            ).get("total_job_cost") or 0.0)) / _rpb
+                            overhead_per_run = t2["datacore_cost_per_run"] + _inv_job + _cpy_job
+                            overhead_cost = round(overhead_per_run * runs, 2)
+                        except Exception:
+                            overhead_cost = None
+
+                    total_mat_run = (cpu or 0.0) * runs
+                    total_cost_run = total_mat_run + (overhead_cost or 0.0)
+                    prof  = round(rev - total_cost_run, 2) if (rev is not None and mat is not None) else None
+                    mgn   = round(prof / total_cost_run * 100, 2) if (prof is not None and total_cost_run > 0) else None
                     to_store.append({
                         "job_id":          j.get("job_id"),
                         "char_id":         j["_char_id"],
@@ -5603,6 +6280,7 @@ def api_craft_log():
                         "sell_price":      sell,
                         "est_profit":      prof,
                         "margin_pct":      mgn,
+                        "overhead_cost":   overhead_cost,
                         "completed_at":    j.get("end_date", ""),
                     })
                 upsert_craft_jobs(to_store)
@@ -5626,107 +6304,139 @@ def api_craft_stats():
         return jsonify({"error": str(e)}), 200
 
 
-# ── Shared max manufacturing slots (cached 30 min, used by queue-summary + top-performers) ──
-def _get_max_jobs(running_fallback: int = 0) -> int:
-    """Return sum of manufacturing slots across all characters, refreshed every 30 min."""
-    global _MAX_JOBS_CACHE, _MAX_JOBS_CACHE_TS, _MFG_TIME_MODIFIER
-    if _MAX_JOBS_CACHE > 0 and (time.time() - _MAX_JOBS_CACHE_TS) < _MAX_JOBS_TTL:
-        return _MAX_JOBS_CACHE
+@app.route("/api/craft-timeline", methods=["GET"])
+def api_craft_timeline():
+    """Return per-week craft profitability for the Trends chart."""
+    try:
+        days = int(request.args.get("days", 90))
+        return jsonify(get_craft_timeline(days=days))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
+
+
+# ── Shared max manufacturing slots (cached 30 min, used by queue-summary + job-planner) ──
+def _get_character_slot_details() -> dict[str, dict]:
+    """Return per-character manufacturing/science slot details, refreshed every 30 min."""
+    global _CHAR_SLOT_DETAILS_CACHE, _CHAR_SLOT_DETAILS_CACHE_TS
+    global _MAX_JOBS_CACHE, _MAX_JOBS_CACHE_TS, _MAX_SCIENCE_JOBS_CACHE, _MAX_SCIENCE_JOBS_CACHE_TS
+    global _MFG_TIME_MODIFIER, _COPY_TIME_MODIFIER
+
+    if _CHAR_SLOT_DETAILS_CACHE and (time.time() - _CHAR_SLOT_DETAILS_CACHE_TS) < _MAX_JOBS_TTL:
+        return dict(_CHAR_SLOT_DETAILS_CACHE)
+
     MASS_PROD     = 3387
     ADV_MASS_PROD = 24625
     INDUSTRY      = 3380   # Manufacturing: −4% build time per level
     ADV_INDUSTRY  = 3388   # Advanced Industry: −3% build time per level
-    max_jobs = 0
+    LAB_OP        = 3406   # Lab Operation          — +1 slot per level, base 1
+    ADV_LAB_OP    = 24624  # Advanced Lab Operation — +1 slot per level
+    SCIENCE       = 3402   # Science skill          — −5% copy time per level
+
+    slot_details: dict[str, dict] = {}
     best_mfg_modifier = 1.0
+    best_copy_modifier = 1.0
     try:
         import requests as _req
-        from characters import get_all_auth_headers
+        from characters import get_all_auth_headers, load_characters
         from concurrent.futures import ThreadPoolExecutor
 
+        char_records = load_characters()
+
         def _fetch_slots(cid, headers):
+            char_id = str(cid)
+            char_name = char_records.get(char_id, {}).get("character_name", f"Char {char_id}")
             try:
                 r = _req.get(
-                    f"https://esi.evetech.net/latest/characters/{cid}/skills/",
+                    f"https://esi.evetech.net/latest/characters/{char_id}/skills/",
                     headers=headers, timeout=10,
                 )
                 if not r.ok:
-                    return 1, 1.0
+                    return char_id, {
+                        "character_id": char_id,
+                        "character_name": char_name,
+                        "mfg_slots": 1,
+                        "science_slots": 1,
+                        "mfg_time_modifier": 1.0,
+                        "copy_time_modifier": 1.0,
+                    }
                 skill_map = {s["skill_id"]: s["trained_skill_level"] for s in r.json().get("skills", [])}
-                slots = 1 + skill_map.get(MASS_PROD, 0) + skill_map.get(ADV_MASS_PROD, 0)
+                mfg_slots = 1 + skill_map.get(MASS_PROD, 0) + skill_map.get(ADV_MASS_PROD, 0)
+                science_slots = 1 + skill_map.get(LAB_OP, 0) + skill_map.get(ADV_LAB_OP, 0)
                 mfg_mod = (
                     (1.0 - 0.04 * skill_map.get(INDUSTRY, 0))
                     * (1.0 - 0.03 * skill_map.get(ADV_INDUSTRY, 0))
                 )
-                return slots, mfg_mod
+                copy_mod = (
+                    (1.0 - 0.05 * skill_map.get(SCIENCE, 0))
+                    * (1.0 - 0.03 * skill_map.get(ADV_INDUSTRY, 0))
+                )
+                return char_id, {
+                    "character_id": char_id,
+                    "character_name": char_name,
+                    "mfg_slots": mfg_slots,
+                    "science_slots": science_slots,
+                    "mfg_time_modifier": mfg_mod,
+                    "copy_time_modifier": copy_mod,
+                }
             except Exception:
-                return 1, 1.0
+                return char_id, {
+                    "character_id": char_id,
+                    "character_name": char_name,
+                    "mfg_slots": 1,
+                    "science_slots": 1,
+                    "mfg_time_modifier": 1.0,
+                    "copy_time_modifier": 1.0,
+                }
 
         auth_headers = get_all_auth_headers()
         if auth_headers:
             with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
-                for slots, mfg_mod in pool.map(lambda x: _fetch_slots(*x), auth_headers):
-                    max_jobs += slots
-                    best_mfg_modifier = min(best_mfg_modifier, mfg_mod)
-        else:
-            max_jobs = max(1, running_fallback + 1)
+                for char_id, details in pool.map(lambda x: _fetch_slots(*x), auth_headers):
+                    slot_details[char_id] = details
+                    best_mfg_modifier = min(best_mfg_modifier, float(details.get("mfg_time_modifier", 1.0) or 1.0))
+                    best_copy_modifier = min(best_copy_modifier, float(details.get("copy_time_modifier", 1.0) or 1.0))
     except Exception:
-        max_jobs = max(1, running_fallback + 1)
+        slot_details = {}
 
-    if max_jobs > 0:
-        _MAX_JOBS_CACHE    = max_jobs
-        _MAX_JOBS_CACHE_TS = time.time()
+    _CHAR_SLOT_DETAILS_CACHE = dict(slot_details)
+    _CHAR_SLOT_DETAILS_CACHE_TS = time.time()
+
+    total_mfg_slots = sum(int(details.get("mfg_slots", 0) or 0) for details in slot_details.values())
+    total_science_slots = sum(int(details.get("science_slots", 0) or 0) for details in slot_details.values())
+    if total_mfg_slots > 0:
+        _MAX_JOBS_CACHE = total_mfg_slots
+        _MAX_JOBS_CACHE_TS = _CHAR_SLOT_DETAILS_CACHE_TS
         _MFG_TIME_MODIFIER = best_mfg_modifier
-    return max_jobs
+    if total_science_slots > 0:
+        _MAX_SCIENCE_JOBS_CACHE = total_science_slots
+        _MAX_SCIENCE_JOBS_CACHE_TS = _CHAR_SLOT_DETAILS_CACHE_TS
+        _COPY_TIME_MODIFIER = best_copy_modifier
+    if slot_details:
+        threading.Thread(target=_save_esi_state_to_disk, daemon=True).start()
+    return dict(slot_details)
+
+
+def _get_max_jobs(running_fallback: int = 0) -> int:
+    """Return sum of manufacturing slots across all characters, refreshed every 30 min."""
+    if _MAX_JOBS_CACHE > 0 and (time.time() - _MAX_JOBS_CACHE_TS) < _MAX_JOBS_TTL:
+        return _MAX_JOBS_CACHE
+    slot_details = _get_character_slot_details()
+    total_mfg_slots = sum(int(details.get("mfg_slots", 0) or 0) for details in slot_details.values())
+    if total_mfg_slots > 0:
+        return total_mfg_slots
+    return max(1, running_fallback + 1)
 
 
 def _get_max_science_jobs(running_fallback: int = 0) -> int:
     """Return sum of science/research slots across all characters (Lab Op + Adv Lab Op).
     Also updates _COPY_TIME_MODIFIER with the best copy-time reduction across all characters."""
-    global _MAX_SCIENCE_JOBS_CACHE, _MAX_SCIENCE_JOBS_CACHE_TS, _COPY_TIME_MODIFIER
     if _MAX_SCIENCE_JOBS_CACHE > 0 and (time.time() - _MAX_SCIENCE_JOBS_CACHE_TS) < _MAX_JOBS_TTL:
         return _MAX_SCIENCE_JOBS_CACHE
-    LAB_OP       = 3406   # Lab Operation          — +1 slot per level, base 1
-    ADV_LAB_OP   = 24624  # Advanced Lab Operation — +1 slot per level
-    SCIENCE      = 3402   # Science skill          — −5% copy time per level (max −25%)
-    ADV_INDUSTRY = 3388   # Advanced Industry      — −3% all job time per level (max −15%)
-    max_sci = 0
-    best_modifier = 1.0
-    try:
-        import requests as _req
-        from characters import get_all_auth_headers
-        from concurrent.futures import ThreadPoolExecutor
-
-        def _fetch_sci_slots(cid, headers):
-            try:
-                r = _req.get(
-                    f"https://esi.evetech.net/latest/characters/{cid}/skills/",
-                    headers=headers, timeout=10,
-                )
-                if not r.ok:
-                    return 1, 1.0
-                skill_map = {s["skill_id"]: s["trained_skill_level"] for s in r.json().get("skills", [])}
-                slots    = 1 + skill_map.get(LAB_OP, 0) + skill_map.get(ADV_LAB_OP, 0)
-                modifier = (1.0 - 0.05 * skill_map.get(SCIENCE, 0)) * (1.0 - 0.03 * skill_map.get(ADV_INDUSTRY, 0))
-                return slots, modifier
-            except Exception:
-                return 1, 1.0
-
-        auth_headers = get_all_auth_headers()
-        if auth_headers:
-            with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
-                for slots, modifier in pool.map(lambda x: _fetch_sci_slots(*x), auth_headers):
-                    max_sci += slots
-                    best_modifier = min(best_modifier, modifier)
-        else:
-            max_sci = max(1, running_fallback + 1)
-    except Exception:
-        max_sci = max(1, running_fallback + 1)
-
-    if max_sci > 0:
-        _MAX_SCIENCE_JOBS_CACHE    = max_sci
-        _MAX_SCIENCE_JOBS_CACHE_TS = time.time()
-        _COPY_TIME_MODIFIER        = best_modifier
-    return max_sci
+    slot_details = _get_character_slot_details()
+    total_science_slots = sum(int(details.get("science_slots", 0) or 0) for details in slot_details.values())
+    if total_science_slots > 0:
+        return total_science_slots
+    return max(1, running_fallback + 1)
 
 
 # ── Queue Summary (footer stats) ───────────────────────────────────────────────
@@ -5801,6 +6511,12 @@ def api_queue_summary():
                         "name": material.get("name", f"Type {material.get('type_id')}"),
                         "quantity": material.get("quantity", 0),
                         "unit_price": material.get("unit_price", 0),
+                        "have_qty": material.get("have_qty"),
+                        "covered_qty": material.get("covered_qty"),
+                        "needed_qty_total": material.get("needed_qty_total"),
+                        "missing_qty": material.get("missing_qty"),
+                        "total_line_cost": material.get("total_line_cost"),
+                        "missing_line_cost": material.get("missing_line_cost"),
                     }
                     for material in (row.get("material_breakdown", []) or [])
                 ],
@@ -5859,8 +6575,24 @@ def _refresh_orders() -> dict:
                 f"https://esi.evetech.net/latest/characters/{cid}/orders/",
                 headers=headers, timeout=15,
             )
-            if resp.ok:
-                for o in resp.json():
+            if not resp.ok:
+                return orders
+
+            total_pages = max(1, min(int(resp.headers.get("X-Pages", 1) or 1), 50))
+            page_payloads = [resp.json()]
+            for page in range(2, total_pages + 1):
+                page_resp = req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/orders/",
+                    headers=headers,
+                    params={"page": page},
+                    timeout=15,
+                )
+                if not page_resp.ok:
+                    break
+                page_payloads.append(page_resp.json())
+
+            for page_orders in page_payloads:
+                for o in page_orders:
                     o["_character_id"]   = cid
                     o["_character_name"] = char_name
                     orders.append(o)
@@ -5922,6 +6654,8 @@ def _refresh_orders() -> dict:
             "duration":       o.get("duration", 0),
             "escrow":         o.get("escrow", 0),
             "region_name":    region_names.get(o.get("region_id"), ""),
+            "region_id":      o.get("region_id"),
+            "location_id":    o.get("location_id"),
             "character_id":   o["_character_id"],
             "character_name": o["_character_name"],
         }
@@ -5931,41 +6665,61 @@ def _refresh_orders() -> dict:
     buy.sort(key=lambda x: x["escrow"], reverse=True)
 
     # ── Enrich sell orders with market position + competitor count ─────────
-    # market_position   = cheaper sell orders ahead (0 = best price)
-    # competitor_count  = ALL sell listings for the type (supply depth)
+    # market_position   = 1-based sell rank at the order's known hub
+    # competitor_count  = ALL visible sell listings for that hub/type
     try:
-        import sqlite3 as _sq
-        db_path = os.path.join(_HERE, "market_cache.db")
-        if os.path.exists(db_path):
-            conn = _sq.connect(db_path)
-            new_pos_by_order: dict[int, int] = {}
-            for o in sell:
-                tid   = o["type_id"]
-                price = o["price"]
-                cheaper_row = conn.execute(
-                    "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0 AND price < ?",
-                    (tid, price),
-                ).fetchone()
-                total_row = conn.execute(
-                    "SELECT COUNT(*) FROM market_orders WHERE type_id=? AND is_buy_order=0",
-                    (tid,),
-                ).fetchone()
-                pos = int(cheaper_row[0]) if cheaper_row else None
-                o["market_position"]  = pos
-                o["competitor_count"] = int(total_row[0])   if total_row   else 0
+        sell_orders = [o for o in sell if o.get("type_id")]
+        hub_type_ids: dict[str, set[int]] = {}
+        order_hubs: dict[int, dict] = {}
+        for o in sell_orders:
+            oid = o.get("order_id")
+            hub = _market_hub_for_location(o.get("location_id"))
+            if not oid or not hub:
+                continue
+            order_hubs[int(oid)] = hub
+            hub_type_ids.setdefault(hub["name"], set()).add(int(o["type_id"]))
 
-                oid = o.get("order_id")
-                prev_pos = _LAST_SELL_POS_BY_ORDER.get(oid) if oid else None
-                o["market_position_prev"] = prev_pos
-                if pos is None or prev_pos is None or pos == prev_pos:
-                    o["market_position_trend"] = None
-                else:
-                    o["market_position_trend"] = "increasing" if pos > prev_pos else "decreasing"
+        market_books: dict[str, dict[int, dict]] = {}
+        for hub in _MARKET_HUBS_SMART:
+            tids = sorted(hub_type_ids.get(hub["name"], set()))
+            if tids:
+                market_books[hub["name"]] = _fetch_hub_sell_books(hub, tids)
 
-                if oid and pos is not None:
-                    new_pos_by_order[oid] = pos
-            _LAST_SELL_POS_BY_ORDER = new_pos_by_order
-            conn.close()
+        new_pos_by_order: dict[int, int] = {}
+        for o in sell:
+            o["market_position"] = None
+            o["competitor_count"] = None
+            o["market_position_prev"] = None
+            o["market_position_trend"] = None
+            o["market_hub"] = None
+
+            oid = o.get("order_id")
+            tid = o.get("type_id")
+            if not oid or not tid:
+                continue
+            hub = order_hubs.get(int(oid))
+            if not hub:
+                continue
+            book = (market_books.get(hub["name"]) or {}).get(int(tid))
+            if not book:
+                continue
+
+            prices = book.get("prices") or []
+            if not prices:
+                continue
+            position = sum(1 for price in prices if price < float(o.get("price") or 0)) + 1
+            o["market_position"] = position
+            o["competitor_count"] = int(book.get("order_count") or 0)
+            o["market_hub"] = hub["name"]
+
+            prev_pos = _LAST_SELL_POS_BY_ORDER.get(oid)
+            o["market_position_prev"] = prev_pos
+            if prev_pos is not None and position != prev_pos:
+                o["market_position_trend"] = "up" if position < prev_pos else "down"
+
+            new_pos_by_order[int(oid)] = position
+
+        _LAST_SELL_POS_BY_ORDER = new_pos_by_order
     except Exception as _e:
         print(f"  [orders] market_position lookup failed: {_e}")
 
@@ -6067,6 +6821,38 @@ _PACKAGED_VOLUMES: dict[int, float] = {
 
 _SMART_BUY_CACHE: dict = {}
 _SMART_BUY_CACHE_TTL = 180  # 3 minutes — market data is good for a bit
+_SELL_RECOMMENDATION_CACHE: dict = {}
+_SELL_RECOMMENDATION_CACHE_TTL = 180
+
+
+def _market_price_tick(price: float | None) -> float:
+    # Cheap heuristic for a small undercut / price-step without hard-coding the
+    # full EVE tick ladder. Keeps recommendations human-sized across scales.
+    if not price or price <= 0:
+        return 0.01
+    return max(0.01, round(price * 0.0005, 2))
+
+
+def _market_hub_for_location(location_id: int | None) -> dict | None:
+    if not location_id:
+        return None
+    for hub in _MARKET_HUBS_SMART:
+        if int(hub["station_id"]) == int(location_id):
+            return hub
+    return None
+
+
+def _build_sell_book(entries: list[tuple[float, int]]) -> dict | None:
+    prices = sorted(price for price, _volume in entries if price and price > 0)
+    if not prices:
+        return None
+    return {
+        "prices": prices,
+        "best_sell": prices[0],
+        "second_sell": prices[1] if len(prices) > 1 else None,
+        "order_count": len(prices),
+        "visible_volume": sum(max(0, volume) for _price, volume in entries),
+    }
 
 
 def _get_jumps(origin_system_id: int, dest_system_id: int) -> int | None:
@@ -6181,6 +6967,158 @@ def _fetch_hub_sell_prices(hub: dict, type_ids: list[int]) -> dict[int, float]:
                 result[tid] = price
 
     return result
+
+
+def _fetch_hub_sell_books(hub: dict, type_ids: list[int]) -> dict[int, dict]:
+    # Fetch sorted sell books for one hub. Used by orders POS logic and by the
+    # sell recommendation endpoint to derive best/second prices and counts.
+    result: dict[int, dict] = {}
+    if not type_ids:
+        return result
+
+    if hub["name"] == "Jita":
+        try:
+            import sqlite3 as _sq
+            conn = _sq.connect(os.path.join(_HERE, "market_cache.db"))
+            conn.row_factory = _sq.Row
+            placeholders = ",".join("?" * len(type_ids))
+            rows = conn.execute(
+                f"SELECT type_id, price, volume_remain FROM market_orders "
+                f"WHERE type_id IN ({placeholders}) AND is_buy_order=0 "
+                f"ORDER BY type_id ASC, price ASC",
+                type_ids,
+            ).fetchall()
+            conn.close()
+
+            grouped: dict[int, list[tuple[float, int]]] = {}
+            for row in rows:
+                grouped.setdefault(int(row["type_id"]), []).append((
+                    float(row["price"] or 0),
+                    int(row["volume_remain"] or 0),
+                ))
+
+            for tid, entries in grouped.items():
+                book = _build_sell_book(entries)
+                if book:
+                    result[tid] = book
+        except Exception:
+            pass
+        return result
+
+    region_id = hub["region_id"]
+    station_id = hub["station_id"]
+
+    def _fetch_one(tid: int) -> tuple[int, dict | None]:
+        try:
+            resp = requests.get(
+                f"https://esi.evetech.net/latest/markets/{region_id}/orders/",
+                params={"order_type": "sell", "type_id": tid},
+                timeout=10,
+            )
+            if not resp.ok:
+                return tid, None
+
+            entries = [
+                (
+                    float(order.get("price") or 0),
+                    int(order.get("volume_remain") or 0),
+                )
+                for order in resp.json()
+                if order.get("location_id") == station_id
+            ]
+            return tid, _build_sell_book(entries)
+        except Exception:
+            return tid, None
+
+    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+
+    with _TPE(max_workers=15) as pool:
+        futures = {pool.submit(_fetch_one, tid): tid for tid in type_ids}
+        for fut in _ac(futures):
+            tid, book = fut.result()
+            if book:
+                result[tid] = book
+
+    return result
+
+
+def _fetch_hub_sell_overview(hub: dict, type_ids: list[int]) -> dict[int, dict]:
+    # Fetch the sell-side shape for a hub: best price, second price, listing
+    # count, and total visible volume. This is enough for a pricing heuristic.
+    result: dict[int, dict] = {}
+    for tid, book in _fetch_hub_sell_books(hub, type_ids).items():
+        result[tid] = {
+            "best_sell": book.get("best_sell"),
+            "second_sell": book.get("second_sell"),
+            "order_count": book.get("order_count"),
+            "visible_volume": book.get("visible_volume"),
+        }
+    return result
+
+
+def _recommend_sell_price(goal: str, best_sell: float | None, second_sell: float | None,
+                          fallback_price: float | None, floor_price: float) -> float | None:
+    anchor = best_sell or fallback_price
+    if not anchor or anchor <= 0:
+        return None
+
+    tick = _market_price_tick(anchor)
+
+    if best_sell:
+        if goal == "fast":
+            target = best_sell - tick
+        elif goal == "max":
+            if second_sell and second_sell > best_sell:
+                target = second_sell - tick
+            else:
+                target = best_sell * 1.015
+        else:
+            if second_sell and second_sell > best_sell * 1.004:
+                target = min(second_sell - tick, best_sell + ((second_sell - best_sell) * 0.4))
+            else:
+                target = best_sell - tick
+    else:
+        if goal == "fast":
+            target = anchor * 0.995
+        elif goal == "max":
+            target = anchor * 1.035
+        else:
+            target = anchor * 1.015
+
+    return round(max(floor_price, target), 2)
+
+
+def _estimate_sell_days(goal: str, quantity: int, recommended_price: float | None,
+                        best_sell: float | None, daily_volume: float | None,
+                        order_count: int, personal_avg_days: float | None,
+                        overall_avg_days: float | None, existing_listed_qty: int) -> float | None:
+    if not recommended_price or recommended_price <= 0 or quantity <= 0:
+        return None
+
+    daily_units = max(float(daily_volume or 0), 0.0)
+    market_days = None
+    if daily_units > 0:
+        market_days = max(0.25, quantity / max(daily_units * 0.65, 1.0))
+
+    baseline = personal_avg_days or market_days or overall_avg_days or 7.0
+    if market_days is not None:
+        baseline = max(baseline, market_days)
+
+    competition_mult = 1.0 + min(max(order_count, 0), 20) * 0.03
+    quantity_mult = 1.0 + (existing_listed_qty / max(quantity, 1)) * 0.15
+    goal_mult = {
+        "fast": 0.72,
+        "balanced": 1.0,
+        "max": 1.45,
+    }.get(goal, 1.0)
+
+    premium_ratio = 0.0
+    if best_sell and best_sell > 0:
+        premium_ratio = max(0.0, (recommended_price - best_sell) / best_sell)
+    premium_mult = 1.0 + (premium_ratio * 12.0)
+
+    estimate = baseline * competition_mult * quantity_mult * goal_mult * premium_mult
+    return round(max(0.25, estimate), 2)
 
 
 def _get_volume_m3(type_id: int, fallback: float = 0.01) -> float:
@@ -6453,6 +7391,281 @@ def api_shopping_optimal_sources():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/haul/sell-recommendations", methods=["GET"])
+def api_haul_sell_recommendations():
+    # Recommend listing prices for inventory that looks worth selling.
+    global _SELL_RECOMMENDATION_CACHE
+    try:
+        goal = (request.args.get("goal") or "balanced").strip().lower()
+        if goal not in {"fast", "balanced", "max"}:
+            goal = "balanced"
+
+        requested_hub = (request.args.get("hub") or "Jita").strip()
+        limit = max(1, min(int(request.args.get("limit", 30) or 30), 100))
+        min_total_value = max(float(request.args.get("min_total_value", 1000000) or 0), 0.0)
+
+        target_hub = next(
+            (hub for hub in _MARKET_HUBS_SMART if hub["name"].lower() == requested_hub.lower()),
+            _MARKET_HUBS_SMART[0],
+        )
+
+        cache_key = json.dumps({
+            "goal": goal,
+            "hub": target_hub["name"],
+            "limit": limit,
+            "min_total_value": min_total_value,
+        }, sort_keys=True)
+        cached = _SELL_RECOMMENDATION_CACHE.get(cache_key)
+        if cached and (time.time() - cached["_ts"]) < _SELL_RECOMMENDATION_CACHE_TTL:
+            return jsonify({k: v for k, v in cached.items() if k != "_ts"})
+
+        if not _ASSETS_CACHE or (time.time() - _ASSETS_CACHE_TS) >= _ASSETS_TTL:
+            api_assets()
+
+        assets = _ASSETS_CACHE.get("assets", {}) if _ASSETS_CACHE else {}
+        names = _ASSETS_CACHE.get("names", {}) if _ASSETS_CACHE else {}
+
+        if not assets:
+            payload = {
+                "goal": goal,
+                "selected_hub": target_hub["name"],
+                "hubs": [hub["name"] for hub in _MARKET_HUBS_SMART],
+                "summary": {
+                    "item_count": 0,
+                    "total_units": 0,
+                    "total_recommended_value": 0.0,
+                    "items_with_better_hub": 0,
+                },
+                "items": [],
+            }
+            _SELL_RECOMMENDATION_CACHE[cache_key] = {**payload, "_ts": time.time()}
+            return jsonify(payload)
+
+        try:
+            from pricer import get_prices_bulk
+            asset_type_ids = [int(type_id) for type_id, qty in assets.items() if int(qty or 0) > 0]
+            reference_prices = get_prices_bulk(asset_type_ids, history_ids=[])
+        except Exception:
+            reference_prices = {}
+
+        candidate_rows = []
+        for raw_type_id, raw_qty in assets.items():
+            type_id = int(raw_type_id)
+            quantity = int(raw_qty or 0)
+            if quantity <= 0:
+                continue
+
+            name = names.get(str(type_id)) or names.get(type_id) or f"Type {type_id}"
+            if "blueprint" in name.lower():
+                continue
+
+            ref_price = reference_prices.get(type_id)
+            if not ref_price:
+                continue
+
+            rough_unit_price = (
+                ref_price.get("sell")
+                or ref_price.get("average_price")
+                or ref_price.get("adjusted_price")
+                or ref_price.get("buy")
+            )
+            if not rough_unit_price or rough_unit_price <= 0:
+                continue
+
+            rough_total_value = float(rough_unit_price) * quantity
+            if rough_total_value < min_total_value:
+                continue
+
+            candidate_rows.append({
+                "type_id": type_id,
+                "name": name,
+                "quantity": quantity,
+                "rough_total_value": round(rough_total_value, 2),
+            })
+
+        candidate_rows.sort(key=lambda row: row["rough_total_value"], reverse=True)
+        fetch_cap = min(len(candidate_rows), max(limit, 40))
+        scoped_candidates = candidate_rows[:fetch_cap]
+        scoped_type_ids = [row["type_id"] for row in scoped_candidates]
+
+        if not scoped_type_ids:
+            payload = {
+                "goal": goal,
+                "selected_hub": target_hub["name"],
+                "hubs": [hub["name"] for hub in _MARKET_HUBS_SMART],
+                "summary": {
+                    "item_count": 0,
+                    "total_units": 0,
+                    "total_recommended_value": 0.0,
+                    "items_with_better_hub": 0,
+                },
+                "items": [],
+            }
+            _SELL_RECOMMENDATION_CACHE[cache_key] = {**payload, "_ts": time.time()}
+            return jsonify(payload)
+
+        from pricer import get_prices_bulk
+        scoped_prices = get_prices_bulk(scoped_type_ids, history_ids=scoped_type_ids)
+
+        _refresh_orders_if_stale()
+        live_sell_orders = (_ESI_ORDERS_CACHE or {}).get("sell", [])
+        active_sell_by_type: dict[int, int] = {}
+        for order in live_sell_orders:
+            type_id = int(order.get("type_id") or 0)
+            if not type_id:
+                continue
+            active_sell_by_type[type_id] = active_sell_by_type.get(type_id, 0) + int(order.get("volume_remain") or 0)
+
+        sell_velocity = get_sell_velocity_by_type_id()
+        sell_history = get_sell_history_stats()
+        overall_avg_days = (sell_history.get("overall") or {}).get("avg_days_to_sell")
+
+        hub_overviews = {
+            hub["name"]: _fetch_hub_sell_overview(hub, scoped_type_ids)
+            for hub in _MARKET_HUBS_SMART
+        }
+
+        fee_fraction = float(CALC_CONFIG.get("sales_tax", 0.0)) + float(CALC_CONFIG.get("broker_fee", 0.0))
+        items = []
+
+        for row in scoped_candidates:
+            type_id = row["type_id"]
+            quantity = row["quantity"]
+            price_row = scoped_prices.get(type_id) or {}
+            selected_overview = (hub_overviews.get(target_hub["name"]) or {}).get(type_id, {})
+
+            best_sell = selected_overview.get("best_sell")
+            second_sell = selected_overview.get("second_sell")
+            fallback_price = (
+                price_row.get("sell")
+                or price_row.get("average_price")
+                or price_row.get("adjusted_price")
+                or price_row.get("buy")
+            )
+            if not best_sell and not fallback_price:
+                continue
+
+            floor_price = max(
+                float(price_row.get("buy") or 0) * 1.01,
+                float(price_row.get("adjusted_price") or 0) * 0.9,
+                float(price_row.get("average_price") or 0) * 0.88,
+                0.01,
+            )
+            recommended_price = _recommend_sell_price(
+                goal,
+                best_sell,
+                second_sell,
+                fallback_price,
+                floor_price,
+            )
+            if not recommended_price:
+                continue
+
+            personal_velocity = sell_velocity.get(type_id) or {}
+            daily_volume = price_row.get("avg_daily_volume")
+            order_count = int(selected_overview.get("order_count") or 0)
+            existing_listed_qty = int(active_sell_by_type.get(type_id) or 0)
+            estimated_days = _estimate_sell_days(
+                goal,
+                quantity,
+                recommended_price,
+                best_sell,
+                daily_volume,
+                order_count,
+                personal_velocity.get("avg_days_to_sell"),
+                overall_avg_days,
+                existing_listed_qty,
+            )
+
+            hub_prices = []
+            for hub in _MARKET_HUBS_SMART:
+                overview = (hub_overviews.get(hub["name"]) or {}).get(type_id, {})
+                hub_best_sell = overview.get("best_sell")
+                if hub_best_sell:
+                    hub_prices.append({
+                        "hub": hub["name"],
+                        "best_sell": round(float(hub_best_sell), 2),
+                        "order_count": int(overview.get("order_count") or 0),
+                    })
+
+            best_elsewhere = None
+            for hub_price in sorted(hub_prices, key=lambda entry: entry["best_sell"], reverse=True):
+                if hub_price["hub"] == target_hub["name"]:
+                    continue
+                delta_per_unit = hub_price["best_sell"] - recommended_price
+                delta_total = delta_per_unit * quantity
+                if delta_per_unit > max(recommended_price * 0.05, 10000) and delta_total > 1000000:
+                    best_elsewhere = {
+                        "hub": hub_price["hub"],
+                        "best_sell": hub_price["best_sell"],
+                        "delta_per_unit": round(delta_per_unit, 2),
+                        "delta_total": round(delta_total, 2),
+                    }
+                    break
+
+            net_after_fees_per_unit = round(recommended_price * (1.0 - fee_fraction), 2)
+            total_net_after_fees = round(net_after_fees_per_unit * quantity, 2)
+            total_recommended_value = round(recommended_price * quantity, 2)
+
+            items.append({
+                "type_id": type_id,
+                "name": row["name"],
+                "quantity": quantity,
+                "selected_hub": target_hub["name"],
+                "goal": goal,
+                "recommended_price": round(recommended_price, 2),
+                "price_floor": round(floor_price, 2),
+                "selected_hub_best_sell": round(float(best_sell), 2) if best_sell else None,
+                "selected_hub_second_sell": round(float(second_sell), 2) if second_sell else None,
+                "selected_hub_order_count": order_count,
+                "selected_hub_visible_volume": int(selected_overview.get("visible_volume") or 0),
+                "jita_best_sell": round(float(price_row.get("sell")), 2) if price_row.get("sell") else None,
+                "jita_best_buy": round(float(price_row.get("buy")), 2) if price_row.get("buy") else None,
+                "daily_volume": round(float(daily_volume), 2) if daily_volume is not None else None,
+                "estimated_days_to_sell": estimated_days,
+                "existing_listed_qty": existing_listed_qty,
+                "history_avg_days_to_sell": personal_velocity.get("avg_days_to_sell"),
+                "history_total_sold": personal_velocity.get("total_sold"),
+                "net_after_fees_per_unit": net_after_fees_per_unit,
+                "total_net_after_fees": total_net_after_fees,
+                "total_recommended_value": total_recommended_value,
+                "better_hub": best_elsewhere,
+                "hub_prices": hub_prices,
+            })
+
+        items.sort(
+            key=lambda item: (
+                item["better_hub"]["delta_total"] if item.get("better_hub") else 0,
+                item["total_recommended_value"],
+            ),
+            reverse=True,
+        )
+        items = items[:limit]
+
+        payload = {
+            "goal": goal,
+            "selected_hub": target_hub["name"],
+            "hubs": [hub["name"] for hub in _MARKET_HUBS_SMART],
+            "summary": {
+                "item_count": len(items),
+                "total_units": sum(item["quantity"] for item in items),
+                "total_recommended_value": round(sum(item["total_recommended_value"] for item in items), 2),
+                "total_net_after_fees": round(sum(item["total_net_after_fees"] for item in items), 2),
+                "items_with_better_hub": sum(1 for item in items if item.get("better_hub")),
+                "asset_candidates_considered": len(scoped_candidates),
+            },
+            "items": items,
+        }
+
+        _SELL_RECOMMENDATION_CACHE[cache_key] = {**payload, "_ts": time.time()}
+        return jsonify(payload)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e), "items": [], "summary": {}}), 500
 
 
 @app.route("/api/sell_history", methods=["GET"])
@@ -6743,6 +7956,10 @@ async def _prewarm_task():
     # Restore any cached calculator results from the previous run immediately
     # so /api/calculator hits are instant even before the prewarm completes.
     await asyncio.to_thread(_load_calc_cache_from_disk)
+
+    # Restore ESI blueprint/jobs/slot data so the planner can assign items
+    # immediately — before the first live ESI refresh has a chance to run.
+    await asyncio.to_thread(_load_esi_state_from_disk)
 
     def _load_skill_names():
         global _skill_id_names

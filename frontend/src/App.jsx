@@ -6,7 +6,6 @@ import CharactersPage from './pages/CharactersPage';
 import CraftLogPage from './pages/CraftLogPage';
 import MessagesPage from './pages/MessagesPage';
 import QueuePlannerPage from './pages/QueuePlannerPage';
-import TopPerformersPage from './pages/TopPerformersPage';
 import ContractScannerPage from './pages/ContractScannerPage';
 import BlueprintsPage from './pages/BlueprintsPage';
 import BpLibraryPage from './pages/BpLibraryPage';
@@ -29,6 +28,7 @@ export default function App() {
   const [refreshing,   setRefreshing]   = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [activeTab,    setActiveTab]    = useState('OVERVIEW');
+  const [plannerVisitNonce, setPlannerVisitNonce] = useState(0);
   const [appSettings, setAppSettings] = useState(() => loadAppSettings());
   const [booted,       setBooted]       = useState(false);
   // Lazy mount: only mount a tab's page the first time the user visits it.
@@ -79,6 +79,9 @@ export default function App() {
   // Mount the tab's page on first visit, keep it mounted forever after.
   const handleTabChange = useCallback((tab) => {
     setActiveTab(tab);
+    if (tab === 'QUEUE_PLANNER') {
+      setPlannerVisitNonce(value => value + 1);
+    }
     setMountedTabs(prev => {
       if (prev.has(tab)) return prev;
       const next = new Set(prev);
@@ -142,17 +145,12 @@ export default function App() {
           )}
           {mountedTabs.has('QUEUE_PLANNER') && (
             <div style={{ display: activeTab === 'QUEUE_PLANNER' ? 'contents' : 'none' }}>
-              <QueuePlannerPage appSettings={appSettings} />
+              <QueuePlannerPage appSettings={appSettings} refreshNonce={plannerVisitNonce} />
             </div>
           )}
           {mountedTabs.has('APP_SETTINGS') && (
             <div style={{ display: activeTab === 'APP_SETTINGS' ? 'contents' : 'none' }}>
               <AppSettingsPage appSettings={appSettings} onSaveSettings={handleSaveSettings} />
-            </div>
-          )}
-          {mountedTabs.has('TOP_PERFORMERS') && (
-            <div style={{ display: activeTab === 'TOP_PERFORMERS' ? 'contents' : 'none' }}>
-              <TopPerformersPage />
             </div>
           )}
           {mountedTabs.has('RESEARCH') && (

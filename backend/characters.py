@@ -66,6 +66,12 @@ SCOPES = " ".join([
 ])
 
 CHARS_FILE = os.path.join(os.path.dirname(__file__), "characters.json")
+CORP_BP_ACCESS_MODES = {"auto", "allow", "block"}
+
+
+def normalize_corp_bp_access(value) -> str:
+    mode = str(value or "auto").strip().lower()
+    return mode if mode in CORP_BP_ACCESS_MODES else "auto"
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 _lock = threading.RLock()  # Reentrant — load_characters can call _save_characters without deadlock
@@ -145,13 +151,16 @@ def _auth_header_basic() -> dict:
     }
 
 def _verify_token(access_token: str) -> dict | None:
-    """Verify JWT and return ESI character info dict."""
-    try:
-        r = requests.get(ESI_VERIFY, headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
-        if r.ok:
-            return r.json()
-    except Exception:
-        pass
+    """Extract character info from the JWT access token."""
+    payload = _decode_jwt_payload(access_token)
+    if not payload:
+        return None
+    # EVE JWT subject is "CHARACTER:EVE:<id>"
+    sub = payload.get("sub", "")
+    char_id = sub.split(":")[-1] if ":" in sub else ""
+    char_name = payload.get("name", "")
+    if char_id and char_name:
+        return {"CharacterID": int(char_id), "CharacterName": char_name}
     return None
 
 def _is_expired(record: dict) -> bool:
@@ -214,9 +223,28 @@ def list_characters() -> list[dict]:
             "character_id":   cid,
             "character_name": rec.get("character_name", "Unknown"),
             "portrait_url":   rec.get("portrait_url", f"https://images.evetech.net/characters/{cid}/portrait?size=64"),
+            "corp_bp_access": normalize_corp_bp_access(rec.get("corp_bp_access")),
         }
         for cid, rec in chars.items()
     ]
+
+
+def set_corp_bp_access(character_id: str, mode: str) -> dict:
+    chars = load_characters()
+    cid = str(character_id)
+    rec = chars.get(cid)
+    if not rec:
+        raise ValueError(f"Character {character_id} not found in store")
+    normalized = normalize_corp_bp_access(mode)
+    rec["corp_bp_access"] = normalized
+    chars[cid] = rec
+    _save_characters(chars)
+    return {
+        "character_id": cid,
+        "character_name": rec.get("character_name", "Unknown"),
+        "portrait_url": rec.get("portrait_url", f"https://images.evetech.net/characters/{cid}/portrait?size=64"),
+        "corp_bp_access": normalized,
+    }
 
 
 # ── Per-character stats cache (wallet + active jobs, TTL 5 min) ───────────────
@@ -282,6 +310,7 @@ def remove_character(character_id: str) -> bool:
 
 # ── OAuth2 add-character flow (non-blocking, callback server) ─────────────────
 _pending_oauth: dict = {}   # state → threading.Event + result
+_exchange_lock = threading.Lock()  # prevent double token exchange
 
 class _CallbackHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -360,54 +389,66 @@ def poll_add_character(state: str, timeout: float = 0.1) -> dict:
     if not entry["event"].wait(timeout=timeout):
         return {"status": "pending"}
 
-    if entry["error"]:
-        del _pending_oauth[state]
-        return {"status": "error", "message": entry["error"]}
+    # Only one poll should perform the exchange; others wait for the result.
+    with _exchange_lock:
+        # Re-check: another poll may have already finished the exchange.
+        if "result" in entry:
+            return entry["result"]
 
-    # Exchange code for token
-    try:
-        r = requests.post(
-            ESI_TOKEN_URL,
-            headers=_auth_header_basic(),
-            data={"grant_type": "authorization_code", "code": entry["code"], "redirect_uri": REDIRECT_URI},
-            timeout=15,
-        )
-        r.raise_for_status()
-        token = r.json()
-        token["obtained_at"] = int(time.time())
+        if entry["error"]:
+            result = {"status": "error", "message": entry["error"]}
+            entry["result"] = result
+            _pending_oauth.pop(state, None)
+            return result
 
-        # Verify to get character name/id
-        char_info = _verify_token(token["access_token"])
-        if not char_info:
-            raise ValueError("Could not verify token")
+        # Exchange code for token
+        try:
+            r = requests.post(
+                ESI_TOKEN_URL,
+                headers=_auth_header_basic(),
+                data={"grant_type": "authorization_code", "code": entry["code"], "redirect_uri": REDIRECT_URI},
+                timeout=15,
+            )
+            r.raise_for_status()
+            token = r.json()
+            token["obtained_at"] = int(time.time())
 
-        char_id   = str(char_info["CharacterID"])
-        char_name = char_info["CharacterName"]
+            # Verify to get character name/id
+            char_info = _verify_token(token["access_token"])
+            if not char_info:
+                raise ValueError("Could not verify token")
 
-        record = {
-            "character_id":   char_id,
-            "character_name": char_name,
-            "portrait_url":   f"https://images.evetech.net/characters/{char_id}/portrait?size=64",
-            "access_token":   token["access_token"],
-            "refresh_token":  token["refresh_token"],
-            "expires_in":     token.get("expires_in", 1200),
-            "obtained_at":    token["obtained_at"],
-        }
+            char_id   = str(char_info["CharacterID"])
+            char_name = char_info["CharacterName"]
 
-        chars = load_characters()
-        chars[char_id] = record
-        _save_characters(chars)
-
-        del _pending_oauth[state]
-        return {
-            "status": "done",
-            "character": {
+            record = {
                 "character_id":   char_id,
                 "character_name": char_name,
-                "portrait_url":   record["portrait_url"],
+                "portrait_url":   f"https://images.evetech.net/characters/{char_id}/portrait?size=64",
+                "access_token":   token["access_token"],
+                "refresh_token":  token["refresh_token"],
+                "expires_in":     token.get("expires_in", 1200),
+                "obtained_at":    token["obtained_at"],
             }
-        }
 
-    except Exception as e:
-        del _pending_oauth[state]
-        return {"status": "error", "message": str(e)}
+            chars = load_characters()
+            chars[char_id] = record
+            _save_characters(chars)
+
+            result = {
+                "status": "done",
+                "character": {
+                    "character_id":   char_id,
+                    "character_name": char_name,
+                    "portrait_url":   record["portrait_url"],
+                }
+            }
+            entry["result"] = result
+            _pending_oauth.pop(state, None)
+            return result
+
+        except Exception as e:
+            result = {"status": "error", "message": str(e)}
+            entry["result"] = result
+            _pending_oauth.pop(state, None)
+            return result

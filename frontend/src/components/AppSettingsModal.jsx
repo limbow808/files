@@ -140,6 +140,16 @@ export default memo(function AppSettingsPanel({ settings, onSave }) {
               </div>
             </SettingRow>
 
+            <div style={{ marginBottom: 20, marginTop: -6 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}>
+                <input type="checkbox" checked={Boolean(local.include_below_threshold_items)} onChange={event => setField('include_below_threshold_items', event.target.checked)} style={{ width: 14, height: 14, cursor: 'pointer', accentColor: '#4cff91' }} />
+                <div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 1, color: 'var(--text)' }}>INCLUDE BELOW THRESHOLD ITEMS</div>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)', marginTop: 2 }}>When enabled, low-profit items can still backfill empty slots. When disabled, anything below the threshold leaves the slot idle.</div>
+                </div>
+              </label>
+            </div>
+
             <SettingRow label="MAX DAYS TO SELL" unit="days" hint="Planner saturation cap.">
               <input type="number" min={1} max={30} step={1} value={local.max_sell_days_tolerance} onChange={event => setField('max_sell_days_tolerance', parseFloat(event.target.value) || 7)} style={inputStyle} />
             </SettingRow>
@@ -200,6 +210,7 @@ export default memo(function AppSettingsPanel({ settings, onSave }) {
         <br />
         Planner: {local.cycle_duration_hours}h cycle · −{Number(local.structureJobTimeBonusPct || 0).toFixed(1)}% structure time · {Math.round(local.haul_capacity_m3 || 0).toLocaleString('en-US')} m3 haul cap · {Math.round(local.target_isk_per_m3 || 0).toLocaleString('en-US')} ISK/m3 target · {(local.min_profit_per_cycle / 1_000_000).toFixed(0)}M min/cycle · {local.max_sell_days_tolerance}d sell cap · corp originals {local.count_corp_original_blueprints_as_own ? 'count as own' : 'copy-only'}
         <br />
+        Below-threshold items: {local.include_below_threshold_items ? 'included as filler' : 'left idle'}
         Derived planner structure: {plannerStructureType}
       </div>
 

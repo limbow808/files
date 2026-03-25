@@ -74,13 +74,18 @@ function JobRow({ j, idx, multiChar }) {
               onError={e => { e.target.style.display = 'none'; }}
             />
           )}
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 5, overflow: 'hidden', flex: 1, minWidth: 0 }}>
-            <span ref={nameRef} style={{
-              fontFamily: 'var(--mono)', fontSize: 14, letterSpacing: 0.5,
-              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
-            }}>{j.product_name}</span>
-            {j.runs > 1 && (
-              <span style={{ fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>{'\u00D7'}{j.runs}</span>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, overflow: 'hidden', flex: 1, minWidth: 0, maxWidth: '100%' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 5, overflow: 'hidden', minWidth: 0, flex: '0 1 auto' }}>
+              <span ref={nameRef} style={{
+                fontFamily: 'var(--mono)', fontSize: 14, letterSpacing: 0.5,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0,
+              }}>{j.product_name}</span>
+              {j.runs > 1 && (
+                <span style={{ fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>{'\u00D7'}{j.runs}</span>
+              )}
+            </div>
+            {multiChar && j.character_name && (
+              <CharTag name={j.character_name} color={cColor} bordered={false} style={{ flexShrink: 0 }} />
             )}
           </div>
         </div>
@@ -96,11 +101,6 @@ function JobRow({ j, idx, multiChar }) {
           display: 'inline-block', minWidth: 44, textAlign: 'center',
         }}>{shortAct}</span>
       </td>
-      {multiChar && (
-        <td style={{ padding: '5px 6px', textAlign: 'left', whiteSpace: 'nowrap', fontSize: 11, background: 'var(--table-row-bg)' }}>
-          <CharTag name={j.character_name} color={cColor} />
-        </td>
-      )}
       <td ref={countdownRef} style={{
         padding: '5px 10px 5px 6px', textAlign: 'right',
         fontFamily: 'var(--mono)', fontSize: 12, whiteSpace: 'nowrap', background: 'var(--table-row-bg)',
@@ -149,7 +149,6 @@ function ActiveJobsView({ data, loading, error }) {
         <tr>
           <TH align="left">ITEM</TH>
           <TH align="left">TYPE</TH>
-          {multiChar && <TH align="left">CHAR</TH>}
           <TH>REMAINING</TH>
         </tr>
       </thead>

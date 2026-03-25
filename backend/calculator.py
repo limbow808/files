@@ -71,7 +71,7 @@ CONFIG = {
     "max_rev_mat_ratio":   5.0,
 
     # ── Job Cycle Recommendation Defaults ────────────────────────────────────
-    # User can override these via query params in api/top-performers
+    # User can override these via query params in api/job-planner
     "default_cycle_duration_hours":       12,         # 2x daily login (12h cycles)
     "default_min_profit_per_cycle":       100_000_000, # ISK — filter below this
     "default_max_sell_days_tolerance":    7.0,        # days — saturation limit

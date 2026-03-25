@@ -1,9 +1,37 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { fmtISK } from '../utils/fmt';
 import CharTag from './CharTag';
 import { charColor } from '../utils/charColors';
 import { LoadingState } from './ui';
+
+function useOrdersRefreshUrl(baseUrl) {
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    const refresh = () => setRefreshTick((tick) => tick + 1);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') refresh();
+    }, 30000);
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, []);
+
+  return `${baseUrl}?force=1&tick=${refreshTick}`;
+}
 
 function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
   if (!orders.length) {
@@ -37,7 +65,12 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
           return (
             <tr key={o.order_id} className="eve-row-reveal" style={{ position: 'relative', borderBottom: '1px solid #0d0d0d', background: 'var(--table-row-bg)', animationDelay: `${idx * 25}ms` }}>
               <td style={{ padding: '4px 6px', textAlign: 'left' }}>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={o.type_name}>{o.type_name}</div>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, maxWidth: '100%', minWidth: 0, verticalAlign: 'top' }}>
+                  <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0, flex: '0 1 auto' }} title={o.type_name}>{o.type_name}</div>
+                  {multiChar && o.character_name && (
+                    <CharTag name={o.character_name} color={cColor} bordered={false} style={{ flexShrink: 0 }} />
+                  )}
+                </div>
                 {/* Full-row fill bar — positioned relative to <tr> */}
                 <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 2, background: 'var(--bg)', pointerEvents: 'none', zIndex: 0 }}>
                   <div style={{ height: '100%', width: `${filled}%`, background: isBuy ? '#4da6ff' : 'var(--accent)' }} />
@@ -52,15 +85,10 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
                     )}
                     {o.competitor_count > 0 && (
                       <span style={{ fontSize: 9, color: 'var(--dim)', letterSpacing: 0.5 }}
-                        title={`${o.competitor_count} total sell listings in Jita`}>
-                        {o.competitor_count} listed
+                        title={`${o.competitor_count} total sell listings${o.market_hub ? ` in ${o.market_hub}` : ''}`}>
+                        {o.competitor_count} listed{o.market_hub ? ` in ${o.market_hub}` : ''}
                       </span>
                     )}
-                  </div>
-                )}
-                {multiChar && o.character_name && (
-                  <div style={{ marginTop: 3 }}>
-                    <CharTag name={o.character_name} color={cColor} />
                   </div>
                 )}
               </td>
@@ -77,20 +105,19 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
               {!isBuy && (() => {
                 const pos = o.market_position;
                 const trend = o.market_position_trend;
-                const color = pos === 0   ? '#4cff91'
+                const color = pos === 1   ? '#4cff91'
                             : pos === null ? 'var(--dim)'
                             : pos <= 3    ? '#ffcc00'
                             : '#ff6644';
                 const label = pos === null ? '—'
-                            : pos === 0   ? '#1'
-                            : `+${pos}`;
-                const trendGlyph = trend === 'increasing' ? '▲' : trend === 'decreasing' ? '▼' : '';
-                const trendColor = trend === 'decreasing' ? '#4cff91' : trend === 'increasing' ? '#ff6644' : 'var(--dim)';
+                            : String(pos);
+                const trendGlyph = trend === 'up' ? '▲' : trend === 'down' ? '▼' : '';
+                const trendColor = trend === 'up' ? '#4cff91' : trend === 'down' ? '#ff6644' : 'var(--dim)';
                 return (
                   <td style={{ padding: '4px 12px 4px 6px', textAlign: 'right', fontFamily: 'var(--mono)', fontSize: 11, fontWeight: 600, color, whiteSpace: 'nowrap' }}
-                    title={pos === 0 ? 'Lowest price — top of book' : pos === null ? 'No market data' : `${pos} cheaper listing${pos === 1 ? '' : 's'} ahead`}>
+                    title={pos === 1 ? 'Lowest price at this hub' : pos === null ? 'No market data' : `Position ${pos} at this hub`}>
+                    {trendGlyph && <span style={{ marginRight: 4, color: trendColor, fontSize: 10 }}>{trendGlyph}</span>}
                     {label}
-                    {trendGlyph && <span style={{ marginLeft: 4, color: trendColor, fontSize: 10 }}>{trendGlyph}</span>}
                   </td>
                 );
               })()}
@@ -108,7 +135,8 @@ function OrderTable({ orders, isBuy, multiChar, sellHistByTypeId }) {
 }
 
 export default function OrdersSection() {
-  const { data, loading, error } = useApi('/api/orders');
+  const ordersUrl = useOrdersRefreshUrl('/api/orders');
+  const { data, loading, error } = useApi(ordersUrl);
   const { data: sellHistData }   = useApi('/api/sell_history');
   const [tab, setTab] = useState('sell');
 

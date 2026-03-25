@@ -433,6 +433,11 @@ def _ensure_craft_log_table(conn) -> None:
         )
     """)
     conn.commit()
+    # Migration: add overhead_cost column for T2 invention + copy costs
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(craft_log)").fetchall()}
+    if "overhead_cost" not in existing_cols:
+        conn.execute("ALTER TABLE craft_log ADD COLUMN overhead_cost REAL")
+        conn.commit()
 
 
 def upsert_craft_jobs(jobs: List[Dict[str, Any]]) -> int:
@@ -447,15 +452,15 @@ def upsert_craft_jobs(jobs: List[Dict[str, Any]]) -> int:
             INSERT OR REPLACE INTO craft_log
               (job_id, char_id, char_name, product_type_id, product_name,
                activity_id, activity, runs, material_cost, sell_price,
-               est_profit, margin_pct, completed_at, recorded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               est_profit, margin_pct, overhead_cost, completed_at, recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 j["job_id"], j.get("char_id"), j.get("char_name"),
                 j.get("product_type_id"), j.get("product_name"),
                 j.get("activity_id"), j.get("activity"),
                 j.get("runs"), j.get("material_cost"), j.get("sell_price"),
-                j.get("est_profit"), j.get("margin_pct"),
+                j.get("est_profit"), j.get("margin_pct"), j.get("overhead_cost"),
                 j.get("completed_at"), int(time.time()),
             ),
         )
@@ -489,12 +494,14 @@ def get_craft_stats(days: int = 90) -> Dict[str, Any]:
     rows = conn.execute(
         """
         SELECT c.product_name, c.product_type_id, c.activity,
-               SUM(c.runs)           AS total_runs,
-               SUM(c.material_cost)  AS total_cost,
-               SUM(c.sell_price * c.runs) AS est_revenue,
-               SUM(c.est_profit)     AS est_profit,
-               AVG(c.margin_pct)     AS avg_margin,
-               COUNT(*)              AS job_count
+               SUM(c.runs)                                         AS total_runs,
+               SUM(c.material_cost)                                AS total_material_cost,
+               SUM(COALESCE(c.overhead_cost, 0))                   AS total_overhead,
+               SUM(c.material_cost) + SUM(COALESCE(c.overhead_cost, 0)) AS total_cost,
+               SUM(c.sell_price * c.runs)                          AS est_revenue,
+               SUM(c.est_profit)                                   AS est_profit,
+               AVG(c.margin_pct)                                   AS avg_margin,
+               COUNT(*)                                            AS job_count
         FROM craft_log c
         WHERE c.recorded_at >= ? AND c.material_cost IS NOT NULL
         GROUP BY c.product_type_id
@@ -505,7 +512,7 @@ def get_craft_stats(days: int = 90) -> Dict[str, Any]:
 
     items = [dict(r) for r in rows]
 
-    # Join realized sales from sell_order_history (matched by type_id, no date filter —
+    # Join realized sales + sell velocity from sell_order_history (no date filter —
     # an item manufactured 90 days ago may only have sold recently)
     try:
         type_ids = [r["product_type_id"] for r in items if r["product_type_id"]]
@@ -518,26 +525,85 @@ def get_craft_stats(days: int = 90) -> Dict[str, Any]:
                     type_ids,
                 ).fetchall()
             }
+            avg_sell_days_map = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    f"SELECT type_id, AVG(days_to_sell) FROM sell_order_history WHERE type_id IN ({ph}) GROUP BY type_id",
+                    type_ids,
+                ).fetchall()
+            }
             for item in items:
-                item["realized_revenue"] = realized.get(item["product_type_id"])
+                tid = item["product_type_id"]
+                item["realized_revenue"] = realized.get(tid)
                 tc = item["total_cost"] or 0
                 rr = item["realized_revenue"]
                 item["realized_profit"] = round(rr - tc, 2) if rr is not None else None
+                item["avg_sell_days"]   = avg_sell_days_map.get(tid)
+                er = item["est_revenue"] or 0
+                item["sell_rate"] = round(rr / er, 4) if (rr is not None and er > 0) else None
     except Exception:
         for item in items:
             item["realized_revenue"] = None
-            item["realized_profit"] = None
+            item["realized_profit"]  = None
+            item["avg_sell_days"]    = None
+            item["sell_rate"]        = None
 
     totals = {
-        "total_cost":        sum(r["total_cost"]    or 0 for r in items),
-        "est_revenue":       sum(r["est_revenue"]   or 0 for r in items),
-        "est_profit":        sum(r["est_profit"]    or 0 for r in items),
-        "realized_revenue":  sum(r["realized_revenue"] or 0 for r in items if r["realized_revenue"] is not None),
-        "realized_profit":   sum(r["realized_profit"]  or 0 for r in items if r["realized_profit"]  is not None),
-        "total_runs":        sum(r["total_runs"]    or 0 for r in items),
-        "job_count":         sum(r["job_count"]     or 0 for r in items),
+        "total_material_cost": sum(r["total_material_cost"] or 0 for r in items),
+        "total_overhead":      sum(r["total_overhead"]      or 0 for r in items),
+        "total_cost":          sum(r["total_cost"]          or 0 for r in items),
+        "est_revenue":         sum(r["est_revenue"]         or 0 for r in items),
+        "est_profit":          sum(r["est_profit"]          or 0 for r in items),
+        "realized_revenue":    sum(r["realized_revenue"]    or 0 for r in items if r["realized_revenue"] is not None),
+        "realized_profit":     sum(r["realized_profit"]     or 0 for r in items if r["realized_profit"]  is not None),
+        "total_runs":          sum(r["total_runs"]          or 0 for r in items),
+        "job_count":           sum(r["job_count"]           or 0 for r in items),
     }
     return {"items": items, "totals": totals, "days": days}
+
+
+def get_craft_timeline(days: int = 90) -> Dict[str, Any]:
+    """Return per-week craft profitability stats for the Trends chart."""
+    conn = _get_conn()
+    _ensure_craft_log_table(conn)
+    cutoff = int(time.time()) - days * 86400
+
+    rows = conn.execute(
+        """
+        SELECT
+            strftime('%Y-W%W', completed_at)                                AS week_label,
+            SUM(c.runs)                                                      AS total_runs,
+            SUM(c.material_cost) + SUM(COALESCE(c.overhead_cost, 0))        AS total_cost,
+            SUM(c.sell_price * c.runs)                                       AS est_revenue,
+            SUM(c.est_profit)                                                AS est_profit,
+            COUNT(*)                                                         AS job_count
+        FROM craft_log c
+        WHERE c.recorded_at >= ?
+          AND c.material_cost IS NOT NULL
+          AND c.completed_at IS NOT NULL
+          AND c.completed_at != ''
+        GROUP BY week_label
+        ORDER BY week_label ASC
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    weeks = [dict(r) for r in rows]
+
+    # Running cumulative profit
+    cum = 0.0
+    for w in weeks:
+        cum += w.get("est_profit") or 0.0
+        w["cumulative_profit"] = round(cum, 2)
+
+    totals = {
+        "total_cost":  sum(w["total_cost"]  or 0 for w in weeks),
+        "est_profit":  sum(w["est_profit"]  or 0 for w in weeks),
+        "est_revenue": sum(w["est_revenue"] or 0 for w in weeks),
+        "job_count":   sum(w["job_count"]   or 0 for w in weeks),
+        "total_runs":  sum(w["total_runs"]  or 0 for w in weeks),
+    }
+    return {"weeks": weeks, "totals": totals, "days": days}
 
 
 # ─── SDE / crest.db seeding helper ───────────────────────────────────────────

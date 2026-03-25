@@ -56,7 +56,7 @@ export function useApi(url, deps = []) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url]);
 
-  useEffect(() => { fetchData(); }, deps); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchData(); }, [fetchData, ...deps]);
 
   return { data, loading, error, stale, refetch: fetchData };
 }

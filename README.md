@@ -4,11 +4,10 @@
 Personal web app that connects to your EVE accounts via ESI, pulls live Jita market data, and shows manufacturing profitability across all your characters and corp BPs.
 
 **Features**
-- Manufacturing calculator — profit, ROI, ISK/hr per blueprint accounting for ME/TE, system cost index, facility bonuses, taxes
-- Blueprint Finder — scans ESI public contracts, matches against profitable items, flags already-owned BPs
+- Industry: profit, ROI, ISK/hr per blueprint accounting for ME/TE, system cost index, facility bonuses, taxes
+- Blueprint Finder: scans ESI public contracts, matches against profitable items, flags already-owned BPs
 - Industry jobs — track active jobs across all characters and corp facilities
 - Overview — wallet history, PLEX tracker, mineral prices, open orders
-- Telegram alerts — background scanner, fires on high-ROI items and below-median BPO contract prices
 
 ---
 
@@ -114,11 +113,11 @@ The seeder auto-downloads the EVE SDE from Fuzzwork (~80 MB compressed, ~550 MB 
 
 **5. Start the servers**
 ```bash
-# Terminal 1 — backend (port 5001)
+# backend (port 5001)
 cd backend
 python server.py
 
-# Terminal 2 — frontend (port 3000, auto-proxies /api → backend)
+# frontend (port 3000, auto-proxies /api → backend)
 cd frontend
 npm run dev
 ```

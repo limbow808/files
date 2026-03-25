@@ -1,5 +1,7 @@
 import { memo } from 'react';
 import { fmtISK } from '../utils/fmt';
+import CharTag from './CharTag';
+import { charColor } from '../utils/charColors';
 
 function formatSeconds(seconds) {
   if (!seconds) return '—';
@@ -66,6 +68,34 @@ function SectionHeader({ label, count, accentColor }) {
       <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: accentColor, fontWeight: 700 }}>{label}</span>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', background: accentColor, padding: '2px 6px', borderRadius: 2 }}>{count}</span>
       <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, ${accentColor}66, transparent)` }} />
+    </div>
+  );
+}
+
+function IdleQueueRow({ item }) {
+  const assignedCharacter = item.assigned_character || (item.characters || [])[0] || null;
+  return (
+    <div style={{ borderBottom: '1px solid #0d0d0d' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', padding: '6px 10px', background: 'rgba(255,255,255,0.025)', opacity: 0.9 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <span style={{ width: 10, flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--dim)', letterSpacing: 0.8 }}>IDLE</span>
+            <Flag label="NO JOB" bg="#6c737d" color="#000" />
+            {assignedCharacter && (
+              <CharTag
+                name={assignedCharacter.character_name}
+                color={charColor(assignedCharacter.character_id)}
+                bordered={false}
+                style={{ fontSize: 10 }}
+              />
+            )}
+          </div>
+        </div>
+        <div style={{ paddingLeft: 16, marginTop: 3, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {item.idle_reason || item.why || 'No eligible science job remains for this character.'}
+        </div>
+      </div>
     </div>
   );
 }
@@ -186,6 +216,14 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
   const manufacturingStepNumber = copyStepRows.length > 0
     ? (isInvention ? 3 : 2)
     : (isInvention ? 2 : 1);
+  const copyCharacter = item.copy_character || null;
+  const inventCharacter = item.invent_character || null;
+  const showSplitAssignments = Boolean(
+    item.action_type === 'copy_then_invent'
+    && copyCharacter
+    && inventCharacter
+    && copyCharacter.character_id !== inventCharacter.character_id
+  );
 
   return (
     <div style={{ borderBottom: '1px solid #0d0d0d' }}>
@@ -206,7 +244,24 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
               style={{ width: 18, height: 18, opacity: 0.85, flexShrink: 0 }}
               onError={e => { e.target.style.display = 'none'; }} />
           )}
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{item.name}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0 }}>{item.name}</span>
+            {(item.ownership || []).includes('personal_bpo') && <Flag label="PERS BPO" bg="#4da6ff" />}
+            {(item.ownership || []).includes('personal_bpc') && <Flag label="PERS BPC" bg="#66ccff" />}
+            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#cc88ff" />}
+            {showSplitAssignments ? (
+              <>
+                <Flag label="COPY" bg="#4da6ff" />
+                <CharTag name={copyCharacter.character_name} color={charColor(copyCharacter.character_id)} bordered={false} style={{ fontSize: 10 }} />
+                <Flag label="INVENT" bg="#ff9d3d" />
+                <CharTag name={inventCharacter.character_name} color={charColor(inventCharacter.character_id)} bordered={false} style={{ fontSize: 10 }} />
+              </>
+            ) : (
+              (item.characters || []).map(c => (
+                <CharTag key={c.character_id} name={c.character_name} color={charColor(c.character_id)} bordered={false} style={{ fontSize: 10 }} />
+              ))
+            )}
+          </div>
           <div style={{ display: 'flex', gap: 3, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             {!hasSciSlot && <Flag label="NO SLOT" bg="#ff4700" />}
             {riskFlag && <Flag label={`${Math.round(successChance * 100)}% SUCCESS`} bg="#ffd24d" />}
@@ -216,7 +271,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
             {belowThreshold && <Flag label="BELOW THRESHOLD" bg="#b0b0b0" />}
           </div>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', paddingLeft: 24, marginTop: 3 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingLeft: 24, marginTop: 3 }}>
           <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>{runsPerCycle}× runs/cycle</span>
           <span style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: profitPerCycle >= 0 ? '#4cff91' : 'var(--accent)' }}>{profitM}M ISK/cycle</span>
         </div>
@@ -321,11 +376,12 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
 });
 
 export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience, freeScience, onItemExpand, expandedId }) {
+  const idleItems = items.filter(i => i.is_idle);
   const copyItems = items.filter(i => i.action_type === 'copy_first');
   const copyThenInventItems = items.filter(i => i.action_type === 'copy_then_invent');
   const inventItems = items.filter(i => i.action_type === 'invent_first');
 
-  if (copyItems.length === 0 && copyThenInventItems.length === 0 && inventItems.length === 0) {
+  if (idleItems.length === 0 && copyItems.length === 0 && copyThenInventItems.length === 0 && inventItems.length === 0) {
     return (
       <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 0.8, textAlign: 'center' }}>
         NO SCIENCE JOBS RECOMMENDED
@@ -335,6 +391,14 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+      {idleItems.length > 0 && (
+        <>
+          <SectionHeader label="IDLE" count={idleItems.length} accentColor="#6c737d" />
+          {idleItems.map((item, idx) => (
+            <IdleQueueRow key={item.rec_id || `idle-science-${idx}`} item={item} />
+          ))}
+        </>
+      )}
       {copyItems.length > 0 && (
         <>
           <SectionHeader label="COPY FIRST" count={copyItems.length} accentColor="#4da6ff" />

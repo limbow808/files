@@ -10,7 +10,7 @@ const D = 1; // divider thickness px
 
 // ── Layout ─────────────────────────────────────────────────────────────────────
 // KPI bar
-// Body: Left col (flex 1): MFG Jobs full height (Top Performers is a tab inside)
+// Body: Left col (flex 1): MFG Jobs full height
 //       Right col (340px): PLEX (top) | Orders (fills rest)
 export default memo(function OverviewPage({ plexData, walletHistory, plexLoading, plexError, refreshKey = 0 }) {
   return (

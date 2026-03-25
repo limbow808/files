@@ -31,6 +31,7 @@ export const DEFAULT_APP_SETTINGS = {
   target_isk_per_m3: 0,
   count_corp_original_blueprints_as_own: false,
   min_profit_per_cycle: 100_000_000,
+  include_below_threshold_items: true,
   max_sell_days_tolerance: 7,
   weight_by_velocity: true,
   rig_1: 'none',

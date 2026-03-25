@@ -8,7 +8,6 @@ const DROPDOWN_OPEN_WIDTH = 180;
 // Maps each tab ID to its top-level nav group
 const TAB_GROUP = {
   QUEUE_PLANNER:     'INDUSTRY',
-  TOP_PERFORMERS:    'INDUSTRY',
   MANUFACTURING:     'INDUSTRY',
   RESEARCH:          'INDUSTRY',
   INVENTION:         'INDUSTRY',
@@ -31,7 +30,6 @@ const DROPDOWNS = {
       title: 'Planning',
       items: [
         { id: 'QUEUE_PLANNER',  label: 'Job Planner'  },
-        { id: 'TOP_PERFORMERS', label: 'Top Performers' },
       ],
     },
     {

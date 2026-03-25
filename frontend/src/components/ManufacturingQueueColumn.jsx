@@ -1,5 +1,7 @@
 import { memo, useCallback } from 'react';
 import { fmtISK } from '../utils/fmt';
+import CharTag from './CharTag';
+import { charColor } from '../utils/charColors';
 
 function formatSeconds(seconds) {
   if (!seconds) return '—';
@@ -93,6 +95,49 @@ function SlotGroupHeader({ startAt, slotFreedBy }) {
   );
 }
 
+function SectionHeader({ label, count, accentColor }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '5px 10px', background: 'var(--bg)', flexShrink: 0,
+      borderBottom: '1px solid #0d0d0d',
+    }}>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: accentColor, fontWeight: 700 }}>{label}</span>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', background: accentColor, padding: '2px 6px', borderRadius: 2 }}>{count}</span>
+      <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, ${accentColor}66, transparent)` }} />
+    </div>
+  );
+}
+
+function IdleQueueRow({ item }) {
+  const assignedCharacter = item.assigned_character || (item.characters || [])[0] || null;
+  return (
+    <div style={{ borderBottom: '1px solid #0d0d0d' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', padding: '6px 10px', background: 'rgba(255,255,255,0.025)', opacity: 0.9 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <div style={{ width: 12, flexShrink: 0 }} />
+          <span style={{ width: 10, flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--dim)', letterSpacing: 0.8 }}>IDLE</span>
+            <Flag label="NO JOB" bg="#6c737d" color="#000" />
+            {assignedCharacter && (
+              <CharTag
+                name={assignedCharacter.character_name}
+                color={charColor(assignedCharacter.character_id)}
+                bordered={false}
+                style={{ fontSize: 10 }}
+              />
+            )}
+          </div>
+        </div>
+        <div style={{ paddingLeft: 28, marginTop: 3, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {item.idle_reason || item.why || 'No eligible manufacturing job remains for this character.'}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfgSlot, cycleConfig, isOpen, onToggle, checked, onCheck }) {
   const profitPerCycle = item.profit_per_cycle || item.net_profit || 0;
   const runsPerCycle = item.runs_per_cycle || 1;
@@ -107,6 +152,22 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
   const profitM = (profitPerCycle / 1_000_000).toFixed(1);
   const missingMatCost = Number(item.missing_mats_est_cost || 0);
   const batchRuns = Math.max(1, Number(item.rec_runs || item.runs_per_cycle || 1));
+  const materials = (item.material_breakdown || []).map((material) => {
+    const perRunQty = Number(material.quantity || 0);
+    const neededQtyTotal = material.needed_qty_total != null
+      ? Number(material.needed_qty_total || 0)
+      : perRunQty * batchRuns;
+    const totalLineCost = material.total_line_cost != null
+      ? Number(material.total_line_cost || 0)
+      : Number(material.line_cost || 0) * batchRuns;
+    return {
+      ...material,
+      have_qty: material.have_qty != null ? Number(material.have_qty || 0) : null,
+      needed_qty_total: neededQtyTotal,
+      total_line_cost: totalLineCost,
+    };
+  });
+  const totalMaterialsCost = materials.reduce((sum, material) => sum + Number(material.total_line_cost || 0), 0);
   const jobCost = Number(item.job_cost || 0);
   const jc = item.job_cost_breakdown;
   const scaleCost = (value) => fmtISK(Number(value || 0));
@@ -144,7 +205,15 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
               style={{ width: 18, height: 18, opacity: 0.85, flexShrink: 0 }}
               onError={e => { e.target.style.display = 'none'; }} />
           )}
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{item.name}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0 }}>{item.name}</span>
+            {(item.ownership || []).includes('personal_bpo') && <Flag label="PERS BPO" bg="#4da6ff" />}
+            {(item.ownership || []).includes('personal_bpc') && <Flag label="PERS BPC" bg="#66ccff" />}
+            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#cc88ff" />}
+            {(item.characters || []).map(c => (
+              <CharTag key={c.character_id} name={c.character_name} color={charColor(c.character_id)} bordered={false} style={{ fontSize: 10 }} />
+            ))}
+          </div>
           <div style={{ display: 'flex', gap: 3, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             {!hasMfgSlot && <Flag label="NO SLOT" bg="#ff4700" />}
             {item.is_fallback && <Flag label="FILLER" bg="#b0b0b0" />}
@@ -211,28 +280,27 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
               <DetailRow label="Total job cost" value={scaleCost(jc.total_job_cost || item.job_cost || 0)} />
             </DetailSection>
           )}
-          {item.material_breakdown?.length > 0 && (
-            <DetailSection title={`MATERIALS (${item.material_breakdown.length})`}>
-              {item.material_breakdown.slice(0, 5).map((m) => (
-                <DetailRow key={m.type_id} label={m.name || `Type ${m.type_id}`} value={`${((m.line_cost || 0) / 1_000_000).toFixed(1)}M`} />
+          {materials.length > 0 && (
+            <DetailSection title={`MATERIALS (${materials.length})`}>
+              {materials.map((material) => (
+                <DetailRow
+                  key={material.type_id}
+                  label={material.name || `Type ${material.type_id}`}
+                  value={material.have_qty != null && Number(material.have_qty) < Number(material.needed_qty_total || 0)
+                    ? `${Number(material.have_qty).toLocaleString('en-US')}/${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`
+                    : `${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`}
+                  valueColor={material.have_qty != null && Number(material.have_qty) < Number(material.needed_qty_total || 0)
+                    ? '#ff5f5f'
+                    : '#4cff91'}
+                />
               ))}
-              {item.material_breakdown.length > 5 && (
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>+{item.material_breakdown.length - 5} more</span>
-              )}
+              <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)' }}>TOTAL</span>
+                <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>
+                  {fmtISK(totalMaterialsCost)}
+                </span>
+              </div>
             </DetailSection>
-          )}
-          {item.mats_ready ? (
-            <div style={{ marginTop: 8, padding: '5px 8px', background: 'rgba(76,255,145,0.08)', border: '1px solid rgba(76,255,145,0.2)', borderRadius: 2 }}>
-              <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', letterSpacing: 0.4, background: '#4cff91', padding: '2px 6px', display: 'inline-block' }}>
-                IN STOCK
-              </span>
-            </div>
-          ) : missingMatCost > 0 && (
-            <div style={{ marginTop: 8, padding: '5px 8px', background: 'rgba(255,71,0,0.1)', border: '1px solid rgba(255,71,0,0.3)', borderRadius: 2 }}>
-              <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', letterSpacing: 0.4, background: '#ff4700', padding: '2px 6px', display: 'inline-block' }}>
-                MISSING MATS: {fmtISK(missingMatCost)}
-              </span>
-            </div>
           )}
           <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
           {item.runner_up_name && (
@@ -249,10 +317,11 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
 });
 
 export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJobs, freeSlots, onItemExpand, expandedId, checkedIds, onCheck }) {
+  const idleItems = items?.filter(i => i.is_idle) || [];
   const mfgItems = items?.filter(i => i.action_type === 'manufacture') || [];
   const nowTs = Math.floor(Date.now() / 1000);
 
-  if (mfgItems.length === 0) {
+  if (idleItems.length === 0 && mfgItems.length === 0) {
     return (
       <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 0.8, textAlign: 'center' }}>
         NO MANUFACTURING JOBS RECOMMENDED
@@ -275,6 +344,14 @@ export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJ
 
   return (
     <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+      {idleItems.length > 0 && (
+        <div>
+          <SectionHeader label="IDLE" count={idleItems.length} accentColor="#6c737d" />
+          {idleItems.map((item, idx) => (
+            <IdleQueueRow key={item.rec_id || `idle-manufacture-${idx}`} item={item} />
+          ))}
+        </div>
+      )}
       {groups.map((group, gi) => (
         <div key={group.key}>
           <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
