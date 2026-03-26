@@ -8236,7 +8236,22 @@ async def api_settings_bot_post():
                 return jsonify({"ok": False, "error": "BLUEPRINT_TYPE must be bpo, bpc, or both"}), 400
             validated[key] = str(val)
         else:
-            validated[key] = str(val)
+            string_val = str(val).strip()
+            if key == "TELEGRAM_TOKEN":
+                masked_token = _alert_scanner.get_public_config().get("TELEGRAM_TOKEN", "")
+                if "*" in string_val and ":" not in string_val:
+                    if string_val == masked_token:
+                        continue
+                    return jsonify({"ok": False, "error": "Bot token looks masked. Paste the full token from @BotFather."}), 400
+                token_error = _alert_scanner.validate_telegram_config(
+                    token=string_val,
+                    chat_id=_alert_scanner.CONFIG.get("TELEGRAM_CHAT_ID", ""),
+                )
+                if token_error and "chat ID" not in token_error:
+                    return jsonify({"ok": False, "error": token_error}), 400
+            elif key == "TELEGRAM_CHAT_ID" and any(ch.isspace() for ch in string_val):
+                return jsonify({"ok": False, "error": "Telegram chat ID cannot contain whitespace."}), 400
+            validated[key] = string_val
     # Persist strings to .env (token + chat_id + blueprint_type)
     env_updates = {k: str(v) for k, v in validated.items()}
     _rewrite_env({k: v for k, v in env_updates.items() if k in {"TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "BLUEPRINT_TYPE"}})
@@ -8248,10 +8263,13 @@ async def api_settings_bot_post():
 @app.route("/api/settings/bot/test", methods=["POST"])
 async def api_settings_bot_test():
     # Send a test Telegram message using the current config.
+    config_error = _alert_scanner.validate_telegram_config()
+    if config_error:
+        return jsonify({"ok": False, "error": config_error}), 200
     ok = _alert_scanner._tg_send("<b>CREST</b> - test message. Bot is connected.")
     if ok:
         return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": "Send failed - check token and chat ID"}), 200
+    return jsonify({"ok": False, "error": _alert_scanner.status.get("last_error") or "Send failed - check token and chat ID"}), 200
 
 
 @app.route("/api/contracts/status", methods=["GET"])

@@ -70,6 +70,30 @@ const ALL_KEYS = GROUPS.flatMap(g => g.fields.map(f => f.key));
 const FIELD_DEFAULTS = { BLUEPRINT_TYPE: 'bpo', REGION_ID: 10000002 };
 const LS_KEY = 'crest_bot_settings';
 
+function isMaskedTokenValue(value) {
+  const token = String(value ?? '').trim();
+  return token.includes('*') && !token.includes(':');
+}
+
+function validateBotForm(form) {
+  const token = String(form.TELEGRAM_TOKEN ?? '').trim();
+  const chatId = String(form.TELEGRAM_CHAT_ID ?? '').trim();
+
+  if (token && !isMaskedTokenValue(token)) {
+    const parts = token.split(':');
+    if (/\s/.test(token)) return 'Bot token cannot contain spaces.';
+    if (parts.length !== 2 || !/^\d+$/.test(parts[0]) || parts[1].length < 10) {
+      return 'Bot token must look like 123456789:ABCdef...';
+    }
+  }
+
+  if (chatId && /\s/.test(chatId)) {
+    return 'Chat ID cannot contain spaces.';
+  }
+
+  return null;
+}
+
 export default function MessagesPage() {
   const [form, setForm]         = useState({});
   const [status, setStatus]     = useState(null);
@@ -117,11 +141,29 @@ export default function MessagesPage() {
   async function handleSave() {
     setSaving(true);
     setSaveMsg(null);
+    const validationError = validateBotForm(form);
+    if (validationError) {
+      setSaveMsg({ ok: false, text: validationError });
+      setSaving(false);
+      setTimeout(() => setSaveMsg(null), 4000);
+      return;
+    }
+
+    const payload = { ...form };
+    if (isMaskedTokenValue(payload.TELEGRAM_TOKEN)) {
+      delete payload.TELEGRAM_TOKEN;
+    } else if (typeof payload.TELEGRAM_TOKEN === 'string') {
+      payload.TELEGRAM_TOKEN = payload.TELEGRAM_TOKEN.trim();
+    }
+    if (typeof payload.TELEGRAM_CHAT_ID === 'string') {
+      payload.TELEGRAM_CHAT_ID = payload.TELEGRAM_CHAT_ID.trim();
+    }
+
     try {
       const r = await fetch(`${API}/api/settings/bot`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
       const data = await r.json();
       if (data.ok) {

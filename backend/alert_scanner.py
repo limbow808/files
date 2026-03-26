@@ -102,10 +102,39 @@ status = {
 
 # ─── Telegram helpers ─────────────────────────────────────────────────────────
 
+def validate_telegram_config(token: str | None = None, chat_id: str | None = None) -> str | None:
+    """Return a human-readable config error, or None when Telegram config looks sane."""
+    token = CONFIG["TELEGRAM_TOKEN"] if token is None else str(token).strip()
+    chat_id = CONFIG["TELEGRAM_CHAT_ID"] if chat_id is None else str(chat_id).strip()
+
+    if not token:
+        return "Telegram bot token is missing. Paste the full token from @BotFather."
+    if any(ch.isspace() for ch in token):
+        return "Telegram bot token cannot contain whitespace."
+    if "*" in token:
+        return "Telegram bot token looks masked. Paste the full token from @BotFather before saving."
+    if token.count(":") != 1:
+        return "Telegram bot token is invalid. Expected format like 123456789:ABCdef..."
+
+    token_id, token_secret = token.split(":", 1)
+    if not token_id.isdigit() or len(token_secret) < 10:
+        return "Telegram bot token is invalid. Expected format like 123456789:ABCdef..."
+
+    if not chat_id:
+        return "Telegram chat ID is missing."
+    if any(ch.isspace() for ch in chat_id):
+        return "Telegram chat ID cannot contain whitespace."
+    return None
+
 def _tg_send(text: str) -> bool:
     """Send a message to the configured Telegram chat. Returns True on success."""
     token   = CONFIG["TELEGRAM_TOKEN"]
     chat_id = CONFIG["TELEGRAM_CHAT_ID"]
+    config_error = validate_telegram_config(token=token, chat_id=chat_id)
+    if config_error:
+        status["last_error"] = config_error
+        print(f"  [alerts] {config_error}")
+        return False
     url     = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         resp = requests.post(
@@ -113,11 +142,17 @@ def _tg_send(text: str) -> bool:
             json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
-        ok = resp.ok and resp.json().get("ok")
+        payload = resp.json() if resp.content else {}
+        ok = resp.ok and payload.get("ok")
         if not ok:
-            print(f"  [alerts] Telegram error: {resp.text[:200]}")
+            description = payload.get("description") or resp.text[:200]
+            status["last_error"] = f"Telegram send failed: {description}"
+            print(f"  [alerts] Telegram error: {description}")
+        else:
+            status["last_error"] = None
         return bool(ok)
     except Exception as e:
+        status["last_error"] = f"Telegram send failed: {e}"
         print(f"  [alerts] Telegram send failed: {e}")
         return False
 
@@ -159,7 +194,7 @@ def update_config(updates: dict) -> None:
         if key in _NUMERIC_KEYS:
             CONFIG[key] = float(val) if isinstance(val, float) else int(val)
         else:
-            CONFIG[key] = str(val)
+            CONFIG[key] = str(val).strip()
 
 
 def _should_alert(key: str) -> bool:
