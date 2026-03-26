@@ -6,9 +6,7 @@ import CharactersPage from './pages/CharactersPage';
 import CraftLogPage from './pages/CraftLogPage';
 import MessagesPage from './pages/MessagesPage';
 import QueuePlannerPage from './pages/QueuePlannerPage';
-import ContractScannerPage from './pages/ContractScannerPage';
 import BlueprintsPage from './pages/BlueprintsPage';
-import BpLibraryPage from './pages/BpLibraryPage';
 import OrdersPage from './pages/OrdersPage';
 import InventoryPage from './pages/InventoryPage';
 import ResearchPage from './pages/ResearchPage';
@@ -28,7 +26,6 @@ export default function App() {
   const [refreshing,   setRefreshing]   = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [activeTab,    setActiveTab]    = useState('OVERVIEW');
-  const [plannerVisitNonce, setPlannerVisitNonce] = useState(0);
   const [appSettings, setAppSettings] = useState(() => loadAppSettings());
   const [booted,       setBooted]       = useState(false);
   // Lazy mount: only mount a tab's page the first time the user visits it.
@@ -53,8 +50,8 @@ export default function App() {
   const serverReady  = readyData?.ready === true;
 
   const walletHistory = Array.isArray(walletRaw) ? walletRaw : null;
-  const online       = !scanError;
   const backendAlive = !pingError && !pingLoading;
+  const online       = backendAlive;
 
   // Auto-boot only when the server has finished its prewarm (scan + skill names).
   // If the server is already warm on page load this fires within one /api/ready roundtrip.
@@ -79,9 +76,6 @@ export default function App() {
   // Mount the tab's page on first visit, keep it mounted forever after.
   const handleTabChange = useCallback((tab) => {
     setActiveTab(tab);
-    if (tab === 'QUEUE_PLANNER') {
-      setPlannerVisitNonce(value => value + 1);
-    }
     setMountedTabs(prev => {
       if (prev.has(tab)) return prev;
       const next = new Set(prev);
@@ -145,7 +139,7 @@ export default function App() {
           )}
           {mountedTabs.has('QUEUE_PLANNER') && (
             <div style={{ display: activeTab === 'QUEUE_PLANNER' ? 'contents' : 'none' }}>
-              <QueuePlannerPage appSettings={appSettings} refreshNonce={plannerVisitNonce} />
+              <QueuePlannerPage appSettings={appSettings} />
             </div>
           )}
           {mountedTabs.has('APP_SETTINGS') && (
@@ -163,19 +157,9 @@ export default function App() {
               <InventionPage />
             </div>
           )}
-          {mountedTabs.has('BP_LIBRARY') && (
-            <div style={{ display: activeTab === 'BP_LIBRARY' ? 'contents' : 'none' }}>
-              <BpLibraryPage refreshKey={refreshKey} />
-            </div>
-          )}
-          {mountedTabs.has('BP_FINDER') && (
-            <div style={{ display: activeTab === 'BP_FINDER' ? 'contents' : 'none' }}>
+          {mountedTabs.has('BLUEPRINTS') && (
+            <div style={{ display: activeTab === 'BLUEPRINTS' ? 'contents' : 'none' }}>
               <BlueprintsPage refreshKey={refreshKey} />
-            </div>
-          )}
-          {mountedTabs.has('CONTRACT_SCANNER') && (
-            <div style={{ display: activeTab === 'CONTRACT_SCANNER' ? 'contents' : 'none' }}>
-              <ContractScannerPage refreshKey={refreshKey} />
             </div>
           )}
           {mountedTabs.has('REVENUE') && (

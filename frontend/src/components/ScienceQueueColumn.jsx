@@ -11,6 +11,14 @@ function formatSeconds(seconds) {
   return `${(seconds / 86400).toFixed(1)}d`;
 }
 
+function formatCountdown(targetTs) {
+  const secs = Math.max(0, targetTs - Math.floor(Date.now() / 1000));
+  if (secs <= 0) return 'NOW';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+}
+
 function Flag({ label, bg, color = '#000' }) {
   return (
     <span style={{
@@ -70,6 +78,58 @@ function SectionHeader({ label, count, accentColor }) {
       <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, ${accentColor}66, transparent)` }} />
     </div>
   );
+}
+
+function SlotGroupHeader({ startAt, slotFreedBy }) {
+  const isNow = !startAt || startAt <= Math.floor(Date.now() / 1000) + 30;
+  if (isNow) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '5px 10px', background: 'var(--bg)', borderBottom: '1px solid #0d0d0d',
+      }}>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: '#4cff91', fontWeight: 700 }}>START NOW</span>
+        <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #4cff9166, transparent)' }} />
+      </div>
+    );
+  }
+  const date = new Date(startAt * 1000);
+  const hhmm = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const countdown = formatCountdown(startAt);
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '5px 10px', background: 'var(--bg)', borderTop: '1px solid #0d0d0d', borderBottom: '1px solid #0d0d0d',
+    }}>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: '#4da6ff', fontWeight: 700 }}>{hhmm}</span>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'rgba(77,166,255,0.8)', letterSpacing: 0.4 }}>
+        {slotFreedBy ? `slot freed after: ${slotFreedBy}` : 'slot available'}
+      </span>
+      <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #4da6ff44, transparent)' }} />
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>{countdown}</span>
+    </div>
+  );
+}
+
+function buildScienceGroups(items) {
+  const nowTs = Math.floor(Date.now() / 1000);
+  const groups = [];
+  let currentGroup = null;
+  for (const item of items) {
+    const isNow = !item.start_at || item.start_at <= nowTs + 30;
+    const groupKey = isNow ? 'now' : item.start_at;
+    if (!currentGroup || currentGroup.key !== groupKey) {
+      currentGroup = {
+        key: groupKey,
+        startAt: isNow ? null : item.start_at,
+        slotFreedBy: item.slot_freed_by || null,
+        items: [],
+      };
+      groups.push(currentGroup);
+    }
+    currentGroup.items.push(item);
+  }
+  return groups;
 }
 
 function IdleQueueRow({ item }) {
@@ -380,6 +440,9 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
   const copyItems = items.filter(i => i.action_type === 'copy_first');
   const copyThenInventItems = items.filter(i => i.action_type === 'copy_then_invent');
   const inventItems = items.filter(i => i.action_type === 'invent_first');
+  const copyGroups = buildScienceGroups(copyItems);
+  const copyThenInventGroups = buildScienceGroups(copyThenInventItems);
+  const inventGroups = buildScienceGroups(inventItems);
 
   if (idleItems.length === 0 && copyItems.length === 0 && copyThenInventItems.length === 0 && inventItems.length === 0) {
     return (
@@ -402,47 +465,62 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
       {copyItems.length > 0 && (
         <>
           <SectionHeader label="COPY FIRST" count={copyItems.length} accentColor="#4da6ff" />
-          {copyItems.map((item, idx) => (
-            <ScienceQueueRow
-              key={item.rec_id || `${item.output_id}-${idx}`}
-              item={item}
-              hasSciSlot={idx < freeScience}
-              cycleConfig={cycleConfig}
-              isOpen={expandedId === (item.rec_id || String(item.output_id))}
-              onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
-            />
+          {copyGroups.map((group) => (
+            <div key={`copy-${group.key}`}>
+              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+              {group.items.map((item, idx) => (
+                <ScienceQueueRow
+                  key={item.rec_id || `${item.output_id}-${idx}`}
+                  item={item}
+                  hasSciSlot={!group.startAt}
+                  cycleConfig={cycleConfig}
+                  isOpen={expandedId === (item.rec_id || String(item.output_id))}
+                  onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
+                />
+              ))}
+            </div>
           ))}
         </>
       )}
       {copyThenInventItems.length > 0 && (
         <>
           <SectionHeader label="COPY → INVENT" count={copyThenInventItems.length} accentColor="#ffd24d" />
-          {copyThenInventItems.map((item, idx) => (
-            <ScienceQueueRow
-              key={item.rec_id || `${item.output_id}-${idx}`}
-              item={item}
-              hasSciSlot={copyItems.length + idx < freeScience}
-              cycleConfig={cycleConfig}
-              isOpen={expandedId === (item.rec_id || String(item.output_id))}
-              onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
-              isInvention
-            />
+          {copyThenInventGroups.map((group) => (
+            <div key={`copy-then-invent-${group.key}`}>
+              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+              {group.items.map((item, idx) => (
+                <ScienceQueueRow
+                  key={item.rec_id || `${item.output_id}-${idx}`}
+                  item={item}
+                  hasSciSlot={!group.startAt}
+                  cycleConfig={cycleConfig}
+                  isOpen={expandedId === (item.rec_id || String(item.output_id))}
+                  onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
+                  isInvention
+                />
+              ))}
+            </div>
           ))}
         </>
       )}
       {inventItems.length > 0 && (
         <>
           <SectionHeader label="INVENT FIRST" count={inventItems.length} accentColor="#ff9d3d" />
-          {inventItems.map((item, idx) => (
-            <ScienceQueueRow
-              key={item.rec_id || `${item.output_id}-${idx}`}
-              item={item}
-              hasSciSlot={copyItems.length + copyThenInventItems.length + idx < freeScience}
-              cycleConfig={cycleConfig}
-              isOpen={expandedId === (item.rec_id || String(item.output_id))}
-              onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
-              isInvention
-            />
+          {inventGroups.map((group) => (
+            <div key={`invent-${group.key}`}>
+              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+              {group.items.map((item, idx) => (
+                <ScienceQueueRow
+                  key={item.rec_id || `${item.output_id}-${idx}`}
+                  item={item}
+                  hasSciSlot={!group.startAt}
+                  cycleConfig={cycleConfig}
+                  isOpen={expandedId === (item.rec_id || String(item.output_id))}
+                  onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
+                  isInvention
+                />
+              ))}
+            </div>
           ))}
         </>
       )}

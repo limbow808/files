@@ -79,7 +79,7 @@ function QueueColumnHeaders() {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 6,
-      padding: '4px 10px', background: 'var(--bg)', borderBottom: '1px solid #0d0d0d',
+      padding: '4px 10px', background: 'var(--bg2)', borderBottom: '1px solid #0d0d0d',
       flexShrink: 0,
     }}>
       {cell('#',          'center', 26)}
@@ -98,7 +98,7 @@ function SectionHeader({ label, count, rightLabel, accentColor }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '5px 10px', background: 'var(--bg)',
+      padding: '5px 10px', background: 'var(--bg2)',
       borderTop: '1px solid #0d0d0d', borderBottom: '1px solid #0d0d0d',
       flexShrink: 0,
     }}>
@@ -331,7 +331,7 @@ function GraduatedStrip({ names }) {
   return (
     <div style={{
       padding: '4px 10px', borderBottom: '1px solid #0d0d0d',
-      background: 'var(--bg)', fontSize: 10,
+      background: 'var(--bg2)', fontSize: 10,
       color: 'rgba(77,166,255,0.65)', fontFamily: 'var(--mono)', letterSpacing: 0.5,
       fontStyle: 'italic',
     }}>
@@ -846,7 +846,17 @@ function WalletBar({ walletTotal, lockedIsk, cycleConfig, lastRefresh }) {
   );
 }
 
-function PlannerFilterBar({ cycleConfig, maxJobs, mfgCount, startNowCount, queuedCount, totalItems }) {
+function PlannerFilterBar({
+  cycleConfig,
+  maxJobs,
+  mfgCount,
+  startNowCount,
+  queuedCount,
+  totalItems,
+  onBlueprintRefresh,
+  blueprintRefreshLoading,
+  blueprintRefreshStatus,
+}) {
   const minProfitM = Math.round(Number(cycleConfig?.min_profit_per_cycle || 0) / 1_000_000);
   const sellDays = Number(cycleConfig?.max_sell_days_tolerance || 0);
   const countCorpOwn = Boolean(cycleConfig?.count_corp_original_blueprints_as_own);
@@ -863,7 +873,7 @@ function PlannerFilterBar({ cycleConfig, maxJobs, mfgCount, startNowCount, queue
 
   return (
     <div style={{
-      padding: '6px 10px', background: 'var(--bg)', borderBottom: '1px solid var(--border)',
+      padding: '6px 10px', background: 'var(--bg2)', borderBottom: '1px solid var(--border)',
       display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flexShrink: 0,
     }}>
       <span style={{
@@ -889,6 +899,37 @@ function PlannerFilterBar({ cycleConfig, maxJobs, mfgCount, startNowCount, queue
           UNDERFILL: BACKEND RETURNED FEWER MFG JOBS THAN SLOT CAP
         </span>
       )}
+      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        {blueprintRefreshStatus && (
+          <span style={{
+            fontFamily: 'var(--mono)',
+            fontSize: 10,
+            color: blueprintRefreshStatus.color,
+            whiteSpace: 'nowrap',
+          }}>
+            {blueprintRefreshStatus.label}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onBlueprintRefresh}
+          disabled={blueprintRefreshLoading}
+          style={{
+            border: '1px solid var(--border)',
+            background: blueprintRefreshLoading ? 'rgba(77, 166, 255, 0.14)' : 'var(--bg2)',
+            color: blueprintRefreshLoading ? '#4da6ff' : 'var(--text)',
+            fontFamily: 'var(--mono)',
+            fontSize: 10,
+            letterSpacing: 0.7,
+            padding: '5px 9px',
+            cursor: blueprintRefreshLoading ? 'wait' : 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+          title="Force-refresh personal and corp blueprints from ESI, then rebuild planner recommendations"
+        >
+          {blueprintRefreshLoading ? 'REFRESHING BPS...' : 'REFRESH ESI BLUEPRINTS'}
+        </button>
+      </div>
     </div>
   );
 }
@@ -924,8 +965,11 @@ function MultibuyBar({ checkedCount, totalIsk, mats, onCopy, onClear }) {
 export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, refreshNonce = 0 }) {
   const [checkedIds, setCheckedIds] = useState(new Set());
   const [plannerRefreshNonce, setPlannerRefreshNonce] = useState(0);
+  const [blueprintRefreshLoading, setBlueprintRefreshLoading] = useState(false);
+  const [blueprintRefreshStatus, setBlueprintRefreshStatus] = useState(null);
   const jobsSignalRef = useRef(null);
   const jobsPollBusyRef = useRef(false);
+  const blueprintStatusTimerRef = useRef(null);
   const cycleConfig = appSettings;
   const plannerStructureType = facilityToPlannerStructureType(appSettings?.facility);
   const calcQueryParams = useMemo(() => {
@@ -1050,6 +1094,56 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
       clearInterval(id);
     };
   }, [refetch]);
+
+  useEffect(() => {
+    if (tpData?.status !== 'esi_loading') return undefined;
+
+    const retryId = setTimeout(() => {
+      if (document.visibilityState === 'visible') {
+        refetch();
+      }
+    }, 5000);
+
+    return () => clearTimeout(retryId);
+  }, [tpData?.status, refetch]);
+
+  useEffect(() => () => {
+    if (blueprintStatusTimerRef.current) {
+      clearTimeout(blueprintStatusTimerRef.current);
+    }
+  }, []);
+
+  const showBlueprintRefreshStatus = useCallback((label, color) => {
+    if (blueprintStatusTimerRef.current) {
+      clearTimeout(blueprintStatusTimerRef.current);
+    }
+    setBlueprintRefreshStatus({ label, color });
+    blueprintStatusTimerRef.current = setTimeout(() => {
+      setBlueprintRefreshStatus(null);
+      blueprintStatusTimerRef.current = null;
+    }, 4000);
+  }, []);
+
+  const handleBlueprintRefresh = useCallback(async () => {
+    if (blueprintRefreshLoading) return;
+
+    setBlueprintRefreshLoading(true);
+    setBlueprintRefreshStatus(null);
+
+    try {
+      const res = await fetch(`${API}/api/blueprints/esi?force=1`, {
+        signal: AbortSignal.timeout(120000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await res.json();
+      setPlannerRefreshNonce(value => value + 1);
+      showBlueprintRefreshStatus('BLUEPRINTS UPDATED', '#4cff91');
+    } catch {
+      showBlueprintRefreshStatus('BLUEPRINT REFRESH FAILED', 'var(--accent)');
+    } finally {
+      setBlueprintRefreshLoading(false);
+    }
+  }, [blueprintRefreshLoading, showBlueprintRefreshStatus]);
 
   const calcMap = useMemo(() => {
     const m = {};
@@ -1178,6 +1272,9 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
         startNowCount={startNowMfgCount}
         queuedCount={queuedMfgCount}
         totalItems={items.length}
+        onBlueprintRefresh={handleBlueprintRefresh}
+        blueprintRefreshLoading={blueprintRefreshLoading}
+        blueprintRefreshStatus={blueprintRefreshStatus}
       />
 
       {/* 2-Column Layout */}

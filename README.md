@@ -67,9 +67,22 @@ files/
 
 ## Setup
 
-**1. Clone and install dependencies**
+**1. Create a local Python environment and install dependencies**
+
+Create the virtualenv on each machine you use. Do not share or commit `.venv` across macOS and Windows.
+
 ```bash
-pip install -r requirements.txt
+# from the repo root
+python -m venv .venv
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+# macOS / Linux
+# source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 cd frontend
 npm install
 ```
@@ -118,8 +131,19 @@ cd backend
 python server.py
 
 # frontend (port 3000, auto-proxies /api → backend)
+# uses the active Python by default
 cd frontend
 npm run dev
+```
+
+If `npm run dev` cannot find the right Python interpreter, set `CREST_PYTHON` first:
+
+```bash
+# Windows PowerShell
+$env:CREST_PYTHON = "python"
+
+# macOS / Linux
+# export CREST_PYTHON=python3
 ```
 
 Open [http://localhost:3000](http://localhost:3000), go to **Characters** and add your EVE account(s).

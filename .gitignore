@@ -1,3 +1,6 @@
+# OS
+.DS_Store
+
 # Secrets
 .env
 esi_token.json
@@ -6,11 +9,16 @@ esi_token.json
 __pycache__/
 .venv/
 *.pyc
+backend/tmp*
 
 # Databases (local cache / SDE — too large for git)
 crest_history.db
 market_cache.db
 sqlite-latest.sqlite
+*.db-shm
+*.db-wal
+backend/*_cache.json
+backend/utilization_history.json
 
 # crest.db is small enough to commit, but exclude if preferred:
 # crest.db

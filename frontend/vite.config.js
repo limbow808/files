@@ -6,6 +6,9 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let backendProc = null;
+const backendCwd = path.join(__dirname, '..', 'backend');
+const backendEntry = path.join(backendCwd, 'server.py');
+const pythonCommand = process.env.CREST_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 
 export default defineConfig({
   plugins: [
@@ -16,11 +19,13 @@ export default defineConfig({
         server.middlewares.use('/__start', (_req, res) => {
           const isRunning = backendProc && !backendProc.killed && backendProc.exitCode === null;
           if (!isRunning) {
-            backendProc = spawn('python', [path.join(__dirname, '..', 'backend', 'server.py')], {
-              cwd: path.join(__dirname, '..', 'backend'),
+            backendProc = spawn(pythonCommand, [backendEntry], {
+              cwd: backendCwd,
               stdio: 'inherit',
             });
-            backendProc.on('error', (err) => console.error('[backend]', err.message));
+            backendProc.on('error', (err) => {
+              console.error('[backend]', `${err.message}. Set CREST_PYTHON if your interpreter is not on PATH.`);
+            });
           }
           res.setHeader('Content-Type', 'application/json');
           res.end(JSON.stringify({ started: true }));

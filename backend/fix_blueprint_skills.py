@@ -10,7 +10,7 @@ which gives item-use requirements (e.g. "Anchoring" to anchor a structure),
 NOT manufacturing requirements. This script fixes that.
 
 Usage:
-    .venv/bin/python3 fix_blueprint_skills.py
+    python fix_blueprint_skills.py
 """
 
 import sqlite3

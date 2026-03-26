@@ -11,9 +11,7 @@ const TAB_GROUP = {
   MANUFACTURING:     'INDUSTRY',
   RESEARCH:          'INDUSTRY',
   INVENTION:         'INDUSTRY',
-  BP_LIBRARY:        'INDUSTRY',
-  BP_FINDER:         'INDUSTRY',
-  CONTRACT_SCANNER:  'INDUSTRY',
+  BLUEPRINTS:        'INDUSTRY',
   REVENUE:           'MARKET',
   ORDERS:            'MARKET',
   MINERAL_PRICES:    'MARKET',
@@ -43,9 +41,7 @@ const DROPDOWNS = {
     {
       title: 'Blueprints',
       items: [
-        { id: 'BP_LIBRARY',       label: 'BP Library'       },
-        { id: 'BP_FINDER',        label: 'BP Finder'        },
-        { id: 'CONTRACT_SCANNER', label: 'BP Scanner'       },
+        { id: 'BLUEPRINTS', label: 'Blueprints' },
       ],
     },
   ],
