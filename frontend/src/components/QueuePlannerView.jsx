@@ -9,6 +9,7 @@ import { API } from '../App';
 import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/appSettings';
 
 const PLANNER_GROUP_MODE_KEY = 'crest_job_planner_group_mode';
+const PLANNER_SHOW_IDLE_KEY = 'crest_job_planner_show_idle';
 
 function readPlannerGroupMode() {
   if (typeof window === 'undefined') return 'character';
@@ -17,6 +18,16 @@ function readPlannerGroupMode() {
     return stored === 'time' ? 'time' : 'character';
   } catch {
     return 'character';
+  }
+}
+
+function readPlannerShowIdle() {
+  if (typeof window === 'undefined') return true;
+  try {
+    const stored = window.localStorage.getItem(PLANNER_SHOW_IDLE_KEY);
+    return stored !== 'false';
+  } catch {
+    return true;
   }
 }
 
@@ -37,7 +48,7 @@ function OwnBadge({ kind }) {
     <span style={{
       display: 'inline-block', padding: '2px 6px', fontSize: 9, letterSpacing: 0.5,
       background: c.fill, color: '#000',
-      borderRadius: 2, fontWeight: 700, flexShrink: 0, minWidth: 44, textAlign: 'center',
+      borderRadius: 0, fontWeight: 700, flexShrink: 0, minWidth: 44, textAlign: 'center',
     }}>{c.label}</span>
   );
 }
@@ -49,9 +60,9 @@ function SlotDots({ total, occupied, activeColor }) {
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2, maxWidth: 140 }}>
       {Array.from({ length: Math.max(total, 1) }).map((_, i) => (
         <div key={i} style={{
-          width: SZ, height: SZ, borderRadius: 1,
+          width: SZ, height: SZ, borderRadius: 0,
           background: i < occupied ? activeColor : '#4cff91',
-          border: '1px solid rgba(255,255,255,0.07)',
+          border: '0px solid rgba(255,255,255,0.07)',
           flexShrink: 0,
         }} title={i < occupied ? 'In use' : 'Free'} />
       ))}
@@ -122,10 +133,9 @@ function SectionHeader({ label, count, rightLabel, accentColor }) {
         fontFamily: 'var(--mono)', fontSize: 9, color: '#000',
         background: accentColor, padding: '2px 6px', borderRadius: 2,
       }}>{count} ITEMS</span>
-      {/* gradient bar */}
       <div style={{
         flex: 1, height: 1, marginLeft: 4, marginRight: 4,
-        background: `linear-gradient(to right, ${accentColor}66, transparent)`,
+        background: accentColor, opacity: 0.35,
       }} />
       <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 0.5, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
         {rightLabel}
@@ -597,6 +607,7 @@ function fmtTripLoad(totalM3, capacityM3) {
   return `${trips.toFixed(trips >= 10 ? 0 : 1)} trips`;
 }
 
+// Mini cargo bar used for the inbound/outbound strip just under the KPIs.
 function CargoProgressSquares({ filledSquares, totalSquares, color }) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: `repeat(${totalSquares}, minmax(0, 1fr))`, gap: 2 }}>
@@ -615,6 +626,7 @@ function CargoProgressSquares({ filledSquares, totalSquares, color }) {
   );
 }
 
+// One inbound/outbound row in the cargo panel. Spacing and stat alignment changes usually start here.
 function CargoTimelineRow({ label, color, totalM3, nextTs, nextLabel, capacityM3 }) {
   const totalSquares = 24;
   const loadRatio = capacityM3 > 0 ? totalM3 / capacityM3 : 0;
@@ -644,6 +656,7 @@ function CargoTimelineRow({ label, color, totalM3, nextTs, nextLabel, capacityM3
   );
 }
 
+// Compact logistics summary shown between the KPI strip and the wallet bar.
 function CargoTimelinePanel({ cycleHours, mfgItems, haulCapacityM3 }) {
   const panelData = useMemo(() => {
     const nowTs = Math.floor(Date.now() / 1000);
@@ -746,7 +759,7 @@ function BlockedRecommendationsPanel({ blockedItems }) {
         <span style={{ fontSize: 10, color: 'var(--dim)', transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.2s', display: 'inline-block' }}>▼</span>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1.2, color: '#ff9d3d' }}>UNLOCKABLE OPPORTUNITIES</span>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#000', background: '#ff9d3d', padding: '2px 6px', borderRadius: 2 }}>{blockedItems.length}</span>
-        <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, rgba(255,157,61,0.45), transparent)' }} />
+        <div style={{ flex: 1, height: 1, background: 'rgba(255,157,61,0.45)' }} />
         <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>LOCKED UPSIDE</span>
       </button>
       <div style={{ display: isOpen ? 'flex' : 'none', flexDirection: 'column', gap: 6, padding: '0 12px 12px' }}>
@@ -854,81 +867,27 @@ function PlannerGroupToggle({ value, onChange }) {
   );
 }
 
+// Small control bar above the board. Keep board-level controls grouped here.
 function PlannerFilterBar({
-  cycleConfig,
-  maxJobs,
-  mfgCount,
-  startNowCount,
-  queuedCount,
-  totalItems,
   onBlueprintRefresh,
   blueprintRefreshLoading,
-  blueprintRefreshStatus,
   groupMode,
   onGroupModeChange,
+  showIdle,
+  onShowIdleChange,
 }) {
-  const minProfitM = Math.round(Number(cycleConfig?.min_profit_per_cycle || 0) / 1_000_000);
-  const sellDays = Number(cycleConfig?.max_sell_days_tolerance || 0);
-  const countCorpOwn = Boolean(cycleConfig?.count_corp_original_blueprints_as_own);
-  const weightVelocity = Boolean(cycleConfig?.weight_by_velocity);
-  const includeBelowThreshold = Boolean(cycleConfig?.include_below_threshold_items);
-  const underfilled = Number(mfgCount || 0) < Number(maxJobs || 0);
-  const usingCustomFilters = (
-    Number(cycleConfig?.min_profit_per_cycle || 0) !== Number(DEFAULT_APP_SETTINGS.min_profit_per_cycle)
-    || Boolean(cycleConfig?.include_below_threshold_items) !== Boolean(DEFAULT_APP_SETTINGS.include_below_threshold_items)
-    || Number(cycleConfig?.max_sell_days_tolerance || 0) !== Number(DEFAULT_APP_SETTINGS.max_sell_days_tolerance)
-    || Boolean(cycleConfig?.count_corp_original_blueprints_as_own) !== Boolean(DEFAULT_APP_SETTINGS.count_corp_original_blueprints_as_own)
-    || Boolean(cycleConfig?.weight_by_velocity) !== Boolean(DEFAULT_APP_SETTINGS.weight_by_velocity)
-  );
-  const filterChips = [
-    `Min ${minProfitM}M/cycle`,
-    includeBelowThreshold ? 'Fill below threshold' : 'Idle below threshold',
-    `Sell <= ${sellDays}d`,
-    countCorpOwn ? 'Corp BPO treated as owned' : 'Corp BPO copy-only',
-    weightVelocity ? 'Velocity weighted' : 'Velocity off',
-  ];
-
   return (
     <div className="planner-filterbar">
-      <div className="planner-filterbar__left">
-        <span className={`chip planner-chip ${underfilled ? 'planner-chip--bad' : 'planner-chip--good'}`}>
-          MFG {mfgCount}/{maxJobs} returned
-        </span>
-        <span className="chip planner-chip planner-chip--primary">
-          {startNowCount} now
-        </span>
-        <span className="chip planner-chip">
-          {queuedCount} planned later
-        </span>
-        <span className="chip planner-chip">
-          {totalItems} total items
-        </span>
-        {filterChips.map((chip) => (
-          <span key={chip} className="chip planner-chip">{chip}</span>
-        ))}
-        {usingCustomFilters && (
-          <span className="chip planner-chip planner-chip--warn">
-            Custom settings active
-          </span>
-        )}
-        {underfilled && (
-          <span className="chip planner-chip planner-chip--bad">
-            Underfill detected
-          </span>
-        )}
-      </div>
       <div className="planner-filterbar__actions">
         <PlannerGroupToggle value={groupMode} onChange={onGroupModeChange} />
-        {blueprintRefreshStatus && (
-          <span style={{
-            fontFamily: 'var(--mono)',
-            fontSize: 10,
-            color: blueprintRefreshStatus.color,
-            whiteSpace: 'nowrap',
-          }}>
-            {blueprintRefreshStatus.label}
-          </span>
-        )}
+        <button
+          type="button"
+          className={`chip${showIdle ? ' active' : ''}`}
+          onClick={() => onShowIdleChange(!showIdle)}
+          title={showIdle ? 'Hide idle jobs from both queue columns' : 'Show idle jobs in both queue columns'}
+        >
+          IDLE
+        </button>
         <button
           type="button"
           onClick={onBlueprintRefresh}
@@ -973,11 +932,10 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const [checkedIds, setCheckedIds] = useState(new Set());
   const [plannerRefreshNonce, setPlannerRefreshNonce] = useState(0);
   const [groupMode, setGroupMode] = useState(() => readPlannerGroupMode());
+  const [showIdle, setShowIdle] = useState(() => readPlannerShowIdle());
   const [blueprintRefreshLoading, setBlueprintRefreshLoading] = useState(false);
-  const [blueprintRefreshStatus, setBlueprintRefreshStatus] = useState(null);
   const jobsSignalRef = useRef(null);
   const jobsPollBusyRef = useRef(false);
-  const blueprintStatusTimerRef = useRef(null);
   const cycleConfig = appSettings;
   const plannerStructureType = facilityToPlannerStructureType(appSettings?.facility);
   const calcQueryParams = useMemo(() => {
@@ -1039,6 +997,13 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   }, [groupMode]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PLANNER_SHOW_IDLE_KEY, String(showIdle));
+    } catch {}
+  }, [showIdle]);
+
+  useEffect(() => {
     setCheckedIds(new Set());
     setExpandedId(null);
   }, [plannerStructureType, cycleConfig.cycle_duration_hours, cycleConfig.structureJobTimeBonusPct, cycleConfig.haul_capacity_m3, cycleConfig.target_isk_per_m3, cycleConfig.min_profit_per_cycle, cycleConfig.include_below_threshold_items, cycleConfig.max_sell_days_tolerance, cycleConfig.count_corp_original_blueprints_as_own, cycleConfig.weight_by_velocity, cycleConfig.rig_1, cycleConfig.rig_2]);
@@ -1053,10 +1018,19 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const walletTotal  = tpData?.wallet_total_isk ?? 0;
   const blockedItems = tpData?.blocked_items || [];
 
+  // These lists are the actual payloads rendered by the two planner columns.
   const sciItems = useMemo(() =>
     items.filter(i => i.action_type === 'copy_first' || i.action_type === 'invent_first' || i.action_type === 'copy_then_invent' || i.action_type === 'idle_science'),
     [items]);
   const mfgItems = useMemo(() => items.filter(i => i.action_type === 'manufacture' || i.action_type === 'idle_manufacture'), [items]);
+  const visibleSciItems = useMemo(
+    () => (showIdle ? sciItems : sciItems.filter(i => !i.is_idle && i.action_type !== 'idle_science')),
+    [sciItems, showIdle]
+  );
+  const visibleMfgItems = useMemo(
+    () => (showIdle ? mfgItems : mfgItems.filter(i => !i.is_idle && i.action_type !== 'idle_manufacture')),
+    [mfgItems, showIdle]
+  );
   const realSciItems = useMemo(() => sciItems.filter(i => !i.is_idle), [sciItems]);
   const realMfgItems = useMemo(() => mfgItems.filter(i => !i.is_idle), [mfgItems]);
   const startNowMfgCount = useMemo(() => {
@@ -1122,28 +1096,10 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
     return () => clearTimeout(retryId);
   }, [tpData?.status, refetch]);
 
-  useEffect(() => () => {
-    if (blueprintStatusTimerRef.current) {
-      clearTimeout(blueprintStatusTimerRef.current);
-    }
-  }, []);
-
-  const showBlueprintRefreshStatus = useCallback((label, color) => {
-    if (blueprintStatusTimerRef.current) {
-      clearTimeout(blueprintStatusTimerRef.current);
-    }
-    setBlueprintRefreshStatus({ label, color });
-    blueprintStatusTimerRef.current = setTimeout(() => {
-      setBlueprintRefreshStatus(null);
-      blueprintStatusTimerRef.current = null;
-    }, 4000);
-  }, []);
-
   const handleBlueprintRefresh = useCallback(async () => {
     if (blueprintRefreshLoading) return;
 
     setBlueprintRefreshLoading(true);
-    setBlueprintRefreshStatus(null);
 
     try {
       const res = await fetch(`${API}/api/blueprints/esi?force=1`, {
@@ -1152,13 +1108,12 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await res.json();
       setPlannerRefreshNonce(value => value + 1);
-      showBlueprintRefreshStatus('BLUEPRINTS UPDATED', '#4cff91');
     } catch {
-      showBlueprintRefreshStatus('BLUEPRINT REFRESH FAILED', 'var(--accent)');
+      // Leave the current planner data intact and allow manual retry.
     } finally {
       setBlueprintRefreshLoading(false);
     }
-  }, [blueprintRefreshLoading, showBlueprintRefreshStatus]);
+  }, [blueprintRefreshLoading]);
 
   const calcMap = useMemo(() => {
     const m = {};
@@ -1202,6 +1157,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
       .reduce((sum, i) => sum + (i.material_cost || 0), 0);
   }, [mfgItems]);
 
+  // Top KPI cards. If you want to reorder, rename, or recolor the headline numbers, do it here.
   const plannerStats = useMemo(() => {
     const nowTs = Math.floor(Date.now() / 1000);
     const startNowItems = mfgItems.filter(i => !i.start_at || i.start_at <= nowTs + 30);
@@ -1269,34 +1225,32 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
 
   return (
     <div className="planner-shell">
-      {/* Settings Modal */}
+      {/* Top KPI strip */}
       <PlannerKPIBar stats={plannerStats} />
 
+      {/* Wallet and cycle metadata strip */}
+      {walletTotal > 0 && <WalletBar walletTotal={walletTotal} lockedIsk={lockedIsk} cycleConfig={cycleConfig} lastRefresh={lastRefresh} />}
+
+      {/* Cargo flow summary */}
       <CargoTimelinePanel
         cycleHours={cycleConfig.cycle_duration_hours}
         mfgItems={mfgItems}
         haulCapacityM3={cycleConfig.haul_capacity_m3}
       />
 
-      {/* Wallet bar */}
-      {walletTotal > 0 && <WalletBar walletTotal={walletTotal} lockedIsk={lockedIsk} cycleConfig={cycleConfig} lastRefresh={lastRefresh} />}
+      {/* Board controls: grouping mode and blueprint refresh */}
       <PlannerFilterBar
-        cycleConfig={cycleConfig}
-        maxJobs={maxJobs}
-        mfgCount={mfgItems.length}
-        startNowCount={startNowMfgCount}
-        queuedCount={queuedMfgCount}
-        totalItems={items.length}
         onBlueprintRefresh={handleBlueprintRefresh}
         blueprintRefreshLoading={blueprintRefreshLoading}
-        blueprintRefreshStatus={blueprintRefreshStatus}
         groupMode={groupMode}
         onGroupModeChange={setGroupMode}
+        showIdle={showIdle}
+        onShowIdleChange={setShowIdle}
       />
 
-      {/* 2-Column Layout */}
+      {/* Main planner board. CSS decides when this becomes stacked on narrower screens. */}
       <div className="planner-board">
-        {/* Left Column: Science Queue (copy + invent) */}
+        {/* Left column: copy and invention recommendations */}
         <div className="planner-board__column planner-board__column--science">
           <QueuePaneHeader
             label="SCIENCE QUEUE"
@@ -1307,7 +1261,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
             tone="science"
           />
           <ScienceQueueColumn
-            items={sciItems}
+            items={visibleSciItems}
             cycleConfig={cycleConfig}
             maxScience={maxScience}
             freeScience={freeScience}
@@ -1317,7 +1271,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
           />
         </div>
 
-        {/* Right Column: Manufacturing Queue */}
+        {/* Right column: manufacturing recommendations */}
         <div className="planner-board__column">
           <QueuePaneHeader
             label="MANUFACTURING QUEUE"
@@ -1328,7 +1282,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
             tone="manufacturing"
           />
           <ManufacturingQueueColumn
-            items={mfgItems}
+            items={visibleMfgItems}
             cycleConfig={cycleConfig}
             maxJobs={maxJobs}
             freeSlots={freeSlots}
@@ -1341,6 +1295,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
         </div>
       </div>
 
+      {/* Bottom accordion for profitable jobs blocked by missing access/skills. */}
       <BlockedRecommendationsPanel blockedItems={blockedItems} />
 
       {/* Sticky multibuy bar when items are checked */}

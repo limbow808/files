@@ -70,10 +70,10 @@ function SlotGroupHeader({ startAt, slotFreedBy }) {
     return (
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
-        padding: '5px 10px', background: 'var(--bg)', borderBottom: '1px solid #0d0d0d',
+        padding: '5px 10px', background: 'var(--bg2)', borderBottom: '1px solid #0d0d0d',
       }}>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: '#4cff91', fontWeight: 700 }}>START NOW</span>
-        <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #4cff9166, transparent)' }} />
+        <div style={{ flex: 1, height: 1, background: '#4cff91', opacity: 0.35 }} />
       </div>
     );
   }
@@ -89,12 +89,13 @@ function SlotGroupHeader({ startAt, slotFreedBy }) {
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'rgba(255,157,61,0.8)', letterSpacing: 0.4 }}>
         {slotFreedBy ? `slot freed after: ${slotFreedBy}` : 'slot available'}
       </span>
-      <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #ff9d3d44, transparent)' }} />
+      <div style={{ flex: 1, height: 1, background: '#ff9d3d', opacity: 0.35 }} />
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>{countdown}</span>
     </div>
   );
 }
 
+// Lane header used when the planner is grouped by character instead of start time.
 function CharacterLaneHeader({ character, activeCount, idleCount }) {
   const name = character?.character_name || 'UNASSIGNED';
   const color = character?.character_id ? charColor(character.character_id) : 'var(--planner-idle)';
@@ -119,6 +120,7 @@ function getManufacturingPrimaryCharacter(item) {
   return item.assigned_character || (item.characters || [])[0] || null;
 }
 
+// Break the manufacturing list into per-character lanes so active and idle jobs stay together.
 function buildManufacturingCharacterGroups(items) {
   const groups = [];
   const index = new Map();
@@ -146,12 +148,12 @@ function SectionHeader({ label, count, accentColor }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '5px 10px', background: 'var(--bg)', flexShrink: 0,
+      padding: '5px 10px', background: 'var(--bg2)', flexShrink: 0,
       borderBottom: '1px solid #0d0d0d',
     }}>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: accentColor, fontWeight: 700 }}>{label}</span>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', background: accentColor, padding: '2px 6px', borderRadius: 2 }}>{count}</span>
-      <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, ${accentColor}66, transparent)` }} />
+      <div style={{ flex: 1, height: 1, background: accentColor, opacity: 0.35 }} />
     </div>
   );
 }
@@ -185,6 +187,7 @@ function IdleQueueRow({ item }) {
   );
 }
 
+// Main manufacturing recommendation row. Checkbox, badges, and the expandable detail drawer live here.
 const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfgSlot, cycleConfig, isOpen, onToggle, checked, onCheck }) {
   const profitPerCycle = item.profit_per_cycle || item.net_profit || 0;
   const runsPerCycle = item.runs_per_cycle || 1;
@@ -284,7 +287,7 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
       </div>
 
       {isOpen && (
-        <div style={{ background: 'var(--bg)', borderLeft: '3px solid var(--planner-mfg)', padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
+        <div style={{ background: 'var(--bg2)', borderLeft: '3px solid var(--planner-mfg)', padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
           <div className="planner-detail-grid">
             <div>
               <DetailRow label="Duration" value={formatSeconds(item.duration_secs || item.duration_seconds || 0)} />
@@ -363,6 +366,9 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
   );
 });
 
+// Manufacturing column supports both views:
+// - character: lane per pilot
+// - time: slot timing groups first, idle rows at the bottom
 export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJobs, freeSlots, onItemExpand, expandedId, checkedIds, onCheck, groupMode = 'character' }) {
   const idleItems = items?.filter(i => i.is_idle) || [];
   const mfgItems = items?.filter(i => i.action_type === 'manufacture') || [];
@@ -383,7 +389,7 @@ export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJ
     );
   }
 
-  // Group items by slot start time — items starting now vs. future slots
+  // Time-grouped mode clusters rows by when a manufacturing slot becomes available.
   const groups = [];
   let currentGroup = null;
   for (const item of mfgItems) {
@@ -433,6 +439,7 @@ export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJ
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {characterGroups.map((group) => (
           <div key={group.key} className="planner-character-lane">
+            {/* Per-character heading row */}
             <CharacterLaneHeader character={group.character} activeCount={group.activeItems.length} idleCount={group.idleItems.length} />
             {renderActiveGroups(group.activeItems, `${group.key}-mfg`)}
             {group.idleItems.length > 0 && (

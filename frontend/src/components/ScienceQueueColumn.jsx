@@ -70,12 +70,12 @@ function SectionHeader({ label, count, accentColor }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '5px 10px', background: 'var(--bg)', flexShrink: 0,
+      padding: '5px 10px', background: 'var(--bg2)', flexShrink: 0,
       borderBottom: '1px solid #0d0d0d',
     }}>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: accentColor, fontWeight: 700 }}>{label}</span>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#000', background: accentColor, padding: '2px 6px', borderRadius: 2 }}>{count}</span>
-      <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, ${accentColor}66, transparent)` }} />
+      <div style={{ flex: 1, height: 1, background: accentColor, opacity: 0.35 }} />
     </div>
   );
 }
@@ -87,10 +87,10 @@ function SlotGroupHeader({ startAt, slotFreedBy, accentColor = 'var(--planner-co
     return (
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
-        padding: '5px 10px', background: 'var(--bg)', borderBottom: '1px solid #0d0d0d',
+        padding: '5px 10px', background: 'var(--bg2)', borderBottom: '1px solid #0d0d0d',
       }}>
         <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: '#4cff91', fontWeight: 700 }}>START NOW</span>
-        <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #4cff9166, transparent)' }} />
+        <div style={{ flex: 1, height: 1, background: '#4cff91', opacity: 0.35 }} />
       </div>
     );
   }
@@ -100,18 +100,19 @@ function SlotGroupHeader({ startAt, slotFreedBy, accentColor = 'var(--planner-co
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '5px 10px', background: 'var(--bg)', borderTop: '1px solid #0d0d0d', borderBottom: '1px solid #0d0d0d',
+      padding: '5px 10px', background: 'var(--bg2)', borderTop: '1px solid #0d0d0d', borderBottom: '1px solid #0d0d0d',
     }}>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: accentColor, fontWeight: 700 }}>{hhmm}</span>
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: accentColor, letterSpacing: 0.4, opacity: 0.8 }}>
         {slotFreedBy ? `slot freed after: ${slotFreedBy}` : 'slot available'}
       </span>
-      <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, ${accentColor}66, transparent)` }} />
+      <div style={{ flex: 1, height: 1, background: accentColor, opacity: 0.35 }} />
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>{countdown}</span>
     </div>
   );
 }
 
+// Lane header used when the planner is grouped by character instead of start time.
 function CharacterLaneHeader({ character, activeCount, idleCount }) {
   const name = character?.character_name || 'UNASSIGNED';
   const color = character?.character_id ? charColor(character.character_id) : 'var(--planner-idle)';
@@ -136,6 +137,7 @@ function getSciencePrimaryCharacter(item) {
   return item.copy_character || item.assigned_character || (item.characters || [])[0] || item.invent_character || null;
 }
 
+// Break the science list into per-character lanes so copy/invention sections can render under each pilot.
 function buildScienceCharacterGroups(items) {
   const groups = [];
   const index = new Map();
@@ -219,6 +221,7 @@ function IdleQueueRow({ item }) {
   );
 }
 
+// Main science recommendation row. Header badges and the expandable detail drawer live here.
 const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleConfig, isOpen, onToggle, isInvention }) {
   const profitPerCycle = item.profit_per_cycle || item.net_profit || 0;
   const runsPerCycle = item.runs_per_cycle || 1;
@@ -397,7 +400,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
       </div>
 
       {isOpen && (
-        <div style={{ background: 'var(--bg)', borderLeft: `3px solid ${isInvention ? 'var(--planner-invention)' : 'var(--planner-copy)'}`, padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
+        <div style={{ background: 'var(--bg2)', borderLeft: `3px solid ${isInvention ? 'var(--planner-invention)' : 'var(--planner-copy)'}`, padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
           <div className="planner-detail-grid">
             <div>
               <DetailRow label="Duration" value={formatSeconds(item.science_total_secs || item.duration_secs || item.duration_seconds || 0)} />
@@ -494,6 +497,9 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
   );
 });
 
+// Science column supports both views:
+// - character: lane per pilot
+// - time: section bands first, idle rows pinned at the bottom
 export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience, freeScience, onItemExpand, expandedId, groupMode = 'character' }) {
   const idleItems = items.filter(i => i.is_idle);
   const copyItems = items.filter(i => i.action_type === 'copy_first');
@@ -515,6 +521,7 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
     const groups = buildScienceGroups(sectionItems);
     return (
       <>
+        {/* This header band is the main color accent for each science section. */}
         <SectionHeader label={label} count={sectionItems.length} accentColor={accentColor} />
         {groups.map((group) => (
           <div key={`${keyPrefix}-${group.key}`}>
@@ -551,6 +558,7 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
           const activeCount = group.copyItems.length + group.copyThenInventItems.length + group.inventItems.length;
           return (
             <div key={group.key} className="planner-character-lane">
+              {/* Per-character heading row */}
               <CharacterLaneHeader character={group.character} activeCount={activeCount} idleCount={group.idleItems.length} />
               {renderScienceSection('COPY FIRST', group.copyItems, 'var(--planner-copy)', `${group.key}-copy`, false)}
               {renderScienceSection('COPY → INVENT', group.copyThenInventItems, 'var(--planner-invention)', `${group.key}-copy-invent`, true)}

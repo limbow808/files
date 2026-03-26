@@ -1896,6 +1896,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 /* ── Queue planner layout ─────────────────────────────────────── */
+/* Planner page shell and top summary strips. */
 .planner-shell {
   display: flex;
   flex-direction: column;
@@ -1903,6 +1904,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   min-height: 0;
 }
 
+/* KPI strip at the top of the planner page. */
 .planner-kpi-bar {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -1941,11 +1943,12 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   text-transform: uppercase;
 }
 
+/* Cargo and wallet bands between the KPIs and the main board. */
 .planner-cargo {
   padding: 7px 12px 8px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
-  border-top: 1px solid rgba(255,255,255,0.04);
-  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  border-top: 0px solid rgba(255,255,255,0.04);
+  border-bottom: 0px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 7px;
@@ -1997,24 +2000,15 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   margin-left: auto;
 }
 
+/* Board control bar: grouping toggle and manual blueprint refresh button. */
 .planner-filterbar {
   padding: 8px 10px;
   background: var(--bg2);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: flex-start;
-  gap: 10px 14px;
-  flex-wrap: wrap;
-  flex-shrink: 0;
-}
-
-.planner-filterbar__left {
+  border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  min-width: 0;
-  flex: 1 1 620px;
+  justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .planner-filterbar__actions {
@@ -2023,41 +2017,6 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   gap: 8px;
   flex-wrap: wrap;
   margin-left: auto;
-}
-
-.planner-chip {
-  cursor: default;
-  font-size: 10px;
-  letter-spacing: 1px;
-}
-
-.planner-chip--primary {
-  color: var(--text);
-  border-color: var(--text);
-}
-
-.planner-chip--good {
-  color: var(--green);
-  border-color: rgba(76,255,145,0.38);
-  background: transparent;
-}
-
-.planner-chip--warn {
-  color: #ffb36d;
-  border-color: rgba(255,157,61,0.38);
-  background: transparent;
-}
-
-.planner-chip--bad {
-  color: var(--accent);
-  border-color: rgba(255,71,0,0.44);
-  background: transparent;
-}
-
-.planner-filterbar .planner-chip:hover {
-  border-color: inherit;
-  color: inherit;
-  background: transparent;
 }
 
 .planner-view-toggle {
@@ -2113,6 +2072,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   opacity: 0.8;
 }
 
+/* Two-column planner board plus the header chrome for each side. */
 .planner-board {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -2134,17 +2094,18 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 
 .planner-pane-header {
   padding: 8px 10px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+  background: var(--bg2);
   border-bottom: 1px solid var(--border);
+  border-top: 2px solid transparent;
   flex-shrink: 0;
 }
 
 .planner-pane-header--science {
-  box-shadow: inset 0 2px 0 0 var(--planner-copy-soft);
+  border-top-color: var(--planner-copy);
 }
 
 .planner-pane-header--manufacturing {
-  box-shadow: inset 0 2px 0 0 var(--planner-mfg-soft);
+  border-top-color: var(--planner-mfg);
 }
 
 .planner-pane-header__top {
@@ -2170,6 +2131,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   flex-wrap: wrap;
 }
 
+/* Shared row/detail helpers used inside both science and manufacturing panes. */
 .planner-detail-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2185,7 +2147,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   align-items: center;
   gap: 8px;
   padding: 8px 10px 6px;
-  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0));
+  background: var(--bg2);
   border-bottom: 1px solid rgba(255,255,255,0.05);
 }
 
@@ -2251,6 +2213,7 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   z-index: 10;
 }
 
+/* Responsive planner breakpoints. This is where the two-column layout collapses. */
 @media (max-width: 1180px) {
   .planner-board {
     grid-template-columns: 1fr;
