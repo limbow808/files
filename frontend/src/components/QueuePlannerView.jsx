@@ -8,6 +8,17 @@ import ManufacturingQueueColumn from './ManufacturingQueueColumn';
 import { API } from '../App';
 import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/appSettings';
 
+const PLANNER_GROUP_MODE_KEY = 'crest_job_planner_group_mode';
+
+function readPlannerGroupMode() {
+  if (typeof window === 'undefined') return 'character';
+  try {
+    const stored = window.localStorage.getItem(PLANNER_GROUP_MODE_KEY);
+    return stored === 'time' ? 'time' : 'character';
+  } catch {
+    return 'character';
+  }
+}
 
 const OWN_COLORS = {
   personal_bpo: { fill: '#4cff91', label: 'PERS BPO' },
@@ -48,22 +59,23 @@ function SlotDots({ total, occupied, activeColor }) {
   );
 }
 
-function QueuePaneHeader({ label, total, occupied, activeColor, summary }) {
+function QueuePaneHeader({ label, total, occupied, activeColor, summary, tone = 'science' }) {
   const free = Math.max(0, total - occupied);
   const freeColor = free > 0 ? '#4cff91' : 'var(--accent)';
   return (
-    <div style={{ padding: '6px 10px', background: 'var(--bg2)', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+    <div className={`planner-pane-header planner-pane-header--${tone}`}>
+      <div className="planner-pane-header__top">
         <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1.2, color: 'var(--text)', whiteSpace: 'nowrap' }}>{label}</span>
         <SlotDots total={total} occupied={occupied} activeColor={activeColor} />
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: freeColor, whiteSpace: 'nowrap' }}>
-          {free > 0 ? `${free} FREE` : 'FULL'}
-        </span>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
-          · {occupied}/{total}
-        </span>
-        <div style={{ flex: 1 }} />
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 0.5, color: 'var(--dim)', whiteSpace: 'nowrap' }}>{summary}</span>
+        <div className="planner-pane-header__meta">
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: freeColor, whiteSpace: 'nowrap' }}>
+            {free > 0 ? `${free} FREE` : 'FULL'}
+          </span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
+            {occupied}/{total} USED
+          </span>
+        </div>
+        <span className="planner-pane-header__summary">{summary}</span>
       </div>
     </div>
   );
@@ -552,26 +564,12 @@ function QueueDetailExpanded({ item, calcItem }) {
 
 function PlannerKPIBar({ stats }) {
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center',
-      height: 80, flexShrink: 0,
-      borderBottom: '2px solid var(--border)',
-      background: 'var(--bg2)',
-    }}>
-      {stats.map((stat, index) => (
-        <Fragment key={stat.label}>
-          <div style={{
-            flex: 1,
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            padding: '0 4px', height: '100%',
-          }}>
-            <span style={{ fontFamily: 'var(--mono)', fontSize: 22, fontWeight: 500, color: stat.color, letterSpacing: 0, lineHeight: 1 }}>{stat.value}</span>
-            <span style={{ fontSize: 11, color: 'var(--dim)', letterSpacing: 0.4, marginTop: 6, lineHeight: 1 }}>{stat.label}</span>
-          </div>
-          {index < stats.length - 1 && (
-            <div style={{ width: 5, height: 5, background: 'var(--border)', flexShrink: 0, alignSelf: 'center' }} />
-          )}
-        </Fragment>
+    <div className="planner-kpi-bar">
+      {stats.map((stat) => (
+        <div key={stat.label} className="planner-kpi-stat">
+          <span className="planner-kpi-value" style={{ color: stat.color }}>{stat.value}</span>
+          <span className="planner-kpi-label">{stat.label}</span>
+        </div>
       ))}
     </div>
   );
@@ -601,12 +599,12 @@ function fmtTripLoad(totalM3, capacityM3) {
 
 function CargoProgressSquares({ filledSquares, totalSquares, color }) {
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${totalSquares}, minmax(0, 1fr))`, gap: 3 }}>
+    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${totalSquares}, minmax(0, 1fr))`, gap: 2 }}>
       {Array.from({ length: totalSquares }, (_, index) => (
         <div
           key={`${color}:${index}`}
           style={{
-            height: 14,
+            height: 10,
             borderRadius: 2,
             background: index < filledSquares ? color : 'rgba(255,255,255,0.06)',
             border: '1px solid rgba(255,255,255,0.05)',
@@ -626,22 +624,22 @@ function CargoTimelineRow({ label, color, totalM3, nextTs, nextLabel, capacityM3
   const loadTextColor = loadRatio > 1 ? 'var(--accent)' : 'var(--dim)';
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '132px 1fr 220px', gap: 10, alignItems: 'center' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color }}>{label}</span>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>{fmtM3(totalM3)} total</span>
-      </div>
-      <CargoProgressSquares filledSquares={filledSquares} totalSquares={totalSquares} color={color} />
-      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 0.5, color: 'var(--dim)' }}>
+    <div className="planner-cargo-row">
+      <div className="planner-cargo-row__meta">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 0.8, color }}>{label}</span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>{fmtM3(totalM3)} total</span>
+        </div>
+        <div className="planner-cargo-row__stats" style={{ textAlign: 'right' }}>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 8, letterSpacing: 0.5, color: 'var(--dim)' }}>
             {nextLabel}: {nextTs ? fmtShortWindow(nextTs - Math.floor(Date.now() / 1000)) : '—'}
           </div>
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 0.5, color: loadTextColor, marginTop: 3 }}>
+          <div style={{ fontFamily: 'var(--mono)', fontSize: 8, letterSpacing: 0.5, color: loadTextColor, marginTop: 2 }}>
             {fmtTripLoad(totalM3, capacityM3)} @ {fmtM3(capacityM3)}
           </div>
         </div>
       </div>
+      <CargoProgressSquares filledSquares={filledSquares} totalSquares={totalSquares} color={color} />
     </div>
   );
 }
@@ -697,22 +695,13 @@ function CargoTimelinePanel({ cycleHours, mfgItems, haulCapacityM3 }) {
   }, [cycleHours, haulCapacityM3, mfgItems]);
 
   return (
-    <div style={{
-      padding: '10px 12px 12px',
-      background: 'linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))',
-      borderTop: '1px solid rgba(255,255,255,0.04)',
-      borderBottom: '1px solid var(--border)',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 12,
-      flexShrink: 0,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 14, letterSpacing: 1.2, color: 'var(--text)' }}>CARGO FLOW / TIMELINE</span>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>M3 TO REFILL MANUFACTURING AND PICK UP FINISHED GOODS OVER {panelData.horizonHours}H · {fmtM3(panelData.capacityM3)} SHIP CAP</span>
+    <div className="planner-cargo">
+      <div className="planner-cargo-head">
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 1.1, color: 'var(--text)' }}>CARGO FLOW</span>
+        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>M3 TO REFILL MANUFACTURING AND PICK UP FINISHED GOODS OVER {panelData.horizonHours}H · {fmtM3(panelData.capacityM3)} SHIP CAP</span>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <CargoTimelineRow
           label="INBOUND MATS"
           color="#4cff91"
@@ -817,10 +806,7 @@ function WalletBar({ walletTotal, lockedIsk, cycleConfig, lastRefresh }) {
   const nowSec = Math.floor(Date.now() / 1000);
   const minsAgo = lastRefresh != null ? Math.floor((nowSec - lastRefresh) / 60) : null;
   return (
-    <div style={{
-      padding: '4px 10px', background: 'var(--bg2)', borderBottom: '0px solid var(--border)',
-      display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
-    }}>
+    <div className="planner-wallet">
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 0.8, color: 'var(--dim)', flexShrink: 0 }}>WALLET</span>
       <div style={{ flex: 1, height: 4, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
         <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 2, transition: 'width 0.4s' }} />
@@ -831,17 +817,39 @@ function WalletBar({ walletTotal, lockedIsk, cycleConfig, lastRefresh }) {
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>
         / {fmtISK(walletTotal)} avail
       </span>
-      <div style={{ flex: 1 }} />
-      {cycleConfig && (
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', letterSpacing: 0.6, flexShrink: 0 }}>
-          {cycleConfig.cycle_duration_hours}h CYCLE
-        </span>
-      )}
-      {minsAgo != null && (
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>
-          {minsAgo === 0 ? 'JUST NOW' : `${minsAgo}m AGO`}
-        </span>
-      )}
+      <div className="planner-wallet__meta">
+        {cycleConfig && (
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', letterSpacing: 0.6, flexShrink: 0 }}>
+            {cycleConfig.cycle_duration_hours}h CYCLE
+          </span>
+        )}
+        {minsAgo != null && (
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>
+            {minsAgo === 0 ? 'JUST NOW' : `${minsAgo}m AGO`}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlannerGroupToggle({ value, onChange }) {
+  return (
+    <div className="planner-view-toggle">
+      <button
+        type="button"
+        className={`planner-view-toggle__button${value === 'character' ? ' active' : ''}`}
+        onClick={() => onChange('character')}
+      >
+        By Character
+      </button>
+      <button
+        type="button"
+        className={`planner-view-toggle__button${value === 'time' ? ' active' : ''}`}
+        onClick={() => onChange('time')}
+      >
+        By Time
+      </button>
     </div>
   );
 }
@@ -856,6 +864,8 @@ function PlannerFilterBar({
   onBlueprintRefresh,
   blueprintRefreshLoading,
   blueprintRefreshStatus,
+  groupMode,
+  onGroupModeChange,
 }) {
   const minProfitM = Math.round(Number(cycleConfig?.min_profit_per_cycle || 0) / 1_000_000);
   const sellDays = Number(cycleConfig?.max_sell_days_tolerance || 0);
@@ -870,36 +880,45 @@ function PlannerFilterBar({
     || Boolean(cycleConfig?.count_corp_original_blueprints_as_own) !== Boolean(DEFAULT_APP_SETTINGS.count_corp_original_blueprints_as_own)
     || Boolean(cycleConfig?.weight_by_velocity) !== Boolean(DEFAULT_APP_SETTINGS.weight_by_velocity)
   );
+  const filterChips = [
+    `Min ${minProfitM}M/cycle`,
+    includeBelowThreshold ? 'Fill below threshold' : 'Idle below threshold',
+    `Sell <= ${sellDays}d`,
+    countCorpOwn ? 'Corp BPO treated as owned' : 'Corp BPO copy-only',
+    weightVelocity ? 'Velocity weighted' : 'Velocity off',
+  ];
 
   return (
-    <div style={{
-      padding: '6px 10px', background: 'var(--bg2)', borderBottom: '1px solid var(--border)',
-      display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', flexShrink: 0,
-    }}>
-      <span style={{
-        fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 0.7,
-        color: underfilled ? 'var(--accent)' : '#4cff91',
-      }}>
-        MFG {mfgCount}/{maxJobs} RETURNED
-      </span>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
-        {startNowCount} NOW · {queuedCount} PLANNED LATER · {totalItems} TOTAL ITEMS
-      </span>
-      <div style={{ width: 1, alignSelf: 'stretch', background: 'rgba(255,255,255,0.08)' }} />
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>
-        FILTERS: MIN {minProfitM}M/CYCLE · {includeBelowThreshold ? 'FILL BELOW THRESHOLD' : 'IDLE BELOW THRESHOLD'} · SELL ≤ {sellDays}D · CORP BPO {countCorpOwn ? 'OWN' : 'COPY-ONLY'} · {weightVelocity ? 'VELOCITY ON' : 'VELOCITY OFF'}
-      </span>
-      {usingCustomFilters && (
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#ff9d3d' }}>
-          CUSTOM SETTINGS ACTIVE
+    <div className="planner-filterbar">
+      <div className="planner-filterbar__left">
+        <span className={`chip planner-chip ${underfilled ? 'planner-chip--bad' : 'planner-chip--good'}`}>
+          MFG {mfgCount}/{maxJobs} returned
         </span>
-      )}
-      {underfilled && (
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--accent)' }}>
-          UNDERFILL: BACKEND RETURNED FEWER MFG JOBS THAN SLOT CAP
+        <span className="chip planner-chip planner-chip--primary">
+          {startNowCount} now
         </span>
-      )}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span className="chip planner-chip">
+          {queuedCount} planned later
+        </span>
+        <span className="chip planner-chip">
+          {totalItems} total items
+        </span>
+        {filterChips.map((chip) => (
+          <span key={chip} className="chip planner-chip">{chip}</span>
+        ))}
+        {usingCustomFilters && (
+          <span className="chip planner-chip planner-chip--warn">
+            Custom settings active
+          </span>
+        )}
+        {underfilled && (
+          <span className="chip planner-chip planner-chip--bad">
+            Underfill detected
+          </span>
+        )}
+      </div>
+      <div className="planner-filterbar__actions">
+        <PlannerGroupToggle value={groupMode} onChange={onGroupModeChange} />
         {blueprintRefreshStatus && (
           <span style={{
             fontFamily: 'var(--mono)',
@@ -914,17 +933,8 @@ function PlannerFilterBar({
           type="button"
           onClick={onBlueprintRefresh}
           disabled={blueprintRefreshLoading}
-          style={{
-            border: '1px solid var(--border)',
-            background: blueprintRefreshLoading ? 'rgba(77, 166, 255, 0.14)' : 'var(--bg2)',
-            color: blueprintRefreshLoading ? '#4da6ff' : 'var(--text)',
-            fontFamily: 'var(--mono)',
-            fontSize: 10,
-            letterSpacing: 0.7,
-            padding: '5px 9px',
-            cursor: blueprintRefreshLoading ? 'wait' : 'pointer',
-            whiteSpace: 'nowrap',
-          }}
+          className="planner-refresh-button"
+          style={blueprintRefreshLoading ? { background: 'rgba(77, 166, 255, 0.14)', color: '#4da6ff' } : undefined}
           title="Force-refresh personal and corp blueprints from ESI, then rebuild planner recommendations"
         >
           {blueprintRefreshLoading ? 'REFRESHING BPS...' : 'REFRESH ESI BLUEPRINTS'}
@@ -937,10 +947,7 @@ function PlannerFilterBar({
 // ── Multibuy sticky bar ───────────────────────────────────────────────────────
 function MultibuyBar({ checkedCount, totalIsk, mats, onCopy, onClear }) {
   return (
-    <div style={{
-      padding: '8px 14px', background: 'var(--bg2)', borderTop: '2px solid #4cff91',
-      display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0, zIndex: 10,
-    }}>
+    <div className="planner-multibuy-bar">
       <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: '#4cff91', fontWeight: 700 }}>
         {checkedCount} JOB{checkedCount !== 1 ? 'S' : ''} SELECTED
       </span>
@@ -965,6 +972,7 @@ function MultibuyBar({ checkedCount, totalIsk, mats, onCopy, onClear }) {
 export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, refreshNonce = 0 }) {
   const [checkedIds, setCheckedIds] = useState(new Set());
   const [plannerRefreshNonce, setPlannerRefreshNonce] = useState(0);
+  const [groupMode, setGroupMode] = useState(() => readPlannerGroupMode());
   const [blueprintRefreshLoading, setBlueprintRefreshLoading] = useState(false);
   const [blueprintRefreshStatus, setBlueprintRefreshStatus] = useState(null);
   const jobsSignalRef = useRef(null);
@@ -1022,6 +1030,13 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const [lastRefresh, setLastRefresh] = useState(null);
   const [graduated, setGraduated] = useState([]);
   const prevSciIds = useRef(new Set());
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PLANNER_GROUP_MODE_KEY, groupMode);
+    } catch {}
+  }, [groupMode]);
 
   useEffect(() => {
     setCheckedIds(new Set());
@@ -1215,7 +1230,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
       {
         label: 'SCI PIPELINE',
         value: fmtISK(sciencePipelineIsk),
-        color: sciencePipelineIsk > 0 ? '#4da6ff' : 'var(--text)',
+        color: sciencePipelineIsk > 0 ? 'var(--planner-invention)' : 'var(--text)',
       },
       {
         label: 'AVG ROI',
@@ -1253,7 +1268,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+    <div className="planner-shell">
       {/* Settings Modal */}
       <PlannerKPIBar stats={plannerStats} />
 
@@ -1275,18 +1290,21 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
         onBlueprintRefresh={handleBlueprintRefresh}
         blueprintRefreshLoading={blueprintRefreshLoading}
         blueprintRefreshStatus={blueprintRefreshStatus}
+        groupMode={groupMode}
+        onGroupModeChange={setGroupMode}
       />
 
       {/* 2-Column Layout */}
-      <div style={{ display: 'flex', flex: 1, minHeight: 0, gap: 0, borderTop: '1px solid var(--border)' }}>
+      <div className="planner-board">
         {/* Left Column: Science Queue (copy + invent) */}
-        <div style={{ flex: 1, minWidth: 0, borderRight: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <div className="planner-board__column planner-board__column--science">
           <QueuePaneHeader
             label="SCIENCE QUEUE"
             total={maxScience}
             occupied={runningScience}
-            activeColor="#4da6ff"
+            activeColor="var(--planner-copy)"
             summary={`${cycleConfig.cycle_duration_hours}h / ${cycleConfig.min_profit_per_cycle / 1_000_000 | 0}M ISK/cycle`}
+            tone="science"
           />
           <ScienceQueueColumn
             items={sciItems}
@@ -1295,17 +1313,19 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
             freeScience={freeScience}
             onItemExpand={setExpandedId}
             expandedId={expandedId}
+            groupMode={groupMode}
           />
         </div>
 
         {/* Right Column: Manufacturing Queue */}
-        <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <div className="planner-board__column">
           <QueuePaneHeader
             label="MANUFACTURING QUEUE"
             total={maxJobs}
             occupied={runningJobs}
-            activeColor="#ff4700"
+            activeColor="var(--planner-mfg)"
             summary={checkedIds.size > 0 ? `${checkedIds.size} SELECTED` : `${mfgItems.length} PLANNED · ${startNowMfgCount} NOW · ${queuedMfgCount} LATER`}
+            tone="manufacturing"
           />
           <ManufacturingQueueColumn
             items={mfgItems}
@@ -1316,6 +1336,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
             expandedId={expandedId}
             checkedIds={checkedIds}
             onCheck={handleCheck}
+            groupMode={groupMode}
           />
         </div>
       </div>

@@ -95,6 +95,53 @@ function SlotGroupHeader({ startAt, slotFreedBy }) {
   );
 }
 
+function CharacterLaneHeader({ character, activeCount, idleCount }) {
+  const name = character?.character_name || 'UNASSIGNED';
+  const color = character?.character_id ? charColor(character.character_id) : 'var(--planner-idle)';
+  return (
+    <div className="planner-character-lane__header">
+      <span className="planner-character-dot" style={{ background: color }} />
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)', letterSpacing: 0.8 }}>{name}</span>
+      <div style={{ flex: 1 }} />
+      <span className="planner-character-lane__meta">{activeCount} active</span>
+      {idleCount > 0 && <span className="planner-character-lane__meta">{idleCount} idle</span>}
+    </div>
+  );
+}
+
+function getCharacterKey(character) {
+  if (character?.character_id != null) return `char-${character.character_id}`;
+  if (character?.character_name) return `name-${character.character_name}`;
+  return 'unassigned';
+}
+
+function getManufacturingPrimaryCharacter(item) {
+  return item.assigned_character || (item.characters || [])[0] || null;
+}
+
+function buildManufacturingCharacterGroups(items) {
+  const groups = [];
+  const index = new Map();
+
+  for (const item of items) {
+    const character = getManufacturingPrimaryCharacter(item);
+    const key = getCharacterKey(character);
+    if (!index.has(key)) {
+      const group = { key, character, activeItems: [], idleItems: [] };
+      index.set(key, group);
+      groups.push(group);
+    }
+    const group = index.get(key);
+    if (item.is_idle || item.action_type === 'idle_manufacture') {
+      group.idleItems.push(item);
+    } else {
+      group.activeItems.push(item);
+    }
+  }
+
+  return groups;
+}
+
 function SectionHeader({ label, count, accentColor }) {
   return (
     <div style={{
@@ -130,7 +177,7 @@ function IdleQueueRow({ item }) {
             )}
           </div>
         </div>
-        <div style={{ paddingLeft: 28, marginTop: 3, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <div className="planner-idle-reason" style={{ paddingLeft: 28 }}>
           {item.idle_reason || item.why || 'No eligible manufacturing job remains for this character.'}
         </div>
       </div>
@@ -209,12 +256,12 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
             <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0 }}>{item.name}</span>
             {(item.ownership || []).includes('personal_bpo') && <Flag label="PERS BPO" bg="#4da6ff" />}
             {(item.ownership || []).includes('personal_bpc') && <Flag label="PERS BPC" bg="#66ccff" />}
-            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#cc88ff" />}
+            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#9098a1" />}
             {(item.characters || []).map(c => (
               <CharTag key={c.character_id} name={c.character_name} color={charColor(c.character_id)} bordered={false} style={{ fontSize: 10 }} />
             ))}
           </div>
-          <div style={{ display: 'flex', gap: 3, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <div className="planner-row-flags">
             {!hasMfgSlot && <Flag label="NO SLOT" bg="#ff4700" />}
             {item.is_fallback && <Flag label="FILLER" bg="#b0b0b0" />}
             {capitalWarn && <Flag label="CAPITAL" bg="#ffd24d" />}
@@ -223,7 +270,7 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
             {belowThreshold && <Flag label="BELOW THRESHOLD" bg="#b0b0b0" />}
           </div>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingLeft: 36, marginTop: 3, gap: 8 }}>
+        <div className="planner-row-subline planner-row-subline--mfg">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>{runsPerCycle}× runs/cycle</span>
             {!matReady && (
@@ -237,8 +284,8 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
       </div>
 
       {isOpen && (
-        <div style={{ background: 'var(--bg)', borderLeft: '3px solid #ff4700', padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div style={{ background: 'var(--bg)', borderLeft: '3px solid var(--planner-mfg)', padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
+          <div className="planner-detail-grid">
             <div>
               <DetailRow label="Duration" value={formatSeconds(item.duration_secs || item.duration_seconds || 0)} />
               <DetailRow label="Net profit/run" value={`${((item.net_profit || 0) / 1_000_000).toFixed(1)}M`} />
@@ -316,10 +363,17 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
   );
 });
 
-export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJobs, freeSlots, onItemExpand, expandedId, checkedIds, onCheck }) {
+export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJobs, freeSlots, onItemExpand, expandedId, checkedIds, onCheck, groupMode = 'character' }) {
   const idleItems = items?.filter(i => i.is_idle) || [];
   const mfgItems = items?.filter(i => i.action_type === 'manufacture') || [];
+  const characterGroups = buildManufacturingCharacterGroups(items || []);
   const nowTs = Math.floor(Date.now() / 1000);
+  const availableManufacturingIds = new Set(
+    mfgItems
+      .filter((item) => !item.start_at || item.start_at <= nowTs + 30)
+      .slice(0, Math.max(0, Number(freeSlots || 0)))
+      .map((item) => item.rec_id || String(item.output_id))
+  );
 
   if (idleItems.length === 0 && mfgItems.length === 0) {
     return (
@@ -342,16 +396,61 @@ export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJ
     currentGroup.items.push(item);
   }
 
+  const renderActiveGroups = (groupItems, keyPrefix) => {
+    const sectionGroups = [];
+    let currentSectionGroup = null;
+    for (const item of groupItems) {
+      const isNow = !item.start_at || item.start_at <= nowTs + 30;
+      const groupKey = isNow ? 'now' : item.start_at;
+      if (!currentSectionGroup || currentSectionGroup.key !== groupKey) {
+        currentSectionGroup = { key: groupKey, startAt: isNow ? null : item.start_at, slotFreedBy: item.slot_freed_by || null, items: [] };
+        sectionGroups.push(currentSectionGroup);
+      }
+      currentSectionGroup.items.push(item);
+    }
+
+    return sectionGroups.map((group, gi) => (
+      <div key={`${keyPrefix}-${group.key}`}>
+        <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+        {group.items.map((item, idx) => (
+          <ManufacturingQueueRow
+            key={item.rec_id || `${item.output_id}-${idx}`}
+            item={item}
+            hasMfgSlot={availableManufacturingIds.has(item.rec_id || String(item.output_id))}
+            cycleConfig={cycleConfig}
+            isOpen={expandedId === (item.rec_id || String(item.output_id))}
+            onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
+            checked={checkedIds?.has(item.rec_id || String(item.output_id))}
+            onCheck={(val) => onCheck?.(item.rec_id || String(item.output_id), val)}
+          />
+        ))}
+      </div>
+    ));
+  };
+
+  if (groupMode === 'character') {
+    return (
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        {characterGroups.map((group) => (
+          <div key={group.key} className="planner-character-lane">
+            <CharacterLaneHeader character={group.character} activeCount={group.activeItems.length} idleCount={group.idleItems.length} />
+            {renderActiveGroups(group.activeItems, `${group.key}-mfg`)}
+            {group.idleItems.length > 0 && (
+              <>
+                <SectionHeader label="IDLE" count={group.idleItems.length} accentColor="var(--planner-idle)" />
+                {group.idleItems.map((item, idx) => (
+                  <IdleQueueRow key={item.rec_id || `${group.key}-idle-manufacture-${idx}`} item={item} />
+                ))}
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-      {idleItems.length > 0 && (
-        <div>
-          <SectionHeader label="IDLE" count={idleItems.length} accentColor="#6c737d" />
-          {idleItems.map((item, idx) => (
-            <IdleQueueRow key={item.rec_id || `idle-manufacture-${idx}`} item={item} />
-          ))}
-        </div>
-      )}
       {groups.map((group, gi) => (
         <div key={group.key}>
           <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
@@ -369,6 +468,14 @@ export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJ
           ))}
         </div>
       ))}
+      {idleItems.length > 0 && (
+        <div>
+          <SectionHeader label="IDLE" count={idleItems.length} accentColor="var(--planner-idle)" />
+          {idleItems.map((item, idx) => (
+            <IdleQueueRow key={item.rec_id || `idle-manufacture-${idx}`} item={item} />
+          ))}
+        </div>
+      )}
     </div>
   );
 });

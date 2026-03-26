@@ -80,9 +80,10 @@ function SectionHeader({ label, count, accentColor }) {
   );
 }
 
-function SlotGroupHeader({ startAt, slotFreedBy }) {
+function SlotGroupHeader({ startAt, slotFreedBy, accentColor = 'var(--planner-copy)', hideNowHeader = false }) {
   const isNow = !startAt || startAt <= Math.floor(Date.now() / 1000) + 30;
   if (isNow) {
+    if (hideNowHeader) return null;
     return (
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
@@ -101,14 +102,72 @@ function SlotGroupHeader({ startAt, slotFreedBy }) {
       display: 'flex', alignItems: 'center', gap: 8,
       padding: '5px 10px', background: 'var(--bg)', borderTop: '1px solid #0d0d0d', borderBottom: '1px solid #0d0d0d',
     }}>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: '#4da6ff', fontWeight: 700 }}>{hhmm}</span>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'rgba(77,166,255,0.8)', letterSpacing: 0.4 }}>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1, color: accentColor, fontWeight: 700 }}>{hhmm}</span>
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: accentColor, letterSpacing: 0.4, opacity: 0.8 }}>
         {slotFreedBy ? `slot freed after: ${slotFreedBy}` : 'slot available'}
       </span>
-      <div style={{ flex: 1, height: 1, background: 'linear-gradient(to right, #4da6ff44, transparent)' }} />
+      <div style={{ flex: 1, height: 1, background: `linear-gradient(to right, ${accentColor}66, transparent)` }} />
       <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', flexShrink: 0 }}>{countdown}</span>
     </div>
   );
+}
+
+function CharacterLaneHeader({ character, activeCount, idleCount }) {
+  const name = character?.character_name || 'UNASSIGNED';
+  const color = character?.character_id ? charColor(character.character_id) : 'var(--planner-idle)';
+  return (
+    <div className="planner-character-lane__header">
+      <span className="planner-character-dot" style={{ background: color }} />
+      <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)', letterSpacing: 0.8 }}>{name}</span>
+      <div style={{ flex: 1 }} />
+      <span className="planner-character-lane__meta">{activeCount} active</span>
+      {idleCount > 0 && <span className="planner-character-lane__meta">{idleCount} idle</span>}
+    </div>
+  );
+}
+
+function getCharacterKey(character) {
+  if (character?.character_id != null) return `char-${character.character_id}`;
+  if (character?.character_name) return `name-${character.character_name}`;
+  return 'unassigned';
+}
+
+function getSciencePrimaryCharacter(item) {
+  return item.copy_character || item.assigned_character || (item.characters || [])[0] || item.invent_character || null;
+}
+
+function buildScienceCharacterGroups(items) {
+  const groups = [];
+  const index = new Map();
+
+  for (const item of items) {
+    const character = getSciencePrimaryCharacter(item);
+    const key = getCharacterKey(character);
+    if (!index.has(key)) {
+      const group = {
+        key,
+        character,
+        copyItems: [],
+        copyThenInventItems: [],
+        inventItems: [],
+        idleItems: [],
+      };
+      index.set(key, group);
+      groups.push(group);
+    }
+    const group = index.get(key);
+    if (item.is_idle || item.action_type === 'idle_science') {
+      group.idleItems.push(item);
+    } else if (item.action_type === 'copy_first') {
+      group.copyItems.push(item);
+    } else if (item.action_type === 'copy_then_invent') {
+      group.copyThenInventItems.push(item);
+    } else if (item.action_type === 'invent_first') {
+      group.inventItems.push(item);
+    }
+  }
+
+  return groups;
 }
 
 function buildScienceGroups(items) {
@@ -152,7 +211,7 @@ function IdleQueueRow({ item }) {
             )}
           </div>
         </div>
-        <div style={{ paddingLeft: 16, marginTop: 3, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <div className="planner-idle-reason" style={{ paddingLeft: 16 }}>
           {item.idle_reason || item.why || 'No eligible science job remains for this character.'}
         </div>
       </div>
@@ -308,12 +367,12 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
             <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0 }}>{item.name}</span>
             {(item.ownership || []).includes('personal_bpo') && <Flag label="PERS BPO" bg="#4da6ff" />}
             {(item.ownership || []).includes('personal_bpc') && <Flag label="PERS BPC" bg="#66ccff" />}
-            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#cc88ff" />}
+            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#9098a1" />}
             {showSplitAssignments ? (
               <>
-                <Flag label="COPY" bg="#4da6ff" />
+                <Flag label="COPY" bg="var(--planner-copy)" />
                 <CharTag name={copyCharacter.character_name} color={charColor(copyCharacter.character_id)} bordered={false} style={{ fontSize: 10 }} />
-                <Flag label="INVENT" bg="#ff9d3d" />
+                <Flag label="INVENT" bg="var(--planner-invention)" />
                 <CharTag name={inventCharacter.character_name} color={charColor(inventCharacter.character_id)} bordered={false} style={{ fontSize: 10 }} />
               </>
             ) : (
@@ -322,7 +381,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
               ))
             )}
           </div>
-          <div style={{ display: 'flex', gap: 3, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <div className="planner-row-flags">
             {!hasSciSlot && <Flag label="NO SLOT" bg="#ff4700" />}
             {riskFlag && <Flag label={`${Math.round(successChance * 100)}% SUCCESS`} bg="#ffd24d" />}
             {exceeds && <Flag label="EXCEEDS CYCLE" bg="#ff4700" />}
@@ -331,15 +390,15 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
             {belowThreshold && <Flag label="BELOW THRESHOLD" bg="#b0b0b0" />}
           </div>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingLeft: 24, marginTop: 3 }}>
+        <div className="planner-row-subline planner-row-subline--science">
           <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>{runsPerCycle}× runs/cycle</span>
           <span style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: profitPerCycle >= 0 ? '#4cff91' : 'var(--accent)' }}>{profitM}M ISK/cycle</span>
         </div>
       </div>
 
       {isOpen && (
-        <div style={{ background: 'var(--bg)', borderLeft: '3px solid #4da6ff', padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div style={{ background: 'var(--bg)', borderLeft: `3px solid ${isInvention ? 'var(--planner-invention)' : 'var(--planner-copy)'}`, padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
+          <div className="planner-detail-grid">
             <div>
               <DetailRow label="Duration" value={formatSeconds(item.science_total_secs || item.duration_secs || item.duration_seconds || 0)} />
               {item.structure_job_time_bonus_pct > 0 && <DetailRow label="Structure time bonus" value={`−${Number(item.structure_job_time_bonus_pct).toFixed(1)}%`} />}
@@ -374,14 +433,14 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
               <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color: 'var(--dim)', marginBottom: 4 }}>TIMELINE</div>
               <StepBlock
                 title={isInvention ? 'STEP 1 · COPYING' : 'STEP 1 · COPYING'}
-                accentColor="#4da6ff"
+                accentColor="var(--planner-copy)"
                 rows={copyStepRows}
                 footnote={item.action_type === 'copy_first' ? 'This stage only prepares the BPC; manufacturing revenue and profit below reflect the downstream batch once the copy is ready.' : null}
               />
               {isInvention && (
                 <StepBlock
                   title={`STEP ${copyStepRows.length > 0 ? '2' : '1'} · INVENTION`}
-                  accentColor="#ff9d3d"
+                  accentColor="var(--planner-invention)"
                   rows={inventionStepRows}
                   footnote={
                     skillFormula
@@ -419,7 +478,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
             </div>
           )}
           {Array.isArray(item.timeline_steps) && item.timeline_steps.length > 0 && (
-            <DetailBlock label="TIMELINE" value={item.timeline_steps.join(' → ')} color="#4da6ff" />
+            <DetailBlock label="TIMELINE" value={item.timeline_steps.join(' → ')} color="var(--planner-copy)" />
           )}
           <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
           {item.runner_up_name && (
@@ -435,14 +494,47 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
   );
 });
 
-export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience, freeScience, onItemExpand, expandedId }) {
+export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience, freeScience, onItemExpand, expandedId, groupMode = 'character' }) {
   const idleItems = items.filter(i => i.is_idle);
   const copyItems = items.filter(i => i.action_type === 'copy_first');
   const copyThenInventItems = items.filter(i => i.action_type === 'copy_then_invent');
   const inventItems = items.filter(i => i.action_type === 'invent_first');
+  const characterGroups = buildScienceCharacterGroups(items);
   const copyGroups = buildScienceGroups(copyItems);
   const copyThenInventGroups = buildScienceGroups(copyThenInventItems);
   const inventGroups = buildScienceGroups(inventItems);
+  const availableScienceIds = new Set(
+    [...copyItems, ...copyThenInventItems, ...inventItems]
+      .filter((item) => !item.start_at || item.start_at <= Math.floor(Date.now() / 1000) + 30)
+      .slice(0, Math.max(0, Number(freeScience || 0)))
+      .map((item) => item.rec_id || String(item.output_id))
+  );
+
+  const renderScienceSection = (label, sectionItems, accentColor, keyPrefix, isInvention = false) => {
+    if (!sectionItems.length) return null;
+    const groups = buildScienceGroups(sectionItems);
+    return (
+      <>
+        <SectionHeader label={label} count={sectionItems.length} accentColor={accentColor} />
+        {groups.map((group) => (
+          <div key={`${keyPrefix}-${group.key}`}>
+            <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} accentColor={accentColor} hideNowHeader />
+            {group.items.map((item, idx) => (
+              <ScienceQueueRow
+                key={item.rec_id || `${item.output_id}-${idx}`}
+                item={item}
+                hasSciSlot={availableScienceIds.has(item.rec_id || String(item.output_id))}
+                cycleConfig={cycleConfig}
+                isOpen={expandedId === (item.rec_id || String(item.output_id))}
+                onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
+                isInvention={isInvention}
+              />
+            ))}
+          </div>
+        ))}
+      </>
+    );
+  };
 
   if (idleItems.length === 0 && copyItems.length === 0 && copyThenInventItems.length === 0 && inventItems.length === 0) {
     return (
@@ -452,27 +544,45 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
     );
   }
 
+  if (groupMode === 'character') {
+    return (
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+        {characterGroups.map((group) => {
+          const activeCount = group.copyItems.length + group.copyThenInventItems.length + group.inventItems.length;
+          return (
+            <div key={group.key} className="planner-character-lane">
+              <CharacterLaneHeader character={group.character} activeCount={activeCount} idleCount={group.idleItems.length} />
+              {renderScienceSection('COPY FIRST', group.copyItems, 'var(--planner-copy)', `${group.key}-copy`, false)}
+              {renderScienceSection('COPY → INVENT', group.copyThenInventItems, 'var(--planner-invention)', `${group.key}-copy-invent`, true)}
+              {renderScienceSection('INVENT FIRST', group.inventItems, 'var(--planner-invention)', `${group.key}-invent`, true)}
+              {group.idleItems.length > 0 && (
+                <>
+                  <SectionHeader label="IDLE" count={group.idleItems.length} accentColor="var(--planner-idle)" />
+                  {group.idleItems.map((item, idx) => (
+                    <IdleQueueRow key={item.rec_id || `${group.key}-idle-science-${idx}`} item={item} />
+                  ))}
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-      {idleItems.length > 0 && (
-        <>
-          <SectionHeader label="IDLE" count={idleItems.length} accentColor="#6c737d" />
-          {idleItems.map((item, idx) => (
-            <IdleQueueRow key={item.rec_id || `idle-science-${idx}`} item={item} />
-          ))}
-        </>
-      )}
       {copyItems.length > 0 && (
         <>
-          <SectionHeader label="COPY FIRST" count={copyItems.length} accentColor="#4da6ff" />
+          <SectionHeader label="COPY FIRST" count={copyItems.length} accentColor="var(--planner-copy)" />
           {copyGroups.map((group) => (
             <div key={`copy-${group.key}`}>
-              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} accentColor="var(--planner-copy)" hideNowHeader />
               {group.items.map((item, idx) => (
                 <ScienceQueueRow
                   key={item.rec_id || `${item.output_id}-${idx}`}
                   item={item}
-                  hasSciSlot={!group.startAt}
+                  hasSciSlot={availableScienceIds.has(item.rec_id || String(item.output_id))}
                   cycleConfig={cycleConfig}
                   isOpen={expandedId === (item.rec_id || String(item.output_id))}
                   onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
@@ -484,15 +594,15 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
       )}
       {copyThenInventItems.length > 0 && (
         <>
-          <SectionHeader label="COPY → INVENT" count={copyThenInventItems.length} accentColor="#ffd24d" />
+          <SectionHeader label="COPY → INVENT" count={copyThenInventItems.length} accentColor="var(--planner-invention)" />
           {copyThenInventGroups.map((group) => (
             <div key={`copy-then-invent-${group.key}`}>
-              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} accentColor="var(--planner-invention)" hideNowHeader />
               {group.items.map((item, idx) => (
                 <ScienceQueueRow
                   key={item.rec_id || `${item.output_id}-${idx}`}
                   item={item}
-                  hasSciSlot={!group.startAt}
+                  hasSciSlot={availableScienceIds.has(item.rec_id || String(item.output_id))}
                   cycleConfig={cycleConfig}
                   isOpen={expandedId === (item.rec_id || String(item.output_id))}
                   onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
@@ -505,15 +615,15 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
       )}
       {inventItems.length > 0 && (
         <>
-          <SectionHeader label="INVENT FIRST" count={inventItems.length} accentColor="#ff9d3d" />
+          <SectionHeader label="INVENT FIRST" count={inventItems.length} accentColor="var(--planner-invention)" />
           {inventGroups.map((group) => (
             <div key={`invent-${group.key}`}>
-              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} />
+              <SlotGroupHeader startAt={group.startAt} slotFreedBy={group.slotFreedBy} accentColor="var(--planner-invention)" hideNowHeader />
               {group.items.map((item, idx) => (
                 <ScienceQueueRow
                   key={item.rec_id || `${item.output_id}-${idx}`}
                   item={item}
-                  hasSciSlot={!group.startAt}
+                  hasSciSlot={availableScienceIds.has(item.rec_id || String(item.output_id))}
                   cycleConfig={cycleConfig}
                   isOpen={expandedId === (item.rec_id || String(item.output_id))}
                   onToggle={() => onItemExpand(expandedId === (item.rec_id || String(item.output_id)) ? null : (item.rec_id || String(item.output_id)))}
@@ -521,6 +631,14 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
                 />
               ))}
             </div>
+          ))}
+        </>
+      )}
+      {idleItems.length > 0 && (
+        <>
+          <SectionHeader label="IDLE" count={idleItems.length} accentColor="var(--planner-idle)" />
+          {idleItems.map((item, idx) => (
+            <IdleQueueRow key={item.rec_id || `idle-science-${idx}`} item={item} />
           ))}
         </>
       )}
