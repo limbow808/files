@@ -1,13 +1,16 @@
 import { memo, useMemo, useState } from 'react';
 import { useApi } from '../hooks/useApi';
+import CargoTimelinePanel from '../components/CargoTimelinePanel';
 import { LoadingState } from '../components/ui';
 import { fmtISK } from '../utils/fmt';
 import { API } from '../App';
+import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/appSettings';
 
-export default memo(function HaulPlannerPage() {
+export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTINGS }) {
   const [goal, setGoal] = useState('balanced');
   const [hub, setHub] = useState('Jita');
   const [minValue, setMinValue] = useState('1000000');
+  const plannerStructureType = facilityToPlannerStructureType(appSettings?.facility);
 
   const query = useMemo(() => {
     const params = new URLSearchParams({
@@ -19,11 +22,36 @@ export default memo(function HaulPlannerPage() {
     return `${API}/api/haul/sell-recommendations?${params.toString()}`;
   }, [goal, hub, minValue]);
 
+  const plannerQuery = useMemo(() => {
+    const params = new URLSearchParams({
+      cycle_duration_hours: appSettings?.cycle_duration_hours,
+      structure_job_time_bonus_pct: appSettings?.structureJobTimeBonusPct ?? 0,
+      min_profit_per_cycle: appSettings?.min_profit_per_cycle,
+      include_below_threshold_items: appSettings?.include_below_threshold_items ? 'true' : 'false',
+      max_sell_days_tolerance: appSettings?.max_sell_days_tolerance,
+      target_isk_per_m3: appSettings?.target_isk_per_m3 ?? 0,
+      weight_by_velocity: appSettings?.weight_by_velocity ? 'true' : 'false',
+      count_corp_original_blueprints_as_own: appSettings?.count_corp_original_blueprints_as_own ? 'true' : 'false',
+      system: appSettings?.system || 'Korsiki',
+      facility: appSettings?.facility || 'large',
+      structure_type: plannerStructureType || 'engineering_complex',
+      rig_1: appSettings?.rig_1 || 'none',
+      rig_2: appSettings?.rig_2 || 'none',
+    });
+    if (appSettings?.facilityTaxRate !== '') params.set('facility_tax_rate', String(parseFloat(appSettings.facilityTaxRate) / 100));
+    if (appSettings?.rigBonusMfg !== '') params.set('rig_bonus_mfg', String(appSettings.rigBonusMfg));
+    return `${API}/api/job-planner?${params.toString()}`;
+  }, [appSettings, plannerStructureType]);
+
   const { data, loading, error, stale, refetch } = useApi(query, [query]);
+  const { data: plannerData } = useApi(plannerQuery, [plannerQuery]);
 
   const items = data?.items || [];
   const summary = data?.summary || {};
   const hubs = data?.hubs || ['Jita', 'Amarr', 'Dodixie', 'Rens', 'Hek'];
+  const plannerItems = plannerData?.items || [];
+  const plannerSciItems = plannerItems.filter(item => ['copy_first', 'copy_then_invent', 'invent_first'].includes(item.action_type));
+  const plannerMfgItems = plannerItems.filter(item => item.action_type === 'manufacture');
 
   return (
     <div className="calc-page" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -99,6 +127,13 @@ export default memo(function HaulPlannerPage() {
         <MetricCard label="ITEMS WITH BETTER HUB" value={`${summary.items_with_better_hub || 0}`} tone="var(--blue)" />
         <MetricCard label="UNITS" value={new Intl.NumberFormat('en-US').format(summary.total_units || 0)} tone="var(--text)" />
       </div>
+
+      <CargoTimelinePanel
+        cycleHours={appSettings?.cycle_duration_hours}
+        mfgItems={plannerMfgItems}
+        sciItems={plannerSciItems}
+        haulCapacityM3={appSettings?.haul_capacity_m3}
+      />
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {loading && !data ? (

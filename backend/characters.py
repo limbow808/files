@@ -67,11 +67,45 @@ SCOPES = " ".join([
 
 CHARS_FILE = os.path.join(os.path.dirname(__file__), "characters.json")
 CORP_BP_ACCESS_MODES = {"auto", "allow", "block"}
+DEFAULT_BP_PERMISSIONS = {
+    "personal_bpo": True,
+    "personal_bpc": True,
+    "corp_bpo_copy": False,
+    "corp_bpo_manufacture": False,
+    "corp_bpc": False,
+}
 
 
 def normalize_corp_bp_access(value) -> str:
     mode = str(value or "auto").strip().lower()
     return mode if mode in CORP_BP_ACCESS_MODES else "auto"
+
+
+def _legacy_permissions_for_corp_mode(mode: str) -> dict:
+    normalized_mode = normalize_corp_bp_access(mode)
+    corp_enabled = normalized_mode != "block"
+    return {
+        **DEFAULT_BP_PERMISSIONS,
+        "corp_bpo_copy": corp_enabled,
+        "corp_bpo_manufacture": corp_enabled,
+        "corp_bpc": corp_enabled,
+    }
+
+
+def normalize_bp_permissions(value=None, legacy_corp_bp_access=None) -> dict:
+    base = _legacy_permissions_for_corp_mode(legacy_corp_bp_access)
+    raw = value if isinstance(value, dict) else {}
+    normalized = {
+        key: bool(raw.get(key, base.get(key, default_value)))
+        for key, default_value in DEFAULT_BP_PERMISSIONS.items()
+    }
+    return normalized
+
+
+def _corp_mode_from_permissions(permissions: dict) -> str:
+    if any(bool(permissions.get(key)) for key in ("corp_bpo_copy", "corp_bpo_manufacture", "corp_bpc")):
+        return "allow"
+    return "block"
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 _lock = threading.RLock()  # Reentrant — load_characters can call _save_characters without deadlock
@@ -224,6 +258,7 @@ def list_characters() -> list[dict]:
             "character_name": rec.get("character_name", "Unknown"),
             "portrait_url":   rec.get("portrait_url", f"https://images.evetech.net/characters/{cid}/portrait?size=64"),
             "corp_bp_access": normalize_corp_bp_access(rec.get("corp_bp_access")),
+            "bp_permissions": normalize_bp_permissions(rec.get("bp_permissions"), rec.get("corp_bp_access")),
         }
         for cid, rec in chars.items()
     ]
@@ -237,6 +272,7 @@ def set_corp_bp_access(character_id: str, mode: str) -> dict:
         raise ValueError(f"Character {character_id} not found in store")
     normalized = normalize_corp_bp_access(mode)
     rec["corp_bp_access"] = normalized
+    rec["bp_permissions"] = normalize_bp_permissions(rec.get("bp_permissions"), normalized)
     chars[cid] = rec
     _save_characters(chars)
     return {
@@ -244,6 +280,27 @@ def set_corp_bp_access(character_id: str, mode: str) -> dict:
         "character_name": rec.get("character_name", "Unknown"),
         "portrait_url": rec.get("portrait_url", f"https://images.evetech.net/characters/{cid}/portrait?size=64"),
         "corp_bp_access": normalized,
+        "bp_permissions": normalize_bp_permissions(rec.get("bp_permissions"), normalized),
+    }
+
+
+def set_bp_permissions(character_id: str, permissions: dict | None) -> dict:
+    chars = load_characters()
+    cid = str(character_id)
+    rec = chars.get(cid)
+    if not rec:
+        raise ValueError(f"Character {character_id} not found in store")
+    normalized = normalize_bp_permissions(permissions, rec.get("corp_bp_access"))
+    rec["bp_permissions"] = normalized
+    rec["corp_bp_access"] = _corp_mode_from_permissions(normalized)
+    chars[cid] = rec
+    _save_characters(chars)
+    return {
+        "character_id": cid,
+        "character_name": rec.get("character_name", "Unknown"),
+        "portrait_url": rec.get("portrait_url", f"https://images.evetech.net/characters/{cid}/portrait?size=64"),
+        "corp_bp_access": rec["corp_bp_access"],
+        "bp_permissions": normalized,
     }
 
 

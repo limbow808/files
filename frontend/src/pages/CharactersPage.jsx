@@ -42,6 +42,54 @@ const CORP_BP_ACCESS_META = {
   },
 };
 
+const DEFAULT_BP_PERMISSIONS = {
+  personal_bpo: true,
+  personal_bpc: true,
+  corp_bpo_copy: false,
+  corp_bpo_manufacture: false,
+  corp_bpc: false,
+};
+
+const BP_PERMISSION_META = {
+  personal_bpo: {
+    label: 'PERS BPO',
+    hint: 'Allow this pilot to use personal originals.',
+    accent: '#4da6ff',
+  },
+  personal_bpc: {
+    label: 'PERS BPC',
+    hint: 'Allow this pilot to use personal copies.',
+    accent: '#66ccff',
+  },
+  corp_bpo_copy: {
+    label: 'CORP COPY',
+    hint: 'Allow this pilot to copy from corp originals.',
+    accent: '#c6ccd3',
+  },
+  corp_bpo_manufacture: {
+    label: 'CORP MFG',
+    hint: 'Allow this pilot to manufacture from corp originals.',
+    accent: '#aab2bb',
+  },
+  corp_bpc: {
+    label: 'CORP BPC',
+    hint: 'Reserved for future corp-copy support.',
+    accent: '#8d96a0',
+  },
+};
+
+const BP_PERMISSION_GROUPS = [
+  { label: 'PERSONAL', keys: ['personal_bpo', 'personal_bpc'] },
+  { label: 'CORP', keys: ['corp_bpo_copy', 'corp_bpo_manufacture', 'corp_bpc'] },
+];
+
+function getBpPermissions(char) {
+  return {
+    ...DEFAULT_BP_PERMISSIONS,
+    ...(char?.bp_permissions || {}),
+  };
+}
+
 function CorpBpAccessControl({ value = 'auto', saving = false, onChange }) {
   const current = CORP_BP_ACCESS_META[value] || CORP_BP_ACCESS_META.auto;
   return (
@@ -83,9 +131,60 @@ function CorpBpAccessControl({ value = 'auto', saving = false, onChange }) {
   );
 }
 
-function CharacterCard({ char, charStats, onRemove, onCorpBpAccessChange, corpBpAccessSaving, color, index = 0 }) {
+function BlueprintPermissionsControl({ permissions, saving = false, onChange, corpMode = 'block' }) {
+  const currentPermissions = {
+    ...DEFAULT_BP_PERMISSIONS,
+    ...(permissions || {}),
+  };
+  const corpModeMeta = CORP_BP_ACCESS_META[corpMode] || CORP_BP_ACCESS_META.block;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 280 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 2 }}>BLUEPRINT ACCESS</span>
+        <span style={{ color: corpModeMeta.accent, fontSize: 10, letterSpacing: 1.5 }}>{corpModeMeta.symbol} {corpModeMeta.label}</span>
+      </div>
+      {BP_PERMISSION_GROUPS.map((group) => (
+        <div key={group.label} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span style={{ color: 'var(--dim)', fontSize: 10, letterSpacing: 2 }}>{group.label}</span>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {group.keys.map((key) => {
+              const meta = BP_PERMISSION_META[key];
+              const enabled = Boolean(currentPermissions[key]);
+              return (
+                <button
+                  key={key}
+                  className="btn"
+                  title={meta.hint}
+                  disabled={saving}
+                  onClick={() => onChange({ ...currentPermissions, [key]: !enabled })}
+                  style={{
+                    padding: '4px 8px',
+                    fontSize: 10,
+                    letterSpacing: 1.3,
+                    borderColor: enabled ? meta.accent : 'var(--border)',
+                    color: enabled ? meta.accent : 'var(--dim)',
+                    background: enabled ? 'rgba(255,255,255,0.05)' : 'transparent',
+                    opacity: saving ? 0.7 : 1,
+                  }}
+                >
+                  {enabled ? '✓' : '✕'} {meta.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <div style={{ color: 'var(--dim)', fontSize: 10, lineHeight: 1.35 }}>
+        {saving ? 'Saving blueprint permissions…' : 'Personal and corp blueprint use is controlled independently per character.'}
+      </div>
+    </div>
+  );
+}
+
+function CharacterCard({ char, charStats, onRemove, onBpPermissionsChange, bpPermissionsSaving, color, index = 0 }) {
   const [confirming, setConfirming] = useState(false);
   const [imgError,   setImgError]   = useState(false);
+  const permissions = getBpPermissions(char);
 
   return (
     <div
@@ -140,10 +239,11 @@ function CharacterCard({ char, charStats, onRemove, onCorpBpAccessChange, corpBp
           </div>
         </div>
         </div>
-        <CorpBpAccessControl
-          value={char.corp_bp_access || 'auto'}
-          saving={corpBpAccessSaving}
-          onChange={(mode) => onCorpBpAccessChange(char.character_id, mode)}
+        <BlueprintPermissionsControl
+          permissions={permissions}
+          corpMode={char.corp_bp_access || 'block'}
+          saving={bpPermissionsSaving}
+          onChange={(nextPermissions) => onBpPermissionsChange(char.character_id, nextPermissions)}
         />
       </div>
 
@@ -169,7 +269,7 @@ function CharacterCard({ char, charStats, onRemove, onCorpBpAccessChange, corpBp
 export default function CharactersPage() {
   const [characters, setCharacters] = useState([]);
   const [stats,      setStats]      = useState({});  // charId → { wallet, active_jobs }
-  const [corpBpAccessSaving, setCorpBpAccessSaving] = useState({});
+  const [bpPermissionsSaving, setBpPermissionsSaving] = useState({});
   const [loading,    setLoading]    = useState(true);
   const [adding,     setAdding]     = useState(false);
   const [addStatus,  setAddStatus]  = useState(null); // null | 'waiting' | 'done' | 'error'
@@ -247,31 +347,36 @@ export default function CharactersPage() {
     setStats(prev => { const next = { ...prev }; delete next[charId]; return next; });
   }
 
-  async function handleCorpBpAccessChange(charId, mode) {
-    const previous = characters.find(c => c.character_id === charId)?.corp_bp_access || 'auto';
-    if (previous === mode) return;
-    setCorpBpAccessSaving(prev => ({ ...prev, [charId]: true }));
+  async function handleBpPermissionsChange(charId, permissions) {
+    const previousChar = characters.find(c => c.character_id === charId);
+    const previousPermissions = getBpPermissions(previousChar);
+    if (JSON.stringify(previousPermissions) === JSON.stringify(permissions)) return;
+    setBpPermissionsSaving(prev => ({ ...prev, [charId]: true }));
     setCharacters(prev => prev.map(char => (
-      char.character_id === charId ? { ...char, corp_bp_access: mode } : char
+      char.character_id === charId ? { ...char, bp_permissions: permissions } : char
     )));
     try {
-      const r = await fetch(`${API}/api/characters/${charId}/corp-bp-access`, {
+      const r = await fetch(`${API}/api/characters/${charId}/bp-permissions`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify({ permissions }),
       });
       const d = await r.json();
       if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
       const updated = d.character || {};
       setCharacters(prev => prev.map(char => (
-        char.character_id === charId ? { ...char, corp_bp_access: updated.corp_bp_access || mode } : char
+        char.character_id === charId ? {
+          ...char,
+          corp_bp_access: updated.corp_bp_access || char.corp_bp_access,
+          bp_permissions: { ...DEFAULT_BP_PERMISSIONS, ...(updated.bp_permissions || permissions) },
+        } : char
       )));
     } catch {
       setCharacters(prev => prev.map(char => (
-        char.character_id === charId ? { ...char, corp_bp_access: previous } : char
+        char.character_id === charId ? { ...char, bp_permissions: previousPermissions } : char
       )));
     } finally {
-      setCorpBpAccessSaving(prev => ({ ...prev, [charId]: false }));
+      setBpPermissionsSaving(prev => ({ ...prev, [charId]: false }));
     }
   }
 
@@ -358,8 +463,8 @@ export default function CharactersPage() {
               char={char}
               charStats={stats[char.character_id] ?? null}
               onRemove={handleRemove}
-              onCorpBpAccessChange={handleCorpBpAccessChange}
-              corpBpAccessSaving={Boolean(corpBpAccessSaving[char.character_id])}
+              onBpPermissionsChange={handleBpPermissionsChange}
+              bpPermissionsSaving={Boolean(bpPermissionsSaving[char.character_id])}
               color={charColor(char.character_id)}
               index={idx}
             />

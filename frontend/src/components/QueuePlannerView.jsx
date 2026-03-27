@@ -3,6 +3,7 @@ import { useGlobalTick } from '../hooks/useGlobalTick';
 import { useApi } from '../hooks/useApi';
 import { fmtISK, fmtDuration, roiColor } from '../utils/fmt';
 import { LoadingState } from './ui';
+import CargoTimelinePanel from './CargoTimelinePanel';
 import ScienceQueueColumn from './ScienceQueueColumn';
 import ManufacturingQueueColumn from './ManufacturingQueueColumn';
 import { API } from '../App';
@@ -10,6 +11,7 @@ import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/a
 
 const PLANNER_GROUP_MODE_KEY = 'crest_job_planner_group_mode';
 const PLANNER_SHOW_IDLE_KEY = 'crest_job_planner_show_idle';
+const PLANNER_SHOW_FUTURE_KEY = 'crest_job_planner_show_future';
 
 function readPlannerGroupMode() {
   if (typeof window === 'undefined') return 'character';
@@ -25,6 +27,16 @@ function readPlannerShowIdle() {
   if (typeof window === 'undefined') return true;
   try {
     const stored = window.localStorage.getItem(PLANNER_SHOW_IDLE_KEY);
+    return stored !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function readPlannerShowFuture() {
+  if (typeof window === 'undefined') return true;
+  try {
+    const stored = window.localStorage.getItem(PLANNER_SHOW_FUTURE_KEY);
     return stored !== 'false';
   } catch {
     return true;
@@ -575,163 +587,15 @@ function QueueDetailExpanded({ item, calcItem }) {
 function PlannerKPIBar({ stats }) {
   return (
     <div className="planner-kpi-bar">
-      {stats.map((stat) => (
-        <div key={stat.label} className="planner-kpi-stat">
-          <span className="planner-kpi-value" style={{ color: stat.color }}>{stat.value}</span>
-          <span className="planner-kpi-label">{stat.label}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function fmtShortWindow(seconds) {
-  if (seconds == null || seconds <= 0) return 'NOW';
-  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}m`;
-  if (seconds < 86400) return `${(seconds / 3600).toFixed(seconds < 14400 ? 1 : 0)}h`;
-  return `${(seconds / 86400).toFixed(1)}d`;
-}
-
-function fmtM3(m3) {
-  if (m3 == null) return '—';
-  if (m3 >= 1_000_000) return `${(m3 / 1_000_000).toFixed(1)}M m3`;
-  if (m3 >= 1_000) return `${(m3 / 1_000).toFixed(1)}K m3`;
-  return `${Math.round(m3).toLocaleString('en-US')} m3`;
-}
-
-function fmtTripLoad(totalM3, capacityM3) {
-  if (!capacityM3 || capacityM3 <= 0) return 'set haul cap';
-  const trips = totalM3 / capacityM3;
-  if (trips <= 0) return '0 trips';
-  if (trips < 1) return `${Math.round(trips * 100)}% load`;
-  return `${trips.toFixed(trips >= 10 ? 0 : 1)} trips`;
-}
-
-// Mini cargo bar used for the inbound/outbound strip just under the KPIs.
-function CargoProgressSquares({ filledSquares, totalSquares, color }) {
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${totalSquares}, minmax(0, 1fr))`, gap: 2 }}>
-      {Array.from({ length: totalSquares }, (_, index) => (
-        <div
-          key={`${color}:${index}`}
-          style={{
-            height: 10,
-            borderRadius: 2,
-            background: index < filledSquares ? color : 'rgba(255,255,255,0.06)',
-            border: '1px solid rgba(255,255,255,0.05)',
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-// One inbound/outbound row in the cargo panel. Spacing and stat alignment changes usually start here.
-function CargoTimelineRow({ label, color, totalM3, nextTs, nextLabel, capacityM3 }) {
-  const totalSquares = 24;
-  const loadRatio = capacityM3 > 0 ? totalM3 / capacityM3 : 0;
-  const filledSquares = totalM3 > 0 && capacityM3 > 0
-    ? Math.max(1, Math.round(Math.min(loadRatio, 1) * totalSquares))
-    : 0;
-  const loadTextColor = loadRatio > 1 ? 'var(--accent)' : 'var(--dim)';
-
-  return (
-    <div className="planner-cargo-row">
-      <div className="planner-cargo-row__meta">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 0.8, color }}>{label}</span>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>{fmtM3(totalM3)} total</span>
-        </div>
-        <div className="planner-cargo-row__stats" style={{ textAlign: 'right' }}>
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 8, letterSpacing: 0.5, color: 'var(--dim)' }}>
-            {nextLabel}: {nextTs ? fmtShortWindow(nextTs - Math.floor(Date.now() / 1000)) : '—'}
+      {stats.map((stat, index) => (
+        <Fragment key={stat.label}>
+          <div className="planner-kpi-stat">
+            <span className="planner-kpi-value" style={{ color: stat.color }}>{stat.value}</span>
+            <span className="planner-kpi-label">{stat.label}</span>
           </div>
-          <div style={{ fontFamily: 'var(--mono)', fontSize: 8, letterSpacing: 0.5, color: loadTextColor, marginTop: 2 }}>
-            {fmtTripLoad(totalM3, capacityM3)} @ {fmtM3(capacityM3)}
-          </div>
-        </div>
-      </div>
-      <CargoProgressSquares filledSquares={filledSquares} totalSquares={totalSquares} color={color} />
-    </div>
-  );
-}
-
-// Compact logistics summary shown between the KPI strip and the wallet bar.
-function CargoTimelinePanel({ cycleHours, mfgItems, haulCapacityM3 }) {
-  const panelData = useMemo(() => {
-    const nowTs = Math.floor(Date.now() / 1000);
-    const horizonHours = Math.max(12, Math.min(24, cycleHours || 12));
-    const horizonSecs = horizonHours * 3600;
-    const capacityM3 = Math.max(0, Number(haulCapacityM3 || 0));
-
-    const inboundEvents = [];
-    const outboundEvents = [];
-
-    mfgItems.forEach(item => {
-      const startAt = Math.max(nowTs, Number(item.start_at || nowTs));
-      const endAt = startAt + Math.max(0, Number(item.duration_secs || 0));
-      const inboundM3 = Number(item.inbound_missing_m3 || 0);
-      const outboundM3 = Number(item.outbound_volume_m3 || 0);
-
-      if (inboundM3 > 0) {
-        inboundEvents.push({
-          ts: startAt,
-          volume: inboundM3,
-          name: item.name,
-        });
-      }
-      if (outboundM3 > 0) {
-        outboundEvents.push({
-          ts: endAt,
-          volume: outboundM3,
-          name: item.name,
-        });
-      }
-    });
-
-    const scopedInbound = inboundEvents.filter(event => event.ts >= nowTs && event.ts <= nowTs + horizonSecs);
-    const scopedOutbound = outboundEvents.filter(event => event.ts >= nowTs && event.ts <= nowTs + horizonSecs);
-
-    const inboundTotalM3 = scopedInbound.reduce((sum, event) => sum + event.volume, 0);
-    const outboundTotalM3 = scopedOutbound.reduce((sum, event) => sum + event.volume, 0);
-    const nextInboundTs = scopedInbound.length > 0 ? Math.min(...scopedInbound.map(event => event.ts)) : null;
-    const nextOutboundTs = scopedOutbound.length > 0 ? Math.min(...scopedOutbound.map(event => event.ts)) : null;
-
-    return {
-      horizonHours,
-      capacityM3,
-      inboundTotalM3,
-      outboundTotalM3,
-      nextInboundTs,
-      nextOutboundTs,
-    };
-  }, [cycleHours, haulCapacityM3, mfgItems]);
-
-  return (
-    <div className="planner-cargo">
-      <div className="planner-cargo-head">
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 1.1, color: 'var(--text)' }}>CARGO FLOW</span>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>M3 TO REFILL MANUFACTURING AND PICK UP FINISHED GOODS OVER {panelData.horizonHours}H · {fmtM3(panelData.capacityM3)} SHIP CAP</span>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <CargoTimelineRow
-          label="INBOUND MATS"
-          color="#4cff91"
-          totalM3={panelData.inboundTotalM3}
-          nextTs={panelData.nextInboundTs}
-          nextLabel="next refill"
-          capacityM3={panelData.capacityM3}
-        />
-        <CargoTimelineRow
-          label="OUTBOUND GOODS"
-          color="#ff6b2c"
-          totalM3={panelData.outboundTotalM3}
-          nextTs={panelData.nextOutboundTs}
-          nextLabel="next pickup"
-          capacityM3={panelData.capacityM3}
-        />
-      </div>
+          {index < stats.length - 1 && <div className="planner-kpi-separator" />}
+        </Fragment>
+      ))}
     </div>
   );
 }
@@ -875,6 +739,8 @@ function PlannerFilterBar({
   onGroupModeChange,
   showIdle,
   onShowIdleChange,
+  showFuture,
+  onShowFutureChange,
 }) {
   return (
     <div className="planner-filterbar">
@@ -887,6 +753,14 @@ function PlannerFilterBar({
           title={showIdle ? 'Hide idle jobs from both queue columns' : 'Show idle jobs in both queue columns'}
         >
           IDLE
+        </button>
+        <button
+          type="button"
+          className={`chip${showFuture ? ' active' : ''}`}
+          onClick={() => onShowFutureChange(!showFuture)}
+          title={showFuture ? 'Hide queued future-start jobs from both queue columns' : 'Show queued future-start jobs in both queue columns'}
+        >
+          FUTURE
         </button>
         <button
           type="button"
@@ -933,6 +807,8 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const [plannerRefreshNonce, setPlannerRefreshNonce] = useState(0);
   const [groupMode, setGroupMode] = useState(() => readPlannerGroupMode());
   const [showIdle, setShowIdle] = useState(() => readPlannerShowIdle());
+  const [showFuture, setShowFuture] = useState(() => readPlannerShowFuture());
+  const [plannerNow, setPlannerNow] = useState(() => Math.floor(Date.now() / 1000));
   const [blueprintRefreshLoading, setBlueprintRefreshLoading] = useState(false);
   const jobsSignalRef = useRef(null);
   const jobsPollBusyRef = useRef(false);
@@ -1004,6 +880,17 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   }, [showIdle]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.localStorage.setItem(PLANNER_SHOW_FUTURE_KEY, String(showFuture));
+    } catch {}
+  }, [showFuture]);
+
+  useGlobalTick(() => {
+    setPlannerNow(Math.floor(Date.now() / 1000));
+  });
+
+  useEffect(() => {
     setCheckedIds(new Set());
     setExpandedId(null);
   }, [plannerStructureType, cycleConfig.cycle_duration_hours, cycleConfig.structureJobTimeBonusPct, cycleConfig.haul_capacity_m3, cycleConfig.target_isk_per_m3, cycleConfig.min_profit_per_cycle, cycleConfig.include_below_threshold_items, cycleConfig.max_sell_days_tolerance, cycleConfig.count_corp_original_blueprints_as_own, cycleConfig.weight_by_velocity, cycleConfig.rig_1, cycleConfig.rig_2]);
@@ -1017,26 +904,31 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const freeScience  = tpData?.free_science ?? 0;
   const walletTotal  = tpData?.wallet_total_isk ?? 0;
   const blockedItems = tpData?.blocked_items || [];
+  const characterSlots = tpData?.character_slots || { science: {}, manufacturing: {} };
 
   // These lists are the actual payloads rendered by the two planner columns.
   const sciItems = useMemo(() =>
     items.filter(i => i.action_type === 'copy_first' || i.action_type === 'invent_first' || i.action_type === 'copy_then_invent' || i.action_type === 'idle_science'),
     [items]);
   const mfgItems = useMemo(() => items.filter(i => i.action_type === 'manufacture' || i.action_type === 'idle_manufacture'), [items]);
+  const includePlannerItem = useCallback((item, idleActionType) => {
+    if (!showIdle && (item.is_idle || item.action_type === idleActionType)) return false;
+    if (!showFuture && !item.is_idle && Number(item.start_at || 0) > plannerNow + 30) return false;
+    return true;
+  }, [plannerNow, showFuture, showIdle]);
   const visibleSciItems = useMemo(
-    () => (showIdle ? sciItems : sciItems.filter(i => !i.is_idle && i.action_type !== 'idle_science')),
-    [sciItems, showIdle]
+    () => sciItems.filter(i => includePlannerItem(i, 'idle_science')),
+    [includePlannerItem, sciItems]
   );
   const visibleMfgItems = useMemo(
-    () => (showIdle ? mfgItems : mfgItems.filter(i => !i.is_idle && i.action_type !== 'idle_manufacture')),
-    [mfgItems, showIdle]
+    () => mfgItems.filter(i => includePlannerItem(i, 'idle_manufacture')),
+    [includePlannerItem, mfgItems]
   );
   const realSciItems = useMemo(() => sciItems.filter(i => !i.is_idle), [sciItems]);
   const realMfgItems = useMemo(() => mfgItems.filter(i => !i.is_idle), [mfgItems]);
   const startNowMfgCount = useMemo(() => {
-    const nowTs = Math.floor(Date.now() / 1000);
-    return realMfgItems.filter(i => !i.start_at || i.start_at <= nowTs + 30).length;
-  }, [realMfgItems]);
+    return realMfgItems.filter(i => !i.start_at || i.start_at <= plannerNow + 30).length;
+  }, [plannerNow, realMfgItems]);
   const queuedMfgCount = Math.max(0, realMfgItems.length - startNowMfgCount);
 
   useEffect(() => {
@@ -1231,13 +1123,6 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
       {/* Wallet and cycle metadata strip */}
       {walletTotal > 0 && <WalletBar walletTotal={walletTotal} lockedIsk={lockedIsk} cycleConfig={cycleConfig} lastRefresh={lastRefresh} />}
 
-      {/* Cargo flow summary */}
-      <CargoTimelinePanel
-        cycleHours={cycleConfig.cycle_duration_hours}
-        mfgItems={mfgItems}
-        haulCapacityM3={cycleConfig.haul_capacity_m3}
-      />
-
       {/* Board controls: grouping mode and blueprint refresh */}
       <PlannerFilterBar
         onBlueprintRefresh={handleBlueprintRefresh}
@@ -1246,6 +1131,8 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
         onGroupModeChange={setGroupMode}
         showIdle={showIdle}
         onShowIdleChange={setShowIdle}
+        showFuture={showFuture}
+        onShowFutureChange={setShowFuture}
       />
 
       {/* Main planner board. CSS decides when this becomes stacked on narrower screens. */}
@@ -1265,6 +1152,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
             cycleConfig={cycleConfig}
             maxScience={maxScience}
             freeScience={freeScience}
+            characterSlots={characterSlots.science || {}}
             onItemExpand={setExpandedId}
             expandedId={expandedId}
             groupMode={groupMode}
@@ -1286,6 +1174,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
             cycleConfig={cycleConfig}
             maxJobs={maxJobs}
             freeSlots={freeSlots}
+            characterSlots={characterSlots.manufacturing || {}}
             onItemExpand={setExpandedId}
             expandedId={expandedId}
             checkedIds={checkedIds}

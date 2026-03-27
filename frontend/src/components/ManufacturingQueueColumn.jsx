@@ -28,6 +28,20 @@ function Flag({ label, bg, color = '#000' }) {
   );
 }
 
+const ACCESS_FLAG_META = {
+  personal_bpo: { label: 'PERS BPO', bg: '#4da6ff' },
+  personal_bpc: { label: 'PERS BPC', bg: '#66ccff' },
+  corp_bpo: { label: 'CORP BPO', bg: '#9098a1' },
+  future_personal_bpc: { label: 'FUTURE BPC', bg: '#ffd24d' },
+};
+
+function getEffectiveAccessFlag(item) {
+  const accessKind = item.assignment_access_kind;
+  if (accessKind && ACCESS_FLAG_META[accessKind]) return ACCESS_FLAG_META[accessKind];
+  const fallbackKind = (item.ownership || []).find((kind) => ACCESS_FLAG_META[kind]);
+  return fallbackKind ? ACCESS_FLAG_META[fallbackKind] : null;
+}
+
 function DetailRow({ label, value }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 11, borderBottom: '1px solid #0d0d0d' }}>
@@ -96,13 +110,16 @@ function SlotGroupHeader({ startAt, slotFreedBy }) {
 }
 
 // Lane header used when the planner is grouped by character instead of start time.
-function CharacterLaneHeader({ character, activeCount, idleCount }) {
+function CharacterLaneHeader({ character, activeCount, idleCount, slotUsage }) {
   const name = character?.character_name || 'UNASSIGNED';
   const color = character?.character_id ? charColor(character.character_id) : 'var(--planner-idle)';
+  const running = Math.max(0, Number(slotUsage?.running || 0));
+  const total = Math.max(0, Number(slotUsage?.total || 0));
   return (
     <div className="planner-character-lane__header">
       <span className="planner-character-dot" style={{ background: color }} />
       <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)', letterSpacing: 0.8 }}>{name}</span>
+      {total > 0 && <span className="planner-character-lane__meta">{running}/{total} slots</span>}
       <div style={{ flex: 1 }} />
       <span className="planner-character-lane__meta">{activeCount} active</span>
       {idleCount > 0 && <span className="planner-character-lane__meta">{idleCount} idle</span>}
@@ -221,6 +238,7 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
   const jobCost = Number(item.job_cost || 0);
   const jc = item.job_cost_breakdown;
   const scaleCost = (value) => fmtISK(Number(value || 0));
+  const accessFlag = getEffectiveAccessFlag(item);
 
   const handleCheck = useCallback((e) => {
     e.stopPropagation();
@@ -257,9 +275,7 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, flexWrap: 'wrap' }}>
             <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0 }}>{item.name}</span>
-            {(item.ownership || []).includes('personal_bpo') && <Flag label="PERS BPO" bg="#4da6ff" />}
-            {(item.ownership || []).includes('personal_bpc') && <Flag label="PERS BPC" bg="#66ccff" />}
-            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#9098a1" />}
+            {accessFlag && <Flag label={accessFlag.label} bg={accessFlag.bg} />}
             {(item.characters || []).map(c => (
               <CharTag key={c.character_id} name={c.character_name} color={charColor(c.character_id)} bordered={false} style={{ fontSize: 10 }} />
             ))}
@@ -369,7 +385,7 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
 // Manufacturing column supports both views:
 // - character: lane per pilot
 // - time: slot timing groups first, idle rows at the bottom
-export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJobs, freeSlots, onItemExpand, expandedId, checkedIds, onCheck, groupMode = 'character' }) {
+export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJobs, freeSlots, characterSlots = {}, onItemExpand, expandedId, checkedIds, onCheck, groupMode = 'character' }) {
   const idleItems = items?.filter(i => i.is_idle) || [];
   const mfgItems = items?.filter(i => i.action_type === 'manufacture') || [];
   const characterGroups = buildManufacturingCharacterGroups(items || []);
@@ -440,7 +456,7 @@ export default memo(function ManufacturingQueueColumn({ items, cycleConfig, maxJ
         {characterGroups.map((group) => (
           <div key={group.key} className="planner-character-lane">
             {/* Per-character heading row */}
-            <CharacterLaneHeader character={group.character} activeCount={group.activeItems.length} idleCount={group.idleItems.length} />
+            <CharacterLaneHeader character={group.character} activeCount={group.activeItems.length} idleCount={group.idleItems.length} slotUsage={characterSlots[String(group.character?.character_id || '')]} />
             {renderActiveGroups(group.activeItems, `${group.key}-mfg`)}
             {group.idleItems.length > 0 && (
               <>

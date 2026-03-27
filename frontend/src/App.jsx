@@ -179,7 +179,7 @@ export default function App() {
           )}
           {mountedTabs.has('HAUL_PLANNER') && (
             <div style={{ display: activeTab === 'HAUL_PLANNER' ? 'contents' : 'none' }}>
-              <HaulPlannerPage />
+              <HaulPlannerPage appSettings={appSettings} />
             </div>
           )}
           {mountedTabs.has('INVENTORY') && (

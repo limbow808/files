@@ -1906,8 +1906,9 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 
 /* KPI strip at the top of the planner page. */
 .planner-kpi-bar {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
   border-bottom: 1px solid var(--border);
   background:
     linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.01)),
@@ -1916,16 +1917,21 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 .planner-kpi-stat {
+  flex: 1 1 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
+  align-items: center;
   justify-content: center;
   padding: 12px 10px;
   min-height: 72px;
 }
 
-.planner-kpi-stat + .planner-kpi-stat {
-  border-left: 1px solid rgba(255,255,255,0.05);
+.planner-kpi-separator {
+  width: 5px;
+  height: 5px;
+  background: var(--border);
+  flex: 0 0 auto;
 }
 
 .planner-kpi-value {
@@ -2227,7 +2233,15 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 
 @media (max-width: 900px) {
   .planner-kpi-bar {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    flex-wrap: wrap;
+  }
+
+  .planner-kpi-stat {
+    flex: 1 1 calc(33.333% - 10px);
+  }
+
+  .planner-kpi-separator {
+    display: none;
   }
 
   .planner-cargo-row {
@@ -2250,8 +2264,8 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 @media (max-width: 720px) {
-  .planner-kpi-bar {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .planner-kpi-stat {
+    flex-basis: calc(50% - 10px);
   }
 
   .planner-detail-grid {
@@ -2282,8 +2296,8 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 }
 
 @media (max-width: 560px) {
-  .planner-kpi-bar {
-    grid-template-columns: 1fr;
+  .planner-kpi-stat {
+    flex-basis: 100%;
   }
 
   .planner-view-toggle {

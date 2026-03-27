@@ -28,6 +28,20 @@ function Flag({ label, bg, color = '#000' }) {
   );
 }
 
+const ACCESS_FLAG_META = {
+  personal_bpo: { label: 'PERS BPO', bg: '#4da6ff' },
+  personal_bpc: { label: 'PERS BPC', bg: '#66ccff' },
+  corp_bpo: { label: 'CORP BPO', bg: '#9098a1' },
+  future_personal_bpc: { label: 'FUTURE BPC', bg: '#ffd24d' },
+};
+
+function getEffectiveAccessFlag(item) {
+  const accessKind = item.assignment_access_kind;
+  if (accessKind && ACCESS_FLAG_META[accessKind]) return ACCESS_FLAG_META[accessKind];
+  const fallbackKind = (item.ownership || []).find((kind) => ACCESS_FLAG_META[kind]);
+  return fallbackKind ? ACCESS_FLAG_META[fallbackKind] : null;
+}
+
 function DetailRow({ label, value, valueColor = 'var(--text)' }) {
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 11, borderBottom: '1px solid #0d0d0d' }}>
@@ -113,13 +127,16 @@ function SlotGroupHeader({ startAt, slotFreedBy, accentColor = 'var(--planner-co
 }
 
 // Lane header used when the planner is grouped by character instead of start time.
-function CharacterLaneHeader({ character, activeCount, idleCount }) {
+function CharacterLaneHeader({ character, activeCount, idleCount, slotUsage }) {
   const name = character?.character_name || 'UNASSIGNED';
   const color = character?.character_id ? charColor(character.character_id) : 'var(--planner-idle)';
+  const running = Math.max(0, Number(slotUsage?.running || 0));
+  const total = Math.max(0, Number(slotUsage?.total || 0));
   return (
     <div className="planner-character-lane__header">
       <span className="planner-character-dot" style={{ background: color }} />
       <span style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)', letterSpacing: 0.8 }}>{name}</span>
+      {total > 0 && <span className="planner-character-lane__meta">{running}/{total} slots</span>}
       <div style={{ flex: 1 }} />
       <span className="planner-character-lane__meta">{activeCount} active</span>
       {idleCount > 0 && <span className="planner-character-lane__meta">{idleCount} idle</span>}
@@ -224,15 +241,18 @@ function IdleQueueRow({ item }) {
 // Main science recommendation row. Header badges and the expandable detail drawer live here.
 const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleConfig, isOpen, onToggle, isInvention }) {
   const profitPerCycle = item.profit_per_cycle || item.net_profit || 0;
-  const runsPerCycle = item.runs_per_cycle || 1;
+  const scienceCycleRuns = Math.max(1, Number(item.science_cycle_runs || item.runs_per_cycle || 1));
+  const scienceCycleLabel = item.science_cycle_label || 'runs';
   const cycleWindowFit = item.cycle_window_fit || 'fits';
   const successChance = item.invention_success_chance || 1.0;
-  const batchRuns = Math.max(1, Number(item.rec_runs || item.runs_per_cycle || 1));
+  const batchRuns = Math.max(1, Number(item.expected_runs_covered || item.rec_runs || 1));
   const hasBPC = item.has_t1_bpc || false;
   const riskFlag = isInvention && Boolean(item?.cycle_flags?.success_risky);
   const exceeds = cycleWindowFit === 'exceeds';
   const belowThreshold = !item.passes_profit_filter;
   const profitM = (profitPerCycle / 1_000_000).toFixed(1);
+  const expectedSuccessfulBpcs = Number(item.expected_successful_bpcs || 0);
+  const timeUntilManufactured = Number(item.time_until_manufactured_secs || 0);
   const inventionDetail = item.invention_detail || null;
   const skillFormula = inventionDetail?.skill_formula || null;
   const optimalChanceGaps = skillFormula ? [
@@ -269,7 +289,6 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
           ? 'var(--accent)'
           : '#ffd24d';
   const datacoreCosts = inventionDetail?.datacore_costs || {};
-  const datacoreCostPerRun = Number(inventionDetail?.cost_per_run || 0);
   const inventionJobCostPerRun = Number(inventionDetail?.job_cost_per_run || 0);
   const inventionTotalCostPerRun = Number(inventionDetail?.total_cost_per_run || item.invention_cost_per_run || 0);
   const copyCostTotal = Number(item.copy_job_cost || 0);
@@ -282,7 +301,9 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
   const manufacturingSalesTax = Number(item.sales_tax || 0);
   const manufacturingBrokerFee = Number(item.broker_fee || 0);
   const manufacturingTotalCost = manufacturingMaterialCost + manufacturingJobCost + manufacturingSalesTax + manufacturingBrokerFee;
-  const datacoreBatchCost = datacoreCostPerRun * batchRuns;
+  const datacoreMaterials = (item.material_breakdown || []).filter((material) => material.group === 'datacore');
+  const datacoreBatchCost = datacoreMaterials.reduce((sum, material) => sum + Number(material.total_line_cost || 0), 0);
+  const missingDatacoreCost = datacoreMaterials.reduce((sum, material) => sum + Number(material.missing_line_cost || 0), 0);
   const inventionJobBatchCost = inventionJobCostPerRun * batchRuns;
   const inventionTotalBatchCost = inventionTotalCostPerRun * batchRuns;
   const sciencePrepCostTotal = copyCostTotal + inventionTotalBatchCost;
@@ -297,7 +318,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
     copyStepRows.push(['Install cost', fmtISK(copyCostTotal)]);
     copyStepRows.push(['Duration', formatSeconds(copyDuration)]);
     if (item.action_type === 'copy_then_invent') {
-      copyStepRows.push(['Target invention jobs', Math.max(1, Math.ceil(batchRuns / Math.max(1, Number(item.inv_output_runs_per_bpc || 1)))).toString()]);
+      copyStepRows.push(['Target invention attempts', scienceCycleRuns.toString()]);
     } else {
       copyStepRows.push(['Target manufacturing runs', batchRuns.toString()]);
     }
@@ -305,6 +326,9 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
   const inventionStepRows = [];
   if (isInvention && (inventionDuration > 0 || inventionTotalBatchCost > 0)) {
     inventionStepRows.push(['Duration', formatSeconds(inventionDuration)]);
+    inventionStepRows.push(['Attempts this cycle', scienceCycleRuns.toString()]);
+    inventionStepRows.push(['Expected successful BPCs', expectedSuccessfulBpcs > 0 ? expectedSuccessfulBpcs.toFixed(2) : '—']);
+    inventionStepRows.push(['Expected runs covered', batchRuns.toString()]);
     if (skillFormula) {
       inventionStepRows.push(['Base chance', `${Math.round(Number(inventionDetail?.base_success_chance || 0) * 100)}%`]);
       inventionStepRows.push([
@@ -317,6 +341,9 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
       ]);
     }
     inventionStepRows.push(['Expected datacore spend', fmtISK(datacoreBatchCost)]);
+    if (missingDatacoreCost > 0) {
+      inventionStepRows.push(['Missing datacores', fmtISK(missingDatacoreCost)]);
+    }
     inventionStepRows.push(['Expected install cost', fmtISK(inventionJobBatchCost)]);
     inventionStepRows.push(['Expected invention total', fmtISK(inventionTotalBatchCost)]);
     inventionStepRows.push(['Expected yield', `${Math.round(successChance * 100)}% · ${item.inv_output_runs_per_bpc || 0} runs/BPC`]);
@@ -346,6 +373,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
     && inventCharacter
     && copyCharacter.character_id !== inventCharacter.character_id
   );
+  const accessFlag = getEffectiveAccessFlag(item);
 
   return (
     <div style={{ borderBottom: '1px solid #0d0d0d' }}>
@@ -368,9 +396,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1, flexWrap: 'wrap' }}>
             <span style={{ fontFamily: 'var(--mono)', fontSize: 14, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: '0 1 auto', minWidth: 0 }}>{item.name}</span>
-            {(item.ownership || []).includes('personal_bpo') && <Flag label="PERS BPO" bg="#4da6ff" />}
-            {(item.ownership || []).includes('personal_bpc') && <Flag label="PERS BPC" bg="#66ccff" />}
-            {(item.ownership || []).includes('corp_bpo') && <Flag label="CORP BPO" bg="#9098a1" />}
+            {accessFlag && <Flag label={accessFlag.label} bg={accessFlag.bg} />}
             {showSplitAssignments ? (
               <>
                 <Flag label="COPY" bg="var(--planner-copy)" />
@@ -394,7 +420,8 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
           </div>
         </div>
         <div className="planner-row-subline planner-row-subline--science">
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>{runsPerCycle}× runs/cycle</span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>{scienceCycleRuns}× {scienceCycleLabel}/cycle</span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--dim)' }}>to mfg {formatSeconds(timeUntilManufactured)}</span>
           <span style={{ fontFamily: 'var(--mono)', fontSize: 12, fontWeight: 700, color: profitPerCycle >= 0 ? '#4cff91' : 'var(--accent)' }}>{profitM}M ISK/cycle</span>
         </div>
       </div>
@@ -404,6 +431,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
           <div className="planner-detail-grid">
             <div>
               <DetailRow label="Duration" value={formatSeconds(item.science_total_secs || item.duration_secs || item.duration_seconds || 0)} />
+              <DetailRow label="Time until manufactured" value={formatSeconds(timeUntilManufactured)} />
               {item.structure_job_time_bonus_pct > 0 && <DetailRow label="Structure time bonus" value={`−${Number(item.structure_job_time_bonus_pct).toFixed(1)}%`} />}
               {isInvention && <DetailRow label="Success chance" value={`${Math.round(successChance * 100)}%`} valueColor={successChanceColor} />}
               {isInvention && optimalChanceWarning && (
@@ -412,6 +440,8 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
                 </div>
               )}
               {isInvention && item.inv_output_runs_per_bpc && <DetailRow label="Runs/T2 BPC" value={item.inv_output_runs_per_bpc} />}
+              {isInvention && <DetailRow label="Expected successful BPCs" value={expectedSuccessfulBpcs > 0 ? expectedSuccessfulBpcs.toFixed(2) : '—'} />}
+              {isInvention && <DetailRow label="Expected runs covered" value={batchRuns} />}
               <DetailRow label="Expected batch profit" value={fmtISK(expectedProfit)} valueColor={expectedProfit >= 0 ? '#4cff91' : 'var(--accent)'} />
               <DetailRow label="Profit margin" value={`${expectedMarginPct.toFixed(1)}%`} valueColor={expectedMarginPct >= 0 ? '#4cff91' : 'var(--accent)'} />
             </div>
@@ -475,7 +505,13 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
           {isInvention && Object.keys(datacoreCosts).length > 0 && (
             <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0d0d0d' }}>
               <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color: 'var(--dim)', marginBottom: 4 }}>DATACORES</div>
-              {Object.entries(datacoreCosts).map(([dc, cost]) => (
+              {datacoreMaterials.length > 0 ? datacoreMaterials.map((material) => (
+                <DetailRow
+                  key={material.type_id}
+                  label={material.name || `Type ${material.type_id}`}
+                  value={`${Number(material.have_qty || 0).toLocaleString()} / ${Number(material.needed_qty_total || 0).toLocaleString()} · ${fmtISK(material.total_line_cost || 0)}`}
+                />
+              )) : Object.entries(datacoreCosts).map(([dc, cost]) => (
                 <DetailRow key={dc} label={dc} value={`${(cost / 1_000_000).toFixed(1)}M`} />
               ))}
             </div>
@@ -500,7 +536,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
 // Science column supports both views:
 // - character: lane per pilot
 // - time: section bands first, idle rows pinned at the bottom
-export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience, freeScience, onItemExpand, expandedId, groupMode = 'character' }) {
+export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience, freeScience, characterSlots = {}, onItemExpand, expandedId, groupMode = 'character' }) {
   const idleItems = items.filter(i => i.is_idle);
   const copyItems = items.filter(i => i.action_type === 'copy_first');
   const copyThenInventItems = items.filter(i => i.action_type === 'copy_then_invent');
@@ -556,10 +592,11 @@ export default memo(function ScienceQueueColumn({ items, cycleConfig, maxScience
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
         {characterGroups.map((group) => {
           const activeCount = group.copyItems.length + group.copyThenInventItems.length + group.inventItems.length;
+          const charId = String(group.character?.character_id || '');
           return (
             <div key={group.key} className="planner-character-lane">
               {/* Per-character heading row */}
-              <CharacterLaneHeader character={group.character} activeCount={activeCount} idleCount={group.idleItems.length} />
+              <CharacterLaneHeader character={group.character} activeCount={activeCount} idleCount={group.idleItems.length} slotUsage={characterSlots[charId]} />
               {renderScienceSection('COPY FIRST', group.copyItems, 'var(--planner-copy)', `${group.key}-copy`, false)}
               {renderScienceSection('COPY → INVENT', group.copyThenInventItems, 'var(--planner-invention)', `${group.key}-copy-invent`, true)}
               {renderScienceSection('INVENT FIRST', group.inventItems, 'var(--planner-invention)', `${group.key}-invent`, true)}

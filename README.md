@@ -127,6 +127,7 @@ The seeder auto-downloads the EVE SDE from Fuzzwork (~80 MB compressed, ~550 MB 
 **5. Start the servers**
 ```bash
 # backend (port 5001)
+# run this from backend/ using the activated repo venv
 cd backend
 python server.py
 
@@ -134,6 +135,16 @@ python server.py
 # uses the active Python by default
 cd frontend
 npm run dev
+``` 
+
+If you are not using an activated shell, call the venv interpreter explicitly:
+
+```bash
+# Windows PowerShell
+.\.venv\Scripts\python.exe backend\server.py
+
+# macOS / Linux
+# ./.venv/bin/python backend/server.py
 ```
 
 If `npm run dev` cannot find the right Python interpreter, set `CREST_PYTHON` first:
