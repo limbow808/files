@@ -28,7 +28,7 @@ import threading
 import requests
 import esi_client as _esi
 
-from blueprints import load_blueprints, MINERALS
+from blueprints import load_blueprints, load_blueprint_lookup, MINERALS
 from calculator import calculate_all, CONFIG as CALC_CONFIG
 from database import (
     save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history,
@@ -2577,6 +2577,11 @@ def api_job_planner():
     results_by_blueprint_id: dict[int, dict] = {
         int(r.get("blueprint_id")): r for r in all_results if r.get("blueprint_id")
     }
+    blueprint_lookup = load_blueprint_lookup()
+    craftable_blueprints_by_output: dict[int, dict] = {
+        int(output_id): blueprint
+        for output_id, blueprint in (blueprint_lookup.get("by_output_id") or {}).items()
+    }
 
     def _clamp(value: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, value))
@@ -2797,6 +2802,380 @@ def api_job_planner():
 
         return breakdown, mats_ready, missing_cost, inbound_total_m3, inbound_missing_m3
 
+    MAX_PREREQUISITE_DEPTH = 4
+
+    def _effective_manufacturing_run_secs(result: dict) -> int:
+        _te_mod = max(0.01, 1.0 - (_te_bonus_pct / 100.0))
+        _combined_time_mod = _MFG_TIME_MODIFIER * _structure_job_time_mod * _te_mod
+        raw_duration_secs = int(result.get("time_seconds", 0) or result.get("duration", 0) or 0)
+        return max(1, int(raw_duration_secs * _combined_time_mod))
+
+    def _available_asset_qty(type_id: int, reserved_assets: dict[int, float]) -> float:
+        asset_qty = float(_assets.get(type_id, _assets.get(str(type_id), 0)) or 0.0)
+        reserved_qty = float(reserved_assets.get(type_id, 0.0) or 0.0)
+        return max(0.0, asset_qty - reserved_qty)
+
+    def _material_unit_buy_cost(material: dict) -> float:
+        quantity = float(material.get("quantity") or 0.0)
+        total_cost = float(material.get("line_cost") or 0.0)
+        if quantity <= 0:
+            return 0.0
+        return total_cost / quantity
+
+    def _has_prerequisite_blueprint_capacity(output_id: int, required_runs: int) -> bool:
+        out_id = int(output_id or 0)
+        if out_id <= 0 or out_id not in manufacture_owned_output_ids:
+            return False
+        required = max(1, int(required_runs or 1))
+        direct_bpo_count = int(personal_bpo_count_by_output.get(out_id, 0) or 0)
+        if count_corp_original_blueprints_as_own:
+            direct_bpo_count += int(corp_bpo_count_by_output_manufacture.get(out_id, 0) or 0)
+        if direct_bpo_count > 0:
+            return True
+        available_bpc_runs = int(_total_bpc_runs(bpc_runs_by_output.get(out_id, [])))
+        return available_bpc_runs >= required
+
+    def _clone_prerequisite_job(job: dict) -> dict:
+        cloned = dict(job)
+        children = []
+        for child in job.get("children") or []:
+            children.append(_clone_prerequisite_job(child))
+        cloned["children"] = children
+        return cloned
+
+    def _resolve_prerequisite_build(
+        output_id: int,
+        required_qty: float,
+        reserved_assets: dict[int, float],
+        depth: int = 0,
+        path: tuple[int, ...] = (),
+    ) -> dict | None:
+        out_id = int(output_id or 0)
+        qty_needed = float(required_qty or 0.0)
+        if out_id <= 0 or qty_needed <= 0 or depth >= MAX_PREREQUISITE_DEPTH or out_id in path:
+            return None
+        if out_id not in craftable_blueprints_by_output:
+            return None
+        result = results_by_output_id.get(out_id)
+        if not result or _slot_is_reaction(result):
+            return None
+
+        output_qty = max(1, int(result.get("output_qty") or 1))
+        run_count = max(1, int(math.ceil(qty_needed / output_qty)))
+        if not _has_prerequisite_blueprint_capacity(out_id, run_count):
+            return None
+
+        own_job_breakdown_per_run, own_job_breakdown_total = _planner_job_cost_breakdown(result, run_count)
+        own_job_cost_total = float((own_job_breakdown_total or {}).get("total_job_cost") or (float(result.get("job_cost", 0) or 0.0) * run_count))
+        own_material_cost_total = 0.0
+        aggregate_material_cost_total = 0.0
+        aggregate_job_cost_total = own_job_cost_total
+        missing_cost = 0.0
+        inbound_total_m3 = 0.0
+        inbound_missing_m3 = 0.0
+        materials_ready = True
+        resolved_material_breakdown: list[dict] = []
+        child_jobs: list[dict] = []
+        total_duration_secs = _effective_manufacturing_run_secs(result) * run_count
+
+        for material in result.get("material_breakdown") or []:
+            material_type_id = int(material.get("type_id") or 0)
+            if material_type_id <= 0:
+                continue
+            material_name = material.get("name") or f"Type {material_type_id}"
+            qty_per_run = float(material.get("quantity") or 0.0)
+            needed_qty_total = qty_per_run * run_count
+            if needed_qty_total <= 0:
+                continue
+
+            unit_cost = _material_unit_buy_cost(material)
+            unit_volume = float(material.get("volume_m3") or _get_volume_m3(material_type_id) or 0.0)
+            available_qty = _available_asset_qty(material_type_id, reserved_assets)
+            covered_qty = min(available_qty, needed_qty_total)
+            if covered_qty > 0:
+                reserved_assets[material_type_id] = float(reserved_assets.get(material_type_id, 0.0) or 0.0) + covered_qty
+                covered_cost = unit_cost * covered_qty
+                own_material_cost_total += covered_cost
+                aggregate_material_cost_total += covered_cost
+                resolved_material_breakdown.append({
+                    "type_id": material_type_id,
+                    "name": material_name,
+                    "source": "inventory",
+                    "quantity": covered_qty,
+                    "needed_qty_total": covered_qty,
+                    "covered_qty": covered_qty,
+                    "missing_qty": 0,
+                    "unit_price": unit_cost,
+                    "total_line_cost": covered_cost,
+                    "volume_m3": unit_volume,
+                    "depth": depth + 1,
+                })
+
+            missing_qty = max(0.0, needed_qty_total - covered_qty)
+            if missing_qty <= 0:
+                continue
+
+            direct_buy_cost = unit_cost * missing_qty
+            chosen_plan = None
+            if material_type_id != out_id and material_type_id not in path and material_type_id in manufacture_owned_output_ids:
+                chosen_plan = _resolve_prerequisite_build(
+                    material_type_id,
+                    missing_qty,
+                    reserved_assets,
+                    depth=depth + 1,
+                    path=path + (out_id,),
+                )
+
+            if chosen_plan and float(chosen_plan.get("resolved_total_cost", 0.0) or 0.0) + 0.01 < direct_buy_cost:
+                aggregate_material_cost_total += float(chosen_plan.get("total_material_cost", 0.0) or 0.0)
+                aggregate_job_cost_total += float(chosen_plan.get("total_job_cost", 0.0) or 0.0)
+                missing_cost += float(chosen_plan.get("missing_cost", 0.0) or 0.0)
+                inbound_total_m3 += float(chosen_plan.get("inbound_total_m3", 0.0) or 0.0)
+                inbound_missing_m3 += float(chosen_plan.get("inbound_missing_m3", 0.0) or 0.0)
+                materials_ready = materials_ready and bool(chosen_plan.get("mats_ready", False))
+                total_duration_secs += int(chosen_plan.get("total_duration_secs") or 0)
+                child_jobs.append(_clone_prerequisite_job(chosen_plan["job"]))
+                resolved_material_breakdown.append({
+                    "type_id": material_type_id,
+                    "name": material_name,
+                    "source": "craft",
+                    "quantity": missing_qty,
+                    "needed_qty_total": missing_qty,
+                    "covered_qty": 0,
+                    "missing_qty": 0,
+                    "unit_price": unit_cost,
+                    "total_line_cost": float(chosen_plan.get("resolved_total_cost", 0.0) or 0.0),
+                    "buy_line_cost": direct_buy_cost,
+                    "saved_vs_buy": max(0.0, direct_buy_cost - float(chosen_plan.get("resolved_total_cost", 0.0) or 0.0)),
+                    "volume_m3": unit_volume,
+                    "depth": depth + 1,
+                    "prerequisite_output_id": material_type_id,
+                    "prerequisite_name": chosen_plan.get("name") or material_name,
+                    "prerequisite_runs": int(chosen_plan.get("run_count") or 0),
+                    "children": list(chosen_plan.get("resolved_material_breakdown") or []),
+                })
+                continue
+
+            own_material_cost_total += direct_buy_cost
+            aggregate_material_cost_total += direct_buy_cost
+            missing_cost += direct_buy_cost
+            inbound_total_m3 += unit_volume * missing_qty
+            inbound_missing_m3 += unit_volume * missing_qty
+            materials_ready = False
+            resolved_material_breakdown.append({
+                "type_id": material_type_id,
+                "name": material_name,
+                "source": "buy",
+                "quantity": missing_qty,
+                "needed_qty_total": missing_qty,
+                "covered_qty": 0,
+                "missing_qty": missing_qty,
+                "unit_price": unit_cost,
+                "total_line_cost": direct_buy_cost,
+                "volume_m3": unit_volume,
+                "depth": depth + 1,
+            })
+
+        resolved_total_cost = aggregate_material_cost_total + aggregate_job_cost_total
+        job = {
+            "name": str(result.get("name") or craftable_blueprints_by_output[out_id].get("name") or f"Type {out_id}"),
+            "output_id": out_id,
+            "required_qty": qty_needed,
+            "produced_qty": run_count * output_qty,
+            "output_qty": output_qty,
+            "run_count": run_count,
+            "duration_secs": _effective_manufacturing_run_secs(result) * run_count,
+            "total_duration_secs": total_duration_secs,
+            "material_cost": own_material_cost_total,
+            "job_cost": own_job_cost_total,
+            "chain_material_cost": aggregate_material_cost_total,
+            "chain_job_cost": aggregate_job_cost_total,
+            "resolved_total_cost": resolved_total_cost,
+            "missing_cost": missing_cost,
+            "mats_ready": materials_ready,
+            "children": child_jobs,
+            "resolved_material_breakdown": resolved_material_breakdown,
+            "job_cost_breakdown": own_job_breakdown_total,
+            "job_cost_breakdown_per_run": own_job_breakdown_per_run,
+            "depth": depth,
+        }
+        return {
+            "name": job["name"],
+            "output_id": out_id,
+            "run_count": run_count,
+            "produced_qty": job["produced_qty"],
+            "duration_secs": job["duration_secs"],
+            "total_duration_secs": total_duration_secs,
+            "total_material_cost": aggregate_material_cost_total,
+            "total_job_cost": aggregate_job_cost_total,
+            "resolved_total_cost": resolved_total_cost,
+            "missing_cost": missing_cost,
+            "inbound_total_m3": inbound_total_m3,
+            "inbound_missing_m3": inbound_missing_m3,
+            "mats_ready": materials_ready,
+            "resolved_material_breakdown": resolved_material_breakdown,
+            "job": job,
+        }
+
+    def _apply_prerequisite_chain(base_item: dict) -> dict:
+        if not base_item.get("material_breakdown"):
+            return base_item
+
+        reserved_assets: dict[int, float] = {}
+        resolved_material_breakdown: list[dict] = []
+        prerequisite_jobs: list[dict] = []
+        adjusted_material_cost = 0.0
+        prerequisite_job_cost_total = 0.0
+        missing_cost = 0.0
+        inbound_total_m3 = 0.0
+        inbound_missing_m3 = 0.0
+        materials_ready = True
+        prerequisite_duration_secs = 0
+        buy_all_material_cost = float(base_item.get("material_cost", 0.0) or 0.0)
+        buy_cost_avoided = 0.0
+
+        for material in base_item.get("material_breakdown") or []:
+            material_type_id = int(material.get("type_id") or 0)
+            if material_type_id <= 0:
+                continue
+            material_name = material.get("name") or f"Type {material_type_id}"
+            needed_qty_total = float(material.get("needed_qty_total") or material.get("quantity") or 0.0)
+            if needed_qty_total <= 0:
+                continue
+
+            unit_cost = _material_unit_buy_cost(material)
+            unit_volume = float(material.get("volume_m3") or _get_volume_m3(material_type_id) or 0.0)
+            available_qty = _available_asset_qty(material_type_id, reserved_assets)
+            covered_qty = min(available_qty, needed_qty_total)
+            if covered_qty > 0:
+                reserved_assets[material_type_id] = float(reserved_assets.get(material_type_id, 0.0) or 0.0) + covered_qty
+                covered_cost = unit_cost * covered_qty
+                adjusted_material_cost += covered_cost
+                resolved_material_breakdown.append({
+                    "type_id": material_type_id,
+                    "name": material_name,
+                    "source": "inventory",
+                    "quantity": covered_qty,
+                    "needed_qty_total": covered_qty,
+                    "covered_qty": covered_qty,
+                    "missing_qty": 0,
+                    "unit_price": unit_cost,
+                    "total_line_cost": covered_cost,
+                    "volume_m3": unit_volume,
+                    "depth": 0,
+                })
+
+            missing_qty = max(0.0, needed_qty_total - covered_qty)
+            if missing_qty <= 0:
+                continue
+
+            direct_buy_cost = unit_cost * missing_qty
+            chosen_plan = None
+            if material_type_id != int(base_item.get("output_id") or 0) and material_type_id in manufacture_owned_output_ids:
+                chosen_plan = _resolve_prerequisite_build(material_type_id, missing_qty, reserved_assets)
+
+            if chosen_plan and float(chosen_plan.get("resolved_total_cost", 0.0) or 0.0) + 0.01 < direct_buy_cost:
+                adjusted_material_cost += float(chosen_plan.get("total_material_cost", 0.0) or 0.0)
+                prerequisite_job_cost_total += float(chosen_plan.get("total_job_cost", 0.0) or 0.0)
+                missing_cost += float(chosen_plan.get("missing_cost", 0.0) or 0.0)
+                inbound_total_m3 += float(chosen_plan.get("inbound_total_m3", 0.0) or 0.0)
+                inbound_missing_m3 += float(chosen_plan.get("inbound_missing_m3", 0.0) or 0.0)
+                materials_ready = materials_ready and bool(chosen_plan.get("mats_ready", False))
+                prerequisite_duration_secs += int(chosen_plan.get("total_duration_secs") or 0)
+                buy_cost_avoided += max(0.0, direct_buy_cost - float(chosen_plan.get("resolved_total_cost", 0.0) or 0.0))
+                prerequisite_jobs.append(_clone_prerequisite_job(chosen_plan["job"]))
+                resolved_material_breakdown.append({
+                    "type_id": material_type_id,
+                    "name": material_name,
+                    "source": "craft",
+                    "quantity": missing_qty,
+                    "needed_qty_total": missing_qty,
+                    "covered_qty": 0,
+                    "missing_qty": 0,
+                    "unit_price": unit_cost,
+                    "total_line_cost": float(chosen_plan.get("resolved_total_cost", 0.0) or 0.0),
+                    "buy_line_cost": direct_buy_cost,
+                    "saved_vs_buy": max(0.0, direct_buy_cost - float(chosen_plan.get("resolved_total_cost", 0.0) or 0.0)),
+                    "volume_m3": unit_volume,
+                    "depth": 0,
+                    "prerequisite_output_id": material_type_id,
+                    "prerequisite_name": chosen_plan.get("name") or material_name,
+                    "prerequisite_runs": int(chosen_plan.get("run_count") or 0),
+                    "children": list(chosen_plan.get("resolved_material_breakdown") or []),
+                })
+                continue
+
+            adjusted_material_cost += direct_buy_cost
+            missing_cost += direct_buy_cost
+            inbound_total_m3 += unit_volume * missing_qty
+            inbound_missing_m3 += unit_volume * missing_qty
+            materials_ready = False
+            resolved_material_breakdown.append({
+                "type_id": material_type_id,
+                "name": material_name,
+                "source": "buy",
+                "quantity": missing_qty,
+                "needed_qty_total": missing_qty,
+                "covered_qty": 0,
+                "missing_qty": missing_qty,
+                "unit_price": unit_cost,
+                "total_line_cost": direct_buy_cost,
+                "volume_m3": unit_volume,
+                "depth": 0,
+            })
+
+        if not prerequisite_jobs:
+            base_item["resolved_material_breakdown"] = resolved_material_breakdown
+            return base_item
+
+        final_job_cost = float(base_item.get("job_cost", 0.0) or 0.0)
+        adjusted_total_job_cost = final_job_cost + prerequisite_job_cost_total
+        gross_revenue = float(base_item.get("gross_revenue", 0.0) or 0.0)
+        sales_tax = float(base_item.get("sales_tax", 0.0) or 0.0)
+        broker_fee = float(base_item.get("broker_fee", 0.0) or 0.0)
+        invention_cost = float(base_item.get("invention_cost", 0.0) or 0.0)
+        adjusted_profit_per_cycle = gross_revenue - adjusted_material_cost - adjusted_total_job_cost - sales_tax - broker_fee - invention_cost
+        previous_profit_per_cycle = float(base_item.get("profit_per_cycle", 0.0) or 0.0)
+        base_runs = max(1.0, float(base_item.get("rec_runs", 1) or 1))
+        adjusted_profit_per_run = adjusted_profit_per_cycle / base_runs
+        profit_scale = 1.0
+        if abs(previous_profit_per_cycle) > 1e-6:
+            profit_scale = adjusted_profit_per_cycle / previous_profit_per_cycle
+
+        base_item.update({
+            "has_prerequisites": True,
+            "prerequisite_jobs": prerequisite_jobs,
+            "prerequisite_duration_secs": prerequisite_duration_secs,
+            "prerequisite_buy_cost_avoided": round(buy_cost_avoided),
+            "flat_material_cost": round(buy_all_material_cost),
+            "resolved_material_cost": round(adjusted_material_cost),
+            "prerequisite_job_cost": round(prerequisite_job_cost_total),
+            "resolved_material_breakdown": resolved_material_breakdown,
+            "material_cost": round(adjusted_material_cost),
+            "material_cost_per_run": round(adjusted_material_cost / base_runs),
+            "job_cost": round(adjusted_total_job_cost),
+            "job_cost_per_run": round(adjusted_total_job_cost / base_runs),
+            "mats_ready": materials_ready,
+            "missing_mats_est_cost": round(missing_cost),
+            "inbound_total_m3": round(inbound_total_m3, 1),
+            "inbound_missing_m3": round(inbound_missing_m3, 1),
+            "profit_per_cycle": round(adjusted_profit_per_cycle),
+            "net_profit": round(adjusted_profit_per_run),
+            "adj_net_profit": round(adjusted_profit_per_run),
+            "time_until_manufactured_secs": prerequisite_duration_secs + int(base_item.get("duration_secs") or 0),
+            "prerequisite_ready_at": now_ts + prerequisite_duration_secs,
+            "chain_total_duration_secs": prerequisite_duration_secs + int(base_item.get("duration_secs") or 0),
+            "chain_profit_per_cycle": round(adjusted_profit_per_cycle),
+            "_selection_score": float(base_item.get("_selection_score", 0.0) or 0.0) * _clamp(profit_scale, 0.25, 1.75),
+        })
+        base_item["timeline_steps"] = [
+            *(base_item.get("timeline_steps") or []),
+            f"Craft {len(prerequisite_jobs)} prerequisite batch{'es' if len(prerequisite_jobs) != 1 else ''}",
+        ]
+        if buy_cost_avoided > 0:
+            base_item["why"] = f"{base_item.get('why', '')} Self-crafting prerequisites saves about {round(buy_cost_avoided):,} ISK versus buying intermediates.".strip()
+        return base_item
+
     _assets = _ASSETS_CACHE.get("assets", {})
 
     def _build_downstream(result: dict) -> dict | None:
@@ -2923,7 +3302,7 @@ def api_job_planner():
         if out_id in corp_manufacture_output_ids:
             ownership.append("corp_bpo")
 
-        return {
+        candidate = {
             "name":              result["name"],
             "output_id":         out_id,
             "blueprint_id":      int(result.get("blueprint_id") or 0) or None,
@@ -3023,6 +3402,14 @@ def api_job_planner():
             "_velocity_factor": round(velocity_factor, 3),
             "_selection_score": selection_score,
         }
+        candidate = _apply_prerequisite_chain(candidate)
+        haul_volume_m3 = float(candidate.get("inbound_missing_m3", 0.0) or 0.0) + float(candidate.get("outbound_volume_m3", 0.0) or 0.0)
+        candidate["haul_volume_m3"] = round(haul_volume_m3, 1)
+        candidate["haul_isk_per_m3"] = round((float(candidate.get("profit_per_cycle", 0.0) or 0.0) / haul_volume_m3), 2) if haul_volume_m3 > 0 else 0.0
+        if candidate.get("has_prerequisites"):
+            candidate["start_at"] = int(candidate.get("prerequisite_ready_at") or now_ts)
+            candidate["manufacture_at"] = int(candidate.get("prerequisite_ready_at") or now_ts)
+        return candidate
 
     downstream_cache: dict[int, dict | None] = {}
 
@@ -3042,6 +3429,7 @@ def api_job_planner():
         copy_time_secs_item = copy_secs_per_run * copy_runs
         downstream_run_secs = max(1.0, float(base_item.get("effective_run_secs") or 0.0) or (float(base_item.get("duration_secs", 0) or 0.0) / max(1.0, float(base_item.get("rec_runs", 1) or 1))))
         downstream_duration_secs = max(1, int(round(downstream_run_secs * copy_runs)))
+        prerequisite_duration_secs = int(base_item.get("prerequisite_duration_secs") or 0)
         copy_job_cost_total, copy_breakdown = _copy_job_cost(results_by_output_id.get(out_id, {}))
         pipeline_factor = _clamp(cycle_seconds / max(cycle_seconds, copy_time_secs_item + downstream_duration_secs), 0.35, 1.0)
         base_profit = float(base_item.get("profit_per_cycle", 0) or 0.0)
@@ -3083,6 +3471,12 @@ def api_job_planner():
         haul_isk_per_m3 = (adjusted_profit / haul_volume_m3) if haul_volume_m3 > 0 else 0.0
         cycle_fit = "fits" if copy_time_secs_item <= int(cycle_seconds * 1.15) else "exceeds"
         candidate = dict(base_item)
+        timeline_steps = [
+            f"Copy {copy_runs} manufacturing runs",
+        ]
+        if prerequisite_duration_secs > 0:
+            timeline_steps.append("Craft prerequisite batches")
+        timeline_steps.append(f"Manufacture {copy_runs} runs when the BPC completes")
         candidate.update({
             "action_type": "copy_first",
             "copy_time_secs": copy_time_secs_item,
@@ -3092,7 +3486,8 @@ def api_job_planner():
             "estimated_copy_secs": copy_time_secs_item,
             "estimated_invent_secs": 0,
             "science_total_secs": copy_time_secs_item,
-            "time_until_manufactured_secs": copy_time_secs_item + downstream_duration_secs,
+            "time_until_manufactured_secs": copy_time_secs_item + prerequisite_duration_secs + downstream_duration_secs,
+            "prerequisite_duration_secs": prerequisite_duration_secs,
             "science_cycle_runs": copy_runs,
             "science_cycle_label": "copy runs",
             "start_at": now_ts,
@@ -3128,10 +3523,7 @@ def api_job_planner():
                 "has_below_min_profit": adjusted_profit < min_profit_per_cycle,
                 "exceeds_cycle": cycle_fit == "exceeds",
             },
-            "timeline_steps": [
-                f"Copy {copy_runs} manufacturing runs",
-                f"Manufacture {copy_runs} runs when the BPC completes",
-            ],
+            "timeline_steps": timeline_steps,
             "why": f"Copy this now to land about {copy_runs} copy run{'s' if copy_runs != 1 else ''} this cycle, so the downstream {base_item['name']} manufacturing batch is ready when you need another slot filler.",
             "max_parallel": max(1, int(bpo_count_by_output.get(out_id, 1) or 1)),
             "source_bpo_count": int(bpo_count_by_output.get(out_id, 0) or 0),
@@ -3251,7 +3643,8 @@ def api_job_planner():
         invent_secs_total = invent_secs_per_attempt * invent_jobs_needed
         science_total_secs = copy_secs_total + invent_secs_total
         downstream_duration_secs = max(1, int(round(downstream_run_secs * expected_runs_covered)))
-        manufacture_ready_at = max(now_ts, int(future_t1_bpc_ready_at or now_ts)) + science_total_secs
+        prerequisite_duration_secs = int(base_item.get("prerequisite_duration_secs") or 0)
+        manufacture_ready_at = max(now_ts, int(future_t1_bpc_ready_at or now_ts)) + science_total_secs + prerequisite_duration_secs
         time_until_manufactured_secs = (manufacture_ready_at - now_ts) + downstream_duration_secs
         pipeline_factor = _clamp(cycle_seconds / max(cycle_seconds, science_total_secs + downstream_duration_secs), 0.25, 1.0)
         base_profit = float(base_item.get("profit_per_cycle", 0) or 0.0)
@@ -3327,6 +3720,8 @@ def api_job_planner():
                 "character_id": str(inv_detail.get("selected_character_id")),
                 "character_name": inv_detail.get("selected_character_name") or f"Char {inv_detail.get('selected_character_id')}",
             }]
+        if prerequisite_duration_secs > 0:
+            timeline_steps.append("Craft prerequisite batches")
         candidate.update({
             "action_type": action_type,
             "t1_blueprint_id": t1_bp_id,
@@ -3360,6 +3755,7 @@ def api_job_planner():
             "estimated_invent_secs": invent_secs_total,
             "science_total_secs": science_total_secs,
             "time_until_manufactured_secs": time_until_manufactured_secs,
+            "prerequisite_duration_secs": prerequisite_duration_secs,
             "future_t1_bpc_ready_at": future_t1_bpc_ready_at or None,
             "future_t1_bpc_job_name": future_t1_bpc_job_name,
             "future_t1_bpc_count": future_t1_bpc_count,
@@ -3465,8 +3861,8 @@ def api_job_planner():
             mfg_item = dict(base_item)
             mfg_item.update({
                 "action_type": "manufacture",
-                "start_at": now_ts,
-                "manufacture_at": now_ts,
+                "start_at": int(base_item.get("prerequisite_ready_at") or now_ts),
+                "manufacture_at": int(base_item.get("prerequisite_ready_at") or now_ts),
                 "max_parallel": max(1, direct_parallel_cap),
                 "rec_id": f"manufacture:{out_id}:1",
             })

@@ -250,6 +250,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
   const riskFlag = isInvention && Boolean(item?.cycle_flags?.success_risky);
   const exceeds = cycleWindowFit === 'exceeds';
   const belowThreshold = !item.passes_profit_filter;
+  const hasPrerequisites = item.has_prerequisites === true;
   const profitM = (profitPerCycle / 1_000_000).toFixed(1);
   const expectedSuccessfulBpcs = Number(item.expected_successful_bpcs || 0);
   const timeUntilManufactured = Number(item.time_until_manufactured_secs || 0);
@@ -412,6 +413,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
           </div>
           <div className="planner-row-flags">
             {!hasSciSlot && <Flag label="NO SLOT" bg="#ff4700" />}
+            {hasPrerequisites && <Flag label="CHAIN" bg="#ffd24d" />}
             {riskFlag && <Flag label={`${Math.round(successChance * 100)}% SUCCESS`} bg="#ffd24d" />}
             {exceeds && <Flag label="EXCEEDS CYCLE" bg="#ff4700" />}
             {isInvention && hasBPC && <Flag label="T1 BPC" bg="#4cff91" />}
@@ -442,6 +444,8 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
               {isInvention && item.inv_output_runs_per_bpc && <DetailRow label="Runs/T2 BPC" value={item.inv_output_runs_per_bpc} />}
               {isInvention && <DetailRow label="Expected successful BPCs" value={expectedSuccessfulBpcs > 0 ? expectedSuccessfulBpcs.toFixed(2) : '—'} />}
               {isInvention && <DetailRow label="Expected runs covered" value={batchRuns} />}
+              {hasPrerequisites && <DetailRow label="Prereq time" value={formatSeconds(item.prerequisite_duration_secs || 0)} />}
+              {hasPrerequisites && <DetailRow label="Self-craft savings" value={fmtISK(item.prerequisite_buy_cost_avoided || 0)} />}
               <DetailRow label="Expected batch profit" value={fmtISK(expectedProfit)} valueColor={expectedProfit >= 0 ? '#4cff91' : 'var(--accent)'} />
               <DetailRow label="Profit margin" value={`${expectedMarginPct.toFixed(1)}%`} valueColor={expectedMarginPct >= 0 ? '#4cff91' : 'var(--accent)'} />
             </div>
@@ -459,6 +463,7 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
                   <DetailRow label="Source BPC runs" value={`${item.source_bpc_total_runs || 0}`} />
                 </>
               )}
+              {hasPrerequisites && <DetailRow label="Chain duration" value={formatSeconds(item.chain_total_duration_secs || item.time_until_manufactured_secs || 0)} />}
             </div>
           </div>
           {(copyStepRows.length > 0 || inventionStepRows.length > 0 || manufacturingStepRows.length > 0) && (
@@ -513,6 +518,18 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
                 />
               )) : Object.entries(datacoreCosts).map(([dc, cost]) => (
                 <DetailRow key={dc} label={dc} value={`${(cost / 1_000_000).toFixed(1)}M`} />
+              ))}
+            </div>
+          )}
+          {hasPrerequisites && Array.isArray(item.prerequisite_jobs) && item.prerequisite_jobs.length > 0 && (
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0d0d0d' }}>
+              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color: '#ffd24d', marginBottom: 4 }}>PREREQUISITES</div>
+              {item.prerequisite_jobs.map((job) => (
+                <DetailRow
+                  key={`${job.output_id}-${job.run_count}-${job.depth || 0}`}
+                  label={job.name}
+                  value={`${job.run_count || 0} runs · ${formatSeconds(job.total_duration_secs || job.duration_secs || 0)} · ${fmtISK(job.resolved_total_cost || 0)}`}
+                />
               ))}
             </div>
           )}

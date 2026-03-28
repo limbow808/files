@@ -11,6 +11,7 @@ to populate crest.db with all EVE manufacturables.
 
 import sqlite3
 import os
+import threading
 
 # ─── Mineral Type IDs (these never change) ───────────────────────────────────
 MINERALS = {
@@ -25,6 +26,8 @@ MINERALS = {
 }
 
 CREST_DB = os.path.join(os.path.dirname(__file__), "crest.db")
+_BLUEPRINT_LOOKUP_CACHE: dict | None = None
+_BLUEPRINT_LOOKUP_LOCK = threading.Lock()
 
 
 # ─── Categories excluded from profit calculations ─────────────────────────────
@@ -217,6 +220,59 @@ def _apply_filters(blueprints: list, category, tech_level, size_class, limit) ->
         and _matches(bp.get("size_class", bp.get("size", "U")), size_class)
     ]
     return out[:limit] if limit else out
+
+
+def load_blueprint_lookup(force_refresh: bool = False) -> dict:
+    """
+    Return cached blueprint lookup tables for planner-side dependency resolution.
+
+    Keys:
+      - blueprints: raw blueprint list from load_blueprints()
+      - by_output_id: output type_id -> blueprint dict
+      - by_blueprint_id: blueprint_id -> blueprint dict
+      - by_material_type_id: material type_id -> list[blueprint dict]
+    """
+    global _BLUEPRINT_LOOKUP_CACHE
+
+    with _BLUEPRINT_LOOKUP_LOCK:
+        if _BLUEPRINT_LOOKUP_CACHE is not None and not force_refresh:
+            return _BLUEPRINT_LOOKUP_CACHE
+
+        blueprints = list(load_blueprints())
+        by_output_id: dict[int, dict] = {}
+        by_blueprint_id: dict[int, dict] = {}
+        by_material_type_id: dict[int, list[dict]] = {}
+
+        for blueprint in blueprints:
+            output_id = int(blueprint.get("output_id") or 0)
+            blueprint_id = int(blueprint.get("blueprint_id") or 0)
+            if output_id > 0 and output_id not in by_output_id:
+                by_output_id[output_id] = blueprint
+            if blueprint_id > 0:
+                by_blueprint_id[blueprint_id] = blueprint
+            for material in blueprint.get("materials") or []:
+                material_type_id = int(material.get("type_id") or 0)
+                if material_type_id <= 0:
+                    continue
+                by_material_type_id.setdefault(material_type_id, []).append(blueprint)
+
+        for material_type_id in list(by_material_type_id.keys()):
+            by_material_type_id[material_type_id] = sorted(
+                by_material_type_id[material_type_id],
+                key=lambda blueprint: (
+                    int(blueprint.get("tech_level") or 1),
+                    str(blueprint.get("name") or ""),
+                    int(blueprint.get("blueprint_id") or 0),
+                ),
+            )
+
+        _BLUEPRINT_LOOKUP_CACHE = {
+            "blueprints": blueprints,
+            "by_output_id": by_output_id,
+            "by_blueprint_id": by_blueprint_id,
+            "by_material_type_id": by_material_type_id,
+        }
+        return _BLUEPRINT_LOOKUP_CACHE
 
 
 # ─────────────────────────────────────────────────────────────────────────────

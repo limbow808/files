@@ -216,10 +216,13 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
   const saturated = !item.passes_saturation_filter;
   const matReady = item.mats_ready !== false;
   const capitalWarn = item.capital_warning === true;
+  const hasPrerequisites = item.has_prerequisites === true;
   const profitM = (profitPerCycle / 1_000_000).toFixed(1);
   const missingMatCost = Number(item.missing_mats_est_cost || 0);
   const batchRuns = Math.max(1, Number(item.rec_runs || item.runs_per_cycle || 1));
-  const materials = (item.material_breakdown || []).map((material) => {
+  const materials = ((item.resolved_material_breakdown && item.resolved_material_breakdown.length > 0)
+    ? item.resolved_material_breakdown
+    : (item.material_breakdown || [])).map((material) => {
     const perRunQty = Number(material.quantity || 0);
     const neededQtyTotal = material.needed_qty_total != null
       ? Number(material.needed_qty_total || 0)
@@ -282,6 +285,7 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
           </div>
           <div className="planner-row-flags">
             {!hasMfgSlot && <Flag label="NO SLOT" bg="#ff4700" />}
+            {hasPrerequisites && <Flag label="CHAIN" bg="#ffd24d" />}
             {item.is_fallback && <Flag label="FILLER" bg="#b0b0b0" />}
             {capitalWarn && <Flag label="CAPITAL" bg="#ffd24d" />}
             {exceeds && <Flag label="EXCEEDS CYCLE" bg="#ff4700" />}
@@ -310,6 +314,8 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
               <DetailRow label="Net profit/run" value={`${((item.net_profit || 0) / 1_000_000).toFixed(1)}M`} />
               <DetailRow label="Material cost" value={fmtISK(item.material_cost || 0)} />
               <DetailRow label="Total job cost" value={jobCost > 0 ? fmtISK(jobCost) : '—'} />
+              {hasPrerequisites && <DetailRow label="Prereq time" value={formatSeconds(item.prerequisite_duration_secs || 0)} />}
+              {hasPrerequisites && <DetailRow label="Self-craft savings" value={fmtISK(item.prerequisite_buy_cost_avoided || 0)} />}
               {item.skill_time_bonus_pct > 0 && <DetailRow label="Skill time bonus" value={`−${item.skill_time_bonus_pct.toFixed(1)}%`} />}
               {item.structure_job_time_bonus_pct > 0 && <DetailRow label="Structure time bonus" value={`−${Number(item.structure_job_time_bonus_pct).toFixed(1)}%`} />}
               {item.me_bonus_pct > 0 && <DetailRow label="ME rig bonus" value={`−${item.me_bonus_pct}% mats`} />}
@@ -325,6 +331,7 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
               <DetailRow label="Blueprint cap" value={`${item.direct_parallel_cap || 0} parallel`} />
               <DetailRow label="Usable BPCs" value={`${item.direct_bpc_usable_parallel || 0}/${item.direct_bpc_count || 0}`} />
               <DetailRow label="BPC runs available" value={`${item.direct_bpc_total_runs || 0}`} />
+              {hasPrerequisites && <DetailRow label="Chain duration" value={formatSeconds(item.chain_total_duration_secs || item.time_until_manufactured_secs || 0)} />}
             </div>
           </div>
           {jc && (
@@ -350,8 +357,8 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
             <DetailSection title={`MATERIALS (${materials.length})`}>
               {materials.map((material) => (
                 <DetailRow
-                  key={material.type_id}
-                  label={material.name || `Type ${material.type_id}`}
+                  key={`${material.type_id}-${material.source || 'base'}-${material.prerequisite_output_id || 0}`}
+                  label={`${material.name || `Type ${material.type_id}`}${material.source === 'craft' ? ' · crafted' : material.source === 'inventory' ? ' · in stock' : material.source === 'buy' ? ' · buy' : ''}`}
                   value={material.have_qty != null && Number(material.have_qty) < Number(material.needed_qty_total || 0)
                     ? `${Number(material.have_qty).toLocaleString('en-US')}/${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`
                     : `${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`}
@@ -366,6 +373,18 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
                   {fmtISK(totalMaterialsCost)}
                 </span>
               </div>
+            </DetailSection>
+          )}
+          {hasPrerequisites && Array.isArray(item.prerequisite_jobs) && item.prerequisite_jobs.length > 0 && (
+            <DetailSection title={`PREREQUISITES (${item.prerequisite_jobs.length})`} color="#ffd24d">
+              {item.prerequisite_jobs.map((job) => (
+                <DetailBlock
+                  key={`${job.output_id}-${job.run_count}-${job.depth || 0}`}
+                  label={job.name}
+                  value={`${job.run_count || 0} runs · ${formatSeconds(job.total_duration_secs || job.duration_secs || 0)} · ${fmtISK(job.resolved_total_cost || 0)}${Array.isArray(job.children) && job.children.length > 0 ? ` · ${job.children.length} child batch${job.children.length === 1 ? '' : 'es'}` : ''}`}
+                  color="#ffd24d"
+                />
+              ))}
             </DetailSection>
           )}
           <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
