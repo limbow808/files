@@ -107,6 +107,8 @@ Go to [developers.eveonline.com](https://developers.eveonline.com) → Create Ne
 - Callback URL: `http://localhost:8080/callback`
 - Scopes (minimum required):
   ```
+  esi-assets.read_corporation_assets.v1
+  esi-wallet.read_corporation_wallets.v1
   esi-wallet.read_character_wallet.v1
   esi-characters.read_blueprints.v1
   esi-industry.read_character_jobs.v1
@@ -115,6 +117,10 @@ Go to [developers.eveonline.com](https://developers.eveonline.com) → Create Ne
   esi-corporations.read_blueprints.v1
   esi-industry.read_corporation_jobs.v1
   ```
+
+If you already created the app before corp-source planning support was added, edit the application in the EVE developer portal and add the new corporation scopes before reconnecting characters. EVE SSO returns `invalid_scope` when CREST requests a scope that is not enabled on the application registration.
+
+Corp roles still matter after login: corp assets and corp blueprints generally require a `Director` character, while corp wallet access requires `Accountant` or `Junior_Accountant`.
 
 **4. Seed the database** (first time only, re-run to update)
 ```bash

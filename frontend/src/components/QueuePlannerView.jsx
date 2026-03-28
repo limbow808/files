@@ -600,82 +600,6 @@ function PlannerKPIBar({ stats }) {
   );
 }
 
-function BlockedRecommendationsPanel({ blockedItems }) {
-  const [isOpen, setIsOpen] = useState(false);
-  if (!blockedItems?.length) return null;
-  return (
-    <div style={{
-      borderTop: '1px solid rgba(255,157,61,0.14)',
-      borderBottom: '1px solid var(--border)',
-      display: 'flex',
-      flexDirection: 'column',
-      flexShrink: 0,
-      background: 'rgba(255,157,61,0.05)',
-    }}>
-      <button
-        onClick={() => setIsOpen(open => !open)}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          padding: '10px 12px', background: 'transparent', border: 'none', cursor: 'pointer',
-          textAlign: 'left', color: 'inherit',
-        }}
-      >
-        <span style={{ fontSize: 10, color: 'var(--dim)', transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.2s', display: 'inline-block' }}>▼</span>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1.2, color: '#ff9d3d' }}>UNLOCKABLE OPPORTUNITIES</span>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: '#000', background: '#ff9d3d', padding: '2px 6px', borderRadius: 2 }}>{blockedItems.length}</span>
-        <div style={{ flex: 1, height: 1, background: 'rgba(255,157,61,0.45)' }} />
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)' }}>LOCKED UPSIDE</span>
-      </button>
-      <div style={{ display: isOpen ? 'flex' : 'none', flexDirection: 'column', gap: 6, padding: '0 12px 12px' }}>
-        {blockedItems.map((item, index) => {
-          const isSkillBlock = item.block_kind === 'skills' || String(item.reason || '').toLowerCase().includes('missing skill');
-          const actionLabel = String(item.action_type || '').replace('_', ' ').toUpperCase();
-          const unlockPath = item.unlock_path || item.reason || 'Missing requirements';
-          const estimatedProfit = Number(item.estimated_profit || 0);
-          return (
-            <div key={item.reason_key || `${item.output_id || item.name}-${index}`} style={{
-              display: 'grid',
-              gridTemplateColumns: '1fr auto',
-              gap: 10,
-              alignItems: 'center',
-              padding: '7px 10px',
-              background: 'rgba(255,255,255,0.03)',
-              border: '1px solid rgba(255,255,255,0.06)',
-              borderRadius: 2,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-                {item.output_id ? (
-                  <img
-                    src={`https://images.evetech.net/types/${item.output_id}/icon?size=32`}
-                    alt=""
-                    style={{ width: 18, height: 18, opacity: 0.9, flexShrink: 0 }}
-                    onError={e => { e.target.style.display = 'none'; }}
-                  />
-                ) : <div style={{ width: 18, height: 18, flexShrink: 0 }} />}
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', minWidth: 0, flexWrap: 'wrap' }}>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 0.7, color: 'var(--text)' }}>{item.name}</span>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 0.5, color: '#ff9d3d' }}>{actionLabel}</span>
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 0.5, color: '#000', background: isSkillBlock ? '#ffd24d' : '#b0b0b0', padding: '2px 5px', borderRadius: 2 }}>
-                      {isSkillBlock ? 'SKILL' : 'ACCESS'}
-                    </span>
-                  </div>
-                  <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--dim)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {unlockPath}
-                  </div>
-                </div>
-              </div>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: estimatedProfit >= 0 ? '#4cff91' : 'var(--accent)', whiteSpace: 'nowrap' }}>
-                {fmtISK(estimatedProfit)}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 // ── Wallet bar ───────────────────────────────────────────────────────────────
 function WalletBar({ walletTotal, lockedIsk, cycleConfig, lastRefresh }) {
   const pct   = walletTotal > 0 ? Math.min(100, (lockedIsk / walletTotal) * 100) : 0;
@@ -710,6 +634,37 @@ function WalletBar({ walletTotal, lockedIsk, cycleConfig, lastRefresh }) {
   );
 }
 
+function PlannerSourceBar({ inventorySource, walletSource }) {
+  if (!inventorySource && !walletSource) return null;
+  const inventoryMode = inventorySource?.mode === 'corp'
+    ? `${String(inventorySource?.corporation_name || 'CORP').toUpperCase()}${inventorySource?.division_flag ? ` · ${String(inventorySource.division_flag).toUpperCase()}` : ''}`
+    : 'PERSONAL / LEGACY';
+  const walletMode = walletSource?.mode === 'corp'
+    ? String(walletSource?.corporation_name || 'CORP').toUpperCase()
+    : 'PERSONAL';
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 4,
+      padding: '8px 12px', borderBottom: '1px solid var(--border)',
+      background: 'rgba(255,157,61,0.05)',
+    }}>
+      <div style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 0.8, color: 'var(--dim)' }}>
+        PLANNER SOURCE · INVENTORY {inventoryMode} · WALLET {walletMode}
+      </div>
+      {inventorySource?.warning && (
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--accent)', letterSpacing: 0.3 }}>
+          INVENTORY WARNING: {inventorySource.warning}
+        </div>
+      )}
+      {walletSource?.warning && (
+        <div style={{ fontFamily: 'var(--mono)', fontSize: 10, color: 'var(--accent)', letterSpacing: 0.3 }}>
+          WALLET WARNING: {walletSource.warning}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PlannerGroupToggle({ value, onChange }) {
   return (
     <div className="planner-view-toggle">
@@ -733,8 +688,8 @@ function PlannerGroupToggle({ value, onChange }) {
 
 // Small control bar above the board. Keep board-level controls grouped here.
 function PlannerFilterBar({
-  onBlueprintRefresh,
-  blueprintRefreshLoading,
+  onPlannerRefresh,
+  plannerRefreshLoading,
   groupMode,
   onGroupModeChange,
   showIdle,
@@ -764,13 +719,13 @@ function PlannerFilterBar({
         </button>
         <button
           type="button"
-          onClick={onBlueprintRefresh}
-          disabled={blueprintRefreshLoading}
+          onClick={onPlannerRefresh}
+          disabled={plannerRefreshLoading}
           className="planner-refresh-button"
-          style={blueprintRefreshLoading ? { background: 'rgba(77, 166, 255, 0.14)', color: '#4da6ff' } : undefined}
-          title="Force-refresh personal and corp blueprints from ESI, then rebuild planner recommendations"
+          style={plannerRefreshLoading ? { background: 'rgba(77, 166, 255, 0.14)', color: '#4da6ff' } : undefined}
+          title="Force-refresh planner state from ESI, including blueprints, assets, jobs, orders, corp inventory context, and dependent recommendations"
         >
-          {blueprintRefreshLoading ? 'REFRESHING BPS...' : 'REFRESH ESI BLUEPRINTS'}
+          {plannerRefreshLoading ? 'REFRESHING PLANNER...' : 'REFRESH PLANNER'}
         </button>
       </div>
     </div>
@@ -809,7 +764,8 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const [showIdle, setShowIdle] = useState(() => readPlannerShowIdle());
   const [showFuture, setShowFuture] = useState(() => readPlannerShowFuture());
   const [plannerNow, setPlannerNow] = useState(() => Math.floor(Date.now() / 1000));
-  const [blueprintRefreshLoading, setBlueprintRefreshLoading] = useState(false);
+  const [plannerRefreshLoading, setPlannerRefreshLoading] = useState(false);
+  const plannerRefreshStartedRef = useRef(false);
   const jobsSignalRef = useRef(null);
   const jobsPollBusyRef = useRef(false);
   const cycleConfig = appSettings;
@@ -843,6 +799,9 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
     });
     if (cycleConfig.facilityTaxRate !== '') params.set('facility_tax_rate', String(parseFloat(cycleConfig.facilityTaxRate) / 100));
     if (cycleConfig.rigBonusMfg !== '') params.set('rig_bonus_mfg', String(cycleConfig.rigBonusMfg));
+    if (cycleConfig.operations_corp_id) params.set('operations_corp_id', String(cycleConfig.operations_corp_id));
+    if (cycleConfig.corp_input_division) params.set('corp_input_division', String(cycleConfig.corp_input_division));
+    if (cycleConfig.corp_output_division) params.set('corp_output_division', String(cycleConfig.corp_output_division));
     return params.toString();
   }, [cycleConfig, plannerStructureType]);
 
@@ -856,7 +815,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
     [effectiveRefreshNonce, queryParams]
   );
 
-  const { data: tpData, loading: tpLoading, error: tpError, refetch } =
+  const { data: tpData, loading: tpLoading, error: tpError, stale: tpStale, refetch } =
     useApi(plannerUrl, [plannerUrl]);
   const { data: calcData } = useApi(`${API}/api/calculator?${calcQueryParams}`, [calcQueryParams]);
 
@@ -893,7 +852,7 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   useEffect(() => {
     setCheckedIds(new Set());
     setExpandedId(null);
-  }, [plannerStructureType, cycleConfig.cycle_duration_hours, cycleConfig.structureJobTimeBonusPct, cycleConfig.haul_capacity_m3, cycleConfig.target_isk_per_m3, cycleConfig.min_profit_per_cycle, cycleConfig.include_below_threshold_items, cycleConfig.max_sell_days_tolerance, cycleConfig.count_corp_original_blueprints_as_own, cycleConfig.weight_by_velocity, cycleConfig.rig_1, cycleConfig.rig_2]);
+  }, [plannerStructureType, cycleConfig.cycle_duration_hours, cycleConfig.structureJobTimeBonusPct, cycleConfig.haul_capacity_m3, cycleConfig.target_isk_per_m3, cycleConfig.min_profit_per_cycle, cycleConfig.include_below_threshold_items, cycleConfig.max_sell_days_tolerance, cycleConfig.count_corp_original_blueprints_as_own, cycleConfig.weight_by_velocity, cycleConfig.rig_1, cycleConfig.rig_2, cycleConfig.operations_corp_id, cycleConfig.corp_input_division, cycleConfig.corp_output_division]);
 
   const items        = tpData?.items || [];
   const maxJobs      = tpData?.max_jobs ?? 1;
@@ -903,8 +862,9 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const runningScience = tpData?.running_science ?? 0;
   const freeScience  = tpData?.free_science ?? 0;
   const walletTotal  = tpData?.wallet_total_isk ?? 0;
-  const blockedItems = tpData?.blocked_items || [];
   const characterSlots = tpData?.character_slots || { science: {}, manufacturing: {} };
+  const inventorySource = tpData?.inventory_source || null;
+  const walletSource = tpData?.wallet_source || null;
 
   // These lists are the actual payloads rendered by the two planner columns.
   const sciItems = useMemo(() =>
@@ -988,24 +948,23 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
     return () => clearTimeout(retryId);
   }, [tpData?.status, refetch]);
 
-  const handleBlueprintRefresh = useCallback(async () => {
-    if (blueprintRefreshLoading) return;
+  const handlePlannerRefresh = useCallback(() => {
+    if (plannerRefreshLoading) return;
+    setPlannerRefreshLoading(true);
+    plannerRefreshStartedRef.current = false;
+    setPlannerRefreshNonce(value => value + 1);
+  }, [plannerRefreshLoading]);
 
-    setBlueprintRefreshLoading(true);
-
-    try {
-      const res = await fetch(`${API}/api/blueprints/esi?force=1`, {
-        signal: AbortSignal.timeout(120000),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await res.json();
-      setPlannerRefreshNonce(value => value + 1);
-    } catch {
-      // Leave the current planner data intact and allow manual retry.
-    } finally {
-      setBlueprintRefreshLoading(false);
+  useEffect(() => {
+    if (!plannerRefreshLoading) return;
+    if (tpLoading || tpStale) {
+      plannerRefreshStartedRef.current = true;
+      return;
     }
-  }, [blueprintRefreshLoading]);
+    if (!plannerRefreshStartedRef.current) return;
+    setPlannerRefreshLoading(false);
+    plannerRefreshStartedRef.current = false;
+  }, [plannerRefreshLoading, tpLoading, tpStale, tpData, tpError]);
 
   const calcMap = useMemo(() => {
     const m = {};
@@ -1123,10 +1082,12 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
       {/* Wallet and cycle metadata strip */}
       {walletTotal > 0 && <WalletBar walletTotal={walletTotal} lockedIsk={lockedIsk} cycleConfig={cycleConfig} lastRefresh={lastRefresh} />}
 
+      <PlannerSourceBar inventorySource={inventorySource} walletSource={walletSource} />
+
       {/* Board controls: grouping mode and blueprint refresh */}
       <PlannerFilterBar
-        onBlueprintRefresh={handleBlueprintRefresh}
-        blueprintRefreshLoading={blueprintRefreshLoading}
+        onPlannerRefresh={handlePlannerRefresh}
+        plannerRefreshLoading={plannerRefreshLoading}
         groupMode={groupMode}
         onGroupModeChange={setGroupMode}
         showIdle={showIdle}
@@ -1184,9 +1145,6 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
         </div>
       </div>
 
-      {/* Bottom accordion for profitable jobs blocked by missing access/skills. */}
-      <BlockedRecommendationsPanel blockedItems={blockedItems} />
-
       {/* Sticky multibuy bar when items are checked */}
       {checkedIds.size > 0 && (
         <MultibuyBar
@@ -1200,3 +1158,4 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
     </div>
   );
 }
+

@@ -68,6 +68,21 @@ def _init_db():
             fetched_at       INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS market_history_daily (
+            type_id        INTEGER NOT NULL,
+            date           TEXT NOT NULL,
+            average_price  REAL,
+            highest_price  REAL,
+            lowest_price   REAL,
+            order_count    INTEGER,
+            volume         INTEGER,
+            fetched_at     INTEGER NOT NULL,
+            PRIMARY KEY (type_id, date)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_market_history_daily_type_date
+            ON market_history_daily (type_id, date);
+
         CREATE TABLE IF NOT EXISTS market_reference_prices (
             type_id         INTEGER PRIMARY KEY,
             adjusted_price  REAL,
@@ -293,6 +308,67 @@ def _ensure_reference_prices_fresh_sync():
 
 
 # ─── Volume history ───────────────────────────────────────────────────────────
+def _fetch_market_history_rows(type_id: int) -> tuple[list[dict], float | None]:
+    """Fetch full ESI market history for one type, cache daily rows, and return the 7d avg volume."""
+    try:
+        _url = f"{ESI_BASE}/markets/{REGION_THE_FORGE}/history/?type_id={type_id}"
+        _req = _urllib_req.Request(_url, headers={'User-Agent': 'CREST-Dashboard/2.0'})
+        with _urllib_req.urlopen(_req, timeout=10) as _r:
+            hist = _json.loads(_r.read())
+    except Exception:
+        return [], None
+
+    rows: list[dict] = []
+    if hist and isinstance(hist, list):
+        for item in hist:
+            rows.append({
+                "date": item.get("date"),
+                "average": item.get("average"),
+                "highest": item.get("highest"),
+                "lowest": item.get("lowest"),
+                "order_count": item.get("order_count"),
+                "volume": item.get("volume"),
+            })
+        rows.sort(key=lambda item: item.get("date") or "")
+
+    recent = rows[-7:]
+    avg_vol = mean(int(item.get("volume", 0) or 0) for item in recent) if recent else 0.0
+    now = int(time.time())
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    if rows:
+        cur.executemany(
+            """
+            INSERT OR REPLACE INTO market_history_daily
+              (type_id, date, average_price, highest_price, lowest_price, order_count, volume, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    type_id,
+                    item.get("date"),
+                    item.get("average"),
+                    item.get("highest"),
+                    item.get("lowest"),
+                    item.get("order_count"),
+                    item.get("volume"),
+                    now,
+                )
+                for item in rows
+                if item.get("date")
+            ],
+        )
+    cur.execute(
+        "INSERT OR REPLACE INTO market_history (type_id, avg_daily_volume, fetched_at) VALUES (?,?,?)",
+        (type_id, avg_vol, now),
+    )
+    conn.commit()
+    conn.close()
+
+    return rows, avg_vol
+
+
 def _get_avg_volume(type_id: int) -> float | None:
     """
     Get 7-day average daily volume from local cache,
@@ -307,32 +383,56 @@ def _get_avg_volume(type_id: int) -> float | None:
     if row and (time.time() - row["fetched_at"]) < HISTORY_TTL:
         return row["avg_daily_volume"]
 
-    # Fetch from ESI (sync urllib — keeps volume history simple, low-frequency)
-    try:
-        import json as _json
-        _url = f"{ESI_BASE}/markets/{REGION_THE_FORGE}/history/?type_id={type_id}"
-        _req = _urllib_req.Request(_url, headers={'User-Agent': 'CREST-Dashboard/2.0'})
-        with _urllib_req.urlopen(_req, timeout=10) as _r:
-            hist = _json.loads(_r.read())
-        if hist and isinstance(hist, list):
-            recent = sorted(hist, key=lambda x: x["date"], reverse=True)[:7]
-            avg_vol = mean(int(d.get("volume", 0)) for d in recent)
-        else:
-            avg_vol = 0.0
-    except Exception:
-        avg_vol = None
+    _, avg_vol = _fetch_market_history_rows(type_id)
+    return avg_vol
 
-    # Cache it
+
+def get_market_history_series(type_id: int, days: int = 90) -> list[dict]:
+    """Return cached daily market history rows for one type, refreshing from ESI when stale."""
+    type_id = int(type_id or 0)
+    if type_id <= 0:
+        return []
+
+    days = max(1, min(int(days or 90), 365))
     conn = _get_conn()
-    cur  = conn.cursor()
+    cur = conn.cursor()
     cur.execute(
-        "INSERT OR REPLACE INTO market_history (type_id, avg_daily_volume, fetched_at) VALUES (?,?,?)",
-        (type_id, avg_vol, int(time.time()))
+        "SELECT COUNT(*) AS n, MAX(fetched_at) AS fetched_at FROM market_history_daily WHERE type_id=?",
+        (type_id,),
     )
-    conn.commit()
+    meta = cur.fetchone()
     conn.close()
 
-    return avg_vol
+    count = int((meta["n"] if meta else 0) or 0)
+    fetched_at = float((meta["fetched_at"] if meta else 0) or 0)
+    needs_refresh = count < min(days, 30) or (time.time() - fetched_at) >= HISTORY_TTL
+    if needs_refresh:
+        _fetch_market_history_rows(type_id)
+
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT date, average_price, highest_price, lowest_price, order_count, volume
+        FROM market_history_daily
+        WHERE type_id=?
+        ORDER BY date ASC
+        """,
+        (type_id,),
+    )
+    rows = [
+        {
+            "date": row["date"],
+            "average": row["average_price"],
+            "highest": row["highest_price"],
+            "lowest": row["lowest_price"],
+            "order_count": row["order_count"],
+            "volume": row["volume"],
+        }
+        for row in cur.fetchall()
+    ]
+    conn.close()
+    return rows[-days:]
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────

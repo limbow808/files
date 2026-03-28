@@ -6,11 +6,14 @@ import { fmtISK } from '../utils/fmt';
 import { API } from '../App';
 import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/appSettings';
 
-export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTINGS }) {
+export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTINGS, onSaveSettings }) {
   const [goal, setGoal] = useState('balanced');
   const [hub, setHub] = useState('Jita');
   const [minValue, setMinValue] = useState('1000000');
   const plannerStructureType = facilityToPlannerStructureType(appSettings?.facility);
+  const operationsCorpId = String(appSettings?.operations_corp_id || '');
+  const corpInputDivision = String(appSettings?.corp_input_division || '');
+  const corpOutputDivision = String(appSettings?.corp_output_division || '');
 
   const query = useMemo(() => {
     const params = new URLSearchParams({
@@ -19,8 +22,10 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
       limit: '30',
       min_total_value: minValue || '0',
     });
+    if (operationsCorpId) params.set('operations_corp_id', operationsCorpId);
+    if (corpOutputDivision) params.set('corp_output_division', corpOutputDivision);
     return `${API}/api/haul/sell-recommendations?${params.toString()}`;
-  }, [goal, hub, minValue]);
+  }, [corpOutputDivision, goal, hub, minValue, operationsCorpId]);
 
   const plannerQuery = useMemo(() => {
     const params = new URLSearchParams({
@@ -40,11 +45,20 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
     });
     if (appSettings?.facilityTaxRate !== '') params.set('facility_tax_rate', String(parseFloat(appSettings.facilityTaxRate) / 100));
     if (appSettings?.rigBonusMfg !== '') params.set('rig_bonus_mfg', String(appSettings.rigBonusMfg));
+    if (operationsCorpId) params.set('operations_corp_id', operationsCorpId);
+    if (corpInputDivision) params.set('corp_input_division', corpInputDivision);
+    if (corpOutputDivision) params.set('corp_output_division', corpOutputDivision);
     return `${API}/api/job-planner?${params.toString()}`;
-  }, [appSettings, plannerStructureType]);
+  }, [appSettings, corpInputDivision, corpOutputDivision, operationsCorpId, plannerStructureType]);
 
   const { data, loading, error, stale, refetch } = useApi(query, [query]);
   const { data: plannerData } = useApi(plannerQuery, [plannerQuery]);
+  const {
+    data: corpContext,
+    loading: corpContextLoading,
+    stale: corpContextStale,
+    refetch: refetchCorpContext,
+  } = useApi(`${API}/api/corp-context`, []);
 
   const items = data?.items || [];
   const summary = data?.summary || {};
@@ -52,6 +66,17 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
   const plannerItems = plannerData?.items || [];
   const plannerSciItems = plannerItems.filter(item => ['copy_first', 'copy_then_invent', 'invent_first'].includes(item.action_type));
   const plannerMfgItems = plannerItems.filter(item => item.action_type === 'manufacture');
+  const haulInventorySource = data?.inventory_source || null;
+  const plannerInventorySource = plannerData?.inventory_source || null;
+  const plannerWalletSource = plannerData?.wallet_source || null;
+  const corporations = corpContext?.corporations || [];
+  const selectedCorp = corporations.find(corp => String(corp.corporation_id) === operationsCorpId) || null;
+  const divisionOptions = selectedCorp?.available_divisions || [];
+  const corpWarnings = corpContext?.warnings || [];
+
+  function updateSettings(patch) {
+    onSaveSettings?.({ ...appSettings, ...patch });
+  }
 
   return (
     <div className="calc-page" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -119,6 +144,99 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
             {loading ? 'REFRESHING' : 'REFRESH'}
           </button>
         </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--border)', background: 'rgba(255,255,255,0.02)' }}>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
+          OPERATIONS CORP
+          <select
+            value={operationsCorpId}
+            onChange={(event) => updateSettings({
+              operations_corp_id: event.target.value,
+              corp_input_division: '',
+              corp_output_division: '',
+            })}
+            style={controlStyle}
+          >
+            <option value="">PERSONAL / LEGACY ASSETS</option>
+            {corporations.map((corp) => (
+              <option key={corp.corporation_id} value={corp.corporation_id}>
+                {`${String(corp.corporation_name || '').toUpperCase()}${corp.operations_ready ? '' : ' · NO CORP ASSET ACCESS'}`}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
+          INPUT HANGAR
+          <select
+            value={corpInputDivision}
+            disabled={!operationsCorpId}
+            onChange={(event) => updateSettings({ corp_input_division: event.target.value })}
+            style={controlStyle}
+          >
+            <option value="">{operationsCorpId ? 'SELECT INPUT HANGAR' : 'SELECT OPERATIONS CORP FIRST'}</option>
+            {divisionOptions.map((division) => (
+              <option key={division.flag} value={division.flag}>
+                {`${String(division.label || division.flag).toUpperCase()} · ${division.item_count || 0} ITEMS`}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
+          OUTPUT HANGAR
+          <select
+            value={corpOutputDivision}
+            disabled={!operationsCorpId}
+            onChange={(event) => updateSettings({ corp_output_division: event.target.value })}
+            style={controlStyle}
+          >
+            <option value="">{operationsCorpId ? 'SELECT OUTPUT HANGAR' : 'SELECT OPERATIONS CORP FIRST'}</option>
+            {divisionOptions.map((division) => (
+              <option key={division.flag} value={division.flag}>
+                {`${String(division.label || division.flag).toUpperCase()} · ${division.item_count || 0} ITEMS`}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, justifyContent: 'flex-end' }}>
+          <button
+            onClick={refetchCorpContext}
+            style={{ ...controlStyle, cursor: 'pointer', textAlign: 'center' }}
+          >
+            {corpContextLoading || corpContextStale ? 'REFRESHING CORP ACCESS' : 'REFRESH CORP ACCESS'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ padding: '8px 14px 10px', borderBottom: '1px solid var(--border)', background: 'rgba(255,157,61,0.05)', display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
+          {operationsCorpId
+            ? `OPERATIONS SOURCE · ${String(selectedCorp?.corporation_name || haulInventorySource?.corporation_name || 'UNKNOWN CORP').toUpperCase()}${corpInputDivision ? ` · INPUT ${corpInputDivision}` : ''}${corpOutputDivision ? ` · OUTPUT ${corpOutputDivision}` : ''}`
+            : 'OPERATIONS SOURCE · PERSONAL / LEGACY ASSET MODE'}
+        </div>
+        {haulInventorySource?.warning && (
+          <div style={{ fontSize: 10, color: 'var(--accent)', letterSpacing: 0.4 }}>
+            HAUL SOURCE WARNING: {haulInventorySource.warning}
+          </div>
+        )}
+        {plannerInventorySource?.warning && (
+          <div style={{ fontSize: 10, color: 'var(--accent)', letterSpacing: 0.4 }}>
+            PLANNER SOURCE WARNING: {plannerInventorySource.warning}
+          </div>
+        )}
+        {plannerWalletSource?.warning && (
+          <div style={{ fontSize: 10, color: 'var(--accent)', letterSpacing: 0.4 }}>
+            WALLET WARNING: {plannerWalletSource.warning}
+          </div>
+        )}
+        {corpWarnings.map((warning) => (
+          <div key={warning} style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: 0.4 }}>
+            {warning}
+          </div>
+        ))}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--border)', background: 'linear-gradient(180deg, rgba(255,71,0,0.08), rgba(255,71,0,0))' }}>

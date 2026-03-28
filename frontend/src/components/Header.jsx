@@ -11,7 +11,9 @@ const TAB_GROUP = {
   MANUFACTURING:     'INDUSTRY',
   RESEARCH:          'INDUSTRY',
   INVENTION:         'INDUSTRY',
-  BLUEPRINTS:        'INDUSTRY',
+  BLUEPRINTS:        'TOOLS',
+  OPPORTUNITIES:     'TOOLS',
+  MARKET_PROGNOSIS:  'TOOLS',
   REVENUE:           'MARKET',
   ORDERS:            'MARKET',
   MINERAL_PRICES:    'MARKET',
@@ -38,10 +40,18 @@ const DROPDOWNS = {
         { id: 'INVENTION',     label: 'Invention'     },
       ],
     },
+  ],
+  TOOLS: [
     {
-      title: 'Blueprints',
+      title: 'Opportunities',
       items: [
-        { id: 'BLUEPRINTS', label: 'Blueprints' },
+        { id: 'OPPORTUNITIES', label: 'Opportunities' },
+      ],
+    },
+    {
+      title: 'Investment',
+      items: [
+        { id: 'MARKET_PROGNOSIS', label: 'Market Prognosis' },
       ],
     },
   ],
@@ -242,7 +252,7 @@ export default memo(function Header({ online, activeTab, onTabChange, onRefresh,
 
         {/* Center: Nav */}
         <div className="nav-bar">
-          {['INDUSTRY', 'MARKET', 'LOGISTICS', 'SETTINGS'].map(group => (
+          {['INDUSTRY', 'TOOLS', 'MARKET', 'LOGISTICS', 'SETTINGS'].map(group => (
             <NavDropdown
               key={group}
               group={group}

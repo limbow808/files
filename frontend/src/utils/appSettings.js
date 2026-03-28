@@ -36,6 +36,9 @@ export const DEFAULT_APP_SETTINGS = {
   weight_by_velocity: true,
   rig_1: 'none',
   rig_2: 'none',
+  operations_corp_id: '',
+  corp_input_division: '',
+  corp_output_division: '',
 };
 
 const STORAGE_KEY = 'crest_app_settings';

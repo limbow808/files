@@ -63,14 +63,45 @@ TOKEN_FILE    = os.path.join(os.path.dirname(__file__), "esi_token.json")
 
 SCOPES = " ".join([
     "esi-assets.read_assets.v1",
+    "esi-assets.read_corporation_assets.v1",
     "esi-wallet.read_character_wallet.v1",
+    "esi-wallet.read_corporation_wallets.v1",
     "esi-industry.read_character_jobs.v1",
     "esi-industry.read_character_mining.v1",
     "esi-industry.read_corporation_jobs.v1",
     "esi-characters.read_blueprints.v1",
+    "esi-corporations.read_blueprints.v1",
     "esi-skills.read_skills.v1",
     "esi-markets.read_character_orders.v1",
 ])
+
+
+def _format_sso_error(error: str | None, description: str | None = None) -> str:
+    error_code = str(error or "unknown").strip() or "unknown"
+    detail = str(description or "").strip()
+    if error_code == "invalid_scope":
+        requested_scope = None
+        for scope_name in (
+            "esi-wallet.read_corporation_wallets.v1",
+            "esi-assets.read_corporation_assets.v1",
+            "esi-corporations.read_blueprints.v1",
+            "esi-industry.read_corporation_jobs.v1",
+        ):
+            if scope_name in detail:
+                requested_scope = scope_name
+                break
+        if requested_scope:
+            guidance = (
+                f"Enable {requested_scope} on your EVE developer app at developers.eveonline.com, "
+                "save the application, then retry the login."
+            )
+        else:
+            guidance = (
+                "Enable the requested scope on your EVE developer app at developers.eveonline.com, "
+                "save the application, then retry the login."
+            )
+        return f"{error_code}: {detail}. {guidance}" if detail else f"{error_code}. {guidance}"
+    return f"{error_code}: {detail}" if detail else error_code
 
 # ─── OAuth2 callback server ───────────────────────────────────────────────────
 class _CallbackHandler(BaseHTTPRequestHandler):
@@ -80,6 +111,7 @@ class _CallbackHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             code     = params.get("code",  [None])[0]
             error    = params.get("error", [None])[0]
+            error_description = params.get("error_description", [None])[0]
             returned_state = params.get("state", [None])[0]
 
             # Verify state matches to prevent CSRF
@@ -101,10 +133,10 @@ class _CallbackHandler(BaseHTTPRequestHandler):
                 )
             else:
                 self.server.auth_code = None
-                self.server.auth_error = error
+                self.server.auth_error = _format_sso_error(error, error_description)
                 self.send_response(400)
                 self.end_headers()
-                self.wfile.write(b"Authentication failed: " + (error or "unknown").encode())
+                self.wfile.write(("Authentication failed: " + self.server.auth_error).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -176,9 +208,12 @@ def _exchange_code(code: str) -> dict:
     )
     if not resp.ok:
         try:
-            print("EVE error:", resp.json())
-        except Exception:
+            payload = resp.json()
+        except ValueError:
             print("EVE raw:", resp.text[:300])
+        else:
+            print("EVE error:", payload)
+            raise RuntimeError(_format_sso_error(payload.get("error"), payload.get("error_description")))
     resp.raise_for_status()
     token = resp.json()
     token["obtained_at"] = int(time.time())
@@ -191,6 +226,12 @@ def _do_refresh(refresh_tok: str) -> dict:
         headers=_auth_header(),
         data={"grant_type": "refresh_token", "refresh_token": refresh_tok},
     )
+    if not resp.ok:
+        try:
+            payload = resp.json()
+            raise RuntimeError(_format_sso_error(payload.get("error"), payload.get("error_description")))
+        except ValueError:
+            pass
     resp.raise_for_status()
     token = resp.json()
     token["obtained_at"] = int(time.time())

@@ -620,6 +620,15 @@ def _unsubscribe_progress(cache_key: str, q: _queue.Queue):
 _WALLET_CACHE: float = 0.0
 _WALLET_CACHE_TS: float = 0
 _WALLET_CACHE_TTL = 60  # 1 min
+_CHAR_CORP_CACHE: dict[str, dict] = {}
+_CHAR_CORP_CACHE_TS: float = 0
+_CHAR_CORP_TTL = 300
+_CORP_SOURCE_CACHE: dict[int, dict] = {}
+_CORP_SOURCE_TTL = 300
+_CORP_CONTEXT_CACHE: dict = {}
+_CORP_CONTEXT_CACHE_TS: float = 0
+_CORP_CONTEXT_TTL = 300
+_CORP_DIVISION_FLAGS = tuple(f"CorpSAG{i}" for i in range(1, 8))
 
 def _get_wallet() -> float:
     """Fetch combined wallet balance across ALL authenticated characters (parallel)."""
@@ -650,6 +659,446 @@ def _get_wallet() -> float:
         return total
     except Exception:
         return 0.0
+
+
+def _normalize_corp_division_flag(value) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    compact = raw.replace(" ", "").replace("_", "")
+    upper = compact.upper()
+    if upper.startswith("CORPSAG"):
+        suffix = upper[7:]
+    elif upper.startswith("SAG"):
+        suffix = upper[3:]
+    elif upper.startswith("DIVISION"):
+        suffix = upper[8:]
+    else:
+        suffix = upper
+    if suffix.isdigit():
+        idx = int(suffix)
+        if 1 <= idx <= 7:
+            return f"CorpSAG{idx}"
+    return raw if raw in _CORP_DIVISION_FLAGS else None
+
+
+def _corp_division_label(flag: str | None) -> str:
+    normalized = _normalize_corp_division_flag(flag)
+    if not normalized:
+        return "Unknown Division"
+    return f"Hangar {normalized[-1]} ({normalized})"
+
+
+def _resolve_type_names(type_ids: list[int]) -> dict[int, str]:
+    if not type_ids:
+        return {}
+    unique_type_ids = sorted({int(type_id) for type_id in type_ids if int(type_id or 0) > 0})
+    if not unique_type_ids:
+        return {}
+
+    names: dict[int, str] = {}
+    try:
+        import sqlite3 as _sql
+
+        conn = _sql.connect("crest.db")
+        placeholders = ",".join("?" * len(unique_type_ids))
+        rows = conn.execute(
+            f"SELECT output_id, output_name FROM blueprints WHERE output_id IN ({placeholders})",
+            unique_type_ids,
+        ).fetchall()
+        conn.close()
+        for type_id, name in rows:
+            names[int(type_id)] = name
+    except Exception:
+        pass
+
+    missing_ids = [type_id for type_id in unique_type_ids if type_id not in names]
+    if missing_ids:
+        try:
+            for start in range(0, len(missing_ids), 1000):
+                chunk = missing_ids[start:start + 1000]
+                resp = requests.post(
+                    "https://esi.evetech.net/latest/universe/names/",
+                    json=chunk,
+                    timeout=10,
+                )
+                if resp.ok:
+                    for item in resp.json() or []:
+                        item_id = int(item.get("id") or 0)
+                        if item_id > 0:
+                            names[item_id] = item.get("name") or f"Type {item_id}"
+        except Exception:
+            pass
+
+    return names
+
+
+def _get_character_corporations(force_refresh: bool = False) -> dict[str, dict]:
+    global _CHAR_CORP_CACHE, _CHAR_CORP_CACHE_TS
+    if not force_refresh and _CHAR_CORP_CACHE and (time.time() - _CHAR_CORP_CACHE_TS) < _CHAR_CORP_TTL:
+        return copy.deepcopy(_CHAR_CORP_CACHE)
+
+    try:
+        from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor
+
+        char_records = load_characters()
+        auth_headers = get_all_auth_headers()
+        memberships: dict[str, dict] = {}
+
+        def _fetch_membership(cid, _headers):
+            char_id = str(cid)
+            char_name = char_records.get(char_id, {}).get("character_name", f"Char {char_id}")
+            corporation_id = None
+            corporation_name = None
+            try:
+                char_resp = requests.get(
+                    f"https://esi.evetech.net/latest/characters/{char_id}/",
+                    timeout=10,
+                )
+                if char_resp.ok:
+                    corporation_id = int(char_resp.json().get("corporation_id") or 0) or None
+            except Exception:
+                corporation_id = None
+            if corporation_id:
+                try:
+                    corp_resp = requests.get(
+                        f"https://esi.evetech.net/latest/corporations/{corporation_id}/",
+                        timeout=10,
+                    )
+                    if corp_resp.ok:
+                        corporation_name = corp_resp.json().get("name") or f"Corp {corporation_id}"
+                except Exception:
+                    corporation_name = f"Corp {corporation_id}"
+            return char_id, {
+                "character_id": char_id,
+                "character_name": char_name,
+                "corporation_id": corporation_id,
+                "corporation_name": corporation_name,
+            }
+
+        if auth_headers:
+            with ThreadPoolExecutor(max_workers=max(1, len(auth_headers))) as pool:
+                for char_id, membership in pool.map(lambda item: _fetch_membership(*item), auth_headers):
+                    memberships[char_id] = membership
+
+        _CHAR_CORP_CACHE = memberships
+        _CHAR_CORP_CACHE_TS = time.time()
+        return copy.deepcopy(memberships)
+    except Exception:
+        return {}
+
+
+def _get_corp_source_snapshot(corporation_id, force_refresh: bool = False) -> dict | None:
+    corp_id = int(corporation_id or 0)
+    if corp_id <= 0:
+        return None
+
+    cached = _CORP_SOURCE_CACHE.get(corp_id)
+    if not force_refresh and cached and (time.time() - float(cached.get("cached_at", 0) or 0)) < _CORP_SOURCE_TTL:
+        return copy.deepcopy(cached)
+
+    try:
+        from characters import get_all_auth_headers
+
+        char_corps = _get_character_corporations(force_refresh=force_refresh)
+        auth_headers = get_all_auth_headers()
+        candidate_characters = []
+        corporation_name = None
+        for cid, headers in auth_headers:
+            membership = char_corps.get(str(cid), {})
+            if int(membership.get("corporation_id") or 0) != corp_id:
+                continue
+            corporation_name = corporation_name or membership.get("corporation_name")
+            candidate_characters.append((str(cid), membership.get("character_name") or f"Char {cid}", headers))
+
+        if not candidate_characters:
+            return None
+
+        asset_items = None
+        asset_access_characters = []
+        wallet_total_isk = None
+        wallet_divisions = []
+        wallet_access_characters = []
+
+        for char_id, char_name, headers in candidate_characters:
+            if asset_items is None:
+                page = 1
+                corp_items = []
+                assets_ok = False
+                while True:
+                    try:
+                        resp = requests.get(
+                            f"https://esi.evetech.net/latest/corporations/{corp_id}/assets/",
+                            headers=headers,
+                            params={"page": page},
+                            timeout=15,
+                        )
+                    except Exception:
+                        corp_items = []
+                        assets_ok = False
+                        break
+                    if not resp.ok:
+                        corp_items = []
+                        assets_ok = False
+                        break
+                    assets_ok = True
+                    page_items = resp.json() or []
+                    if not page_items:
+                        break
+                    corp_items.extend(page_items)
+                    if len(page_items) < 1000:
+                        break
+                    page += 1
+                if assets_ok:
+                    asset_items = corp_items
+                    asset_access_characters.append({"character_id": char_id, "character_name": char_name})
+
+            if wallet_total_isk is None:
+                try:
+                    resp = requests.get(
+                        f"https://esi.evetech.net/latest/corporations/{corp_id}/wallets/",
+                        headers=headers,
+                        timeout=15,
+                    )
+                    if resp.ok:
+                        wallet_rows = resp.json() or []
+                        parsed_divisions = []
+                        wallet_total = 0.0
+                        for row in wallet_rows:
+                            division = int(row.get("division") or 0)
+                            balance = float(row.get("balance") or 0.0)
+                            if division > 0:
+                                parsed_divisions.append({
+                                    "division": division,
+                                    "balance": round(balance, 2),
+                                })
+                            wallet_total += balance
+                        wallet_total_isk = wallet_total
+                        wallet_divisions = parsed_divisions
+                        wallet_access_characters.append({"character_id": char_id, "character_name": char_name})
+                except Exception:
+                    pass
+
+            if asset_items is not None and wallet_total_isk is not None:
+                break
+
+        from collections import defaultdict
+
+        division_assets = {flag: defaultdict(int) for flag in _CORP_DIVISION_FLAGS}
+        division_item_counts = {flag: 0 for flag in _CORP_DIVISION_FLAGS}
+        division_type_ids = {flag: set() for flag in _CORP_DIVISION_FLAGS}
+        division_bpc_type_ids = {flag: set() for flag in _CORP_DIVISION_FLAGS}
+        all_assets = defaultdict(int)
+        all_type_ids = set()
+
+        for item in asset_items or []:
+            flag = _normalize_corp_division_flag(item.get("location_flag"))
+            if not flag:
+                continue
+            division_item_counts[flag] += 1
+            type_id = int(item.get("type_id") or 0)
+            if type_id <= 0:
+                continue
+            if item.get("is_blueprint_copy"):
+                division_bpc_type_ids[flag].add(type_id)
+            try:
+                quantity = int(item.get("quantity") or 0)
+            except Exception:
+                quantity = 0
+            if quantity <= 0:
+                continue
+            division_assets[flag][type_id] += quantity
+            division_type_ids[flag].add(type_id)
+            all_assets[type_id] += quantity
+            all_type_ids.add(type_id)
+
+        names = _resolve_type_names(list(all_type_ids))
+        available_divisions = []
+        divisions_payload = {}
+        for flag in _CORP_DIVISION_FLAGS:
+            assets_payload = dict(division_assets[flag])
+            row = {
+                "flag": flag,
+                "label": _corp_division_label(flag),
+                "item_count": int(division_item_counts[flag]),
+                "type_count": int(len(division_type_ids[flag])),
+                "stack_units": int(sum(int(qty or 0) for qty in assets_payload.values())),
+                "assets": assets_payload,
+                "bpc_type_ids": sorted(int(type_id) for type_id in division_bpc_type_ids[flag]),
+            }
+            available_divisions.append({
+                key: value
+                for key, value in row.items()
+                if key != "assets"
+            })
+            divisions_payload[flag] = row
+
+        snapshot = {
+            "corporation_id": str(corp_id),
+            "corporation_name": corporation_name or f"Corp {corp_id}",
+            "asset_access_characters": asset_access_characters,
+            "wallet_access_characters": wallet_access_characters,
+            "wallet_total_isk": round(float(wallet_total_isk), 2) if wallet_total_isk is not None else None,
+            "wallet_divisions": wallet_divisions,
+            "assets": dict(all_assets),
+            "divisions": divisions_payload,
+            "available_divisions": available_divisions,
+            "names": {str(type_id): name for type_id, name in names.items()},
+            "cached_at": time.time(),
+        }
+        _CORP_SOURCE_CACHE[corp_id] = snapshot
+        return copy.deepcopy(snapshot)
+    except Exception:
+        return None
+
+
+def _get_corp_context(force_refresh: bool = False) -> dict:
+    global _CORP_CONTEXT_CACHE, _CORP_CONTEXT_CACHE_TS
+    if not force_refresh and _CORP_CONTEXT_CACHE and (time.time() - _CORP_CONTEXT_CACHE_TS) < _CORP_CONTEXT_TTL:
+        return copy.deepcopy(_CORP_CONTEXT_CACHE)
+
+    memberships = _get_character_corporations(force_refresh=force_refresh)
+    corporations_by_id: dict[int, dict] = {}
+    for membership in memberships.values():
+        corp_id = int(membership.get("corporation_id") or 0)
+        if corp_id <= 0:
+            continue
+        corp_entry = corporations_by_id.setdefault(corp_id, {
+            "corporation_id": str(corp_id),
+            "corporation_name": membership.get("corporation_name") or f"Corp {corp_id}",
+            "characters": [],
+        })
+        corp_entry["characters"].append({
+            "character_id": membership.get("character_id"),
+            "character_name": membership.get("character_name"),
+        })
+
+    corporations = []
+    for corp_id, corp_entry in corporations_by_id.items():
+        snapshot = _get_corp_source_snapshot(corp_id, force_refresh=force_refresh)
+        has_asset_access = bool(snapshot and snapshot.get("asset_access_characters"))
+        has_wallet_access = bool(snapshot and snapshot.get("wallet_total_isk") is not None)
+        corporations.append({
+            **corp_entry,
+            "has_asset_access": has_asset_access,
+            "has_wallet_access": has_wallet_access,
+            "operations_ready": has_asset_access,
+            "wallet_total_isk": snapshot.get("wallet_total_isk") if snapshot else None,
+            "available_divisions": list((snapshot or {}).get("available_divisions") or []),
+            "asset_access_characters": list((snapshot or {}).get("asset_access_characters") or []),
+            "wallet_access_characters": list((snapshot or {}).get("wallet_access_characters") or []),
+        })
+
+    corporations.sort(key=lambda item: (str(item.get("corporation_name") or "").lower(), str(item.get("corporation_id") or "")))
+    warnings = []
+    if corporations and not any(bool(corp.get("operations_ready")) for corp in corporations):
+        warnings.append("No connected corporation currently exposes corporation asset access. Reconnect an operations-corp character after the new scopes are added.")
+    if corporations and not any(bool(corp.get("has_wallet_access")) for corp in corporations):
+        warnings.append("No connected corporation currently exposes corporation wallet access. Reconnect an operations-corp character after the new scopes are added.")
+
+    payload = {
+        "corporations": corporations,
+        "warnings": warnings,
+        "generated_at": int(time.time()),
+    }
+    _CORP_CONTEXT_CACHE = payload
+    _CORP_CONTEXT_CACHE_TS = time.time()
+    return copy.deepcopy(payload)
+
+
+def _get_asset_source_for_request(operations_corp_id=None, division_flag=None, fallback_to_personal: bool = True) -> dict:
+    corp_id = int(str(operations_corp_id or "").strip() or 0)
+    normalized_flag = _normalize_corp_division_flag(division_flag)
+
+    if corp_id > 0:
+        if not normalized_flag:
+            return {
+                "mode": "corp",
+                "corporation_id": str(corp_id),
+                "corporation_name": f"Corp {corp_id}",
+                "division_flag": None,
+                "division_label": None,
+                "assets": {},
+                "names": {},
+                "warning": "Select an Input or Output hangar for the chosen operations corp.",
+            }
+        snapshot = _get_corp_source_snapshot(corp_id)
+        if not snapshot or not snapshot.get("asset_access_characters"):
+            return {
+                "mode": "corp",
+                "corporation_id": str(corp_id),
+                "corporation_name": (snapshot or {}).get("corporation_name") or f"Corp {corp_id}",
+                "division_flag": normalized_flag,
+                "division_label": _corp_division_label(normalized_flag),
+                "assets": {},
+                "names": dict((snapshot or {}).get("names") or {}),
+                "warning": "Selected operations corp inventory is unavailable. Reconnect a character with corporation asset access or choose another corp.",
+            }
+        division = dict((snapshot.get("divisions") or {}).get(normalized_flag) or {})
+        return {
+            "mode": "corp",
+            "corporation_id": str(corp_id),
+            "corporation_name": snapshot.get("corporation_name") or f"Corp {corp_id}",
+            "division_flag": normalized_flag,
+            "division_label": _corp_division_label(normalized_flag),
+            "assets": dict(division.get("assets") or {}),
+            "names": dict(snapshot.get("names") or {}),
+            "warning": None,
+            "item_count": int(division.get("item_count") or 0),
+            "type_count": int(division.get("type_count") or 0),
+            "stack_units": int(division.get("stack_units") or 0),
+        }
+
+    if not fallback_to_personal:
+        return {
+            "mode": "none",
+            "corporation_id": None,
+            "corporation_name": None,
+            "division_flag": None,
+            "division_label": None,
+            "assets": {},
+            "names": {},
+            "warning": "No explicit operations corp inventory source is configured.",
+        }
+
+    if not _ASSETS_CACHE or (time.time() - _ASSETS_CACHE_TS) >= _ASSETS_TTL:
+        api_assets()
+    return {
+        "mode": "personal",
+        "corporation_id": None,
+        "corporation_name": None,
+        "division_flag": None,
+        "division_label": None,
+        "assets": dict((_ASSETS_CACHE or {}).get("assets") or {}),
+        "names": dict((_ASSETS_CACHE or {}).get("names") or {}),
+        "warning": None,
+    }
+
+
+def _get_wallet_source_for_request(operations_corp_id=None) -> tuple[float, dict]:
+    corp_id = int(str(operations_corp_id or "").strip() or 0)
+    if corp_id > 0:
+        snapshot = _get_corp_source_snapshot(corp_id)
+        if snapshot and snapshot.get("wallet_total_isk") is not None:
+            return float(snapshot.get("wallet_total_isk") or 0.0), {
+                "mode": "corp",
+                "corporation_id": str(corp_id),
+                "corporation_name": snapshot.get("corporation_name") or f"Corp {corp_id}",
+                "warning": None,
+            }
+        return 0.0, {
+            "mode": "corp",
+            "corporation_id": str(corp_id),
+            "corporation_name": (snapshot or {}).get("corporation_name") or f"Corp {corp_id}",
+            "warning": "Selected operations corp wallet is unavailable. Reconnect a character with corporation wallet access or keep using personal wallet mode.",
+        }
+    return _get_wallet(), {
+        "mode": "personal",
+        "corporation_id": None,
+        "corporation_name": None,
+        "warning": None,
+    }
 
 
 def _get_plex_price(prices: dict) -> float:
@@ -726,6 +1175,67 @@ def api_characters_list():
         return jsonify({"characters": list_characters()})
     except Exception as e:
         return jsonify({"error": str(e), "characters": []}), 200
+
+
+@app.route("/api/corp-context", methods=["GET"])
+def api_corp_context():
+    """Return corporation options, access state, and hangar divisions for operations-corp selection."""
+    try:
+        force = request.args.get("force", "0") == "1"
+        return jsonify(_get_corp_context(force_refresh=force))
+    except Exception as e:
+        return jsonify({"error": str(e), "corporations": [], "warnings": [str(e)]}), 200
+
+
+def _summarize_market_history(series: list[dict]) -> dict:
+    import math
+
+    if not series:
+        return {
+            "sample_days": 0,
+            "first_date": None,
+            "last_date": None,
+            "first_average": None,
+            "latest_average": None,
+            "change_pct": None,
+            "high": None,
+            "low": None,
+            "avg_volume": None,
+            "volatility_pct": None,
+        }
+
+    averages = [float(point.get("average") or 0) for point in series if point.get("average") not in (None, "")]
+    volumes = [float(point.get("volume") or 0) for point in series if point.get("volume") not in (None, "")]
+    first_average = averages[0] if averages else None
+    latest_average = averages[-1] if averages else None
+    change_pct = None
+    if first_average and latest_average is not None and first_average > 0:
+        change_pct = ((latest_average - first_average) / first_average) * 100.0
+    avg_average = (sum(averages) / len(averages)) if averages else None
+    variance = (
+        sum((value - avg_average) ** 2 for value in averages) / len(averages)
+        if averages and avg_average is not None
+        else None
+    )
+    volatility_pct = (
+        (math.sqrt(variance) / avg_average) * 100.0
+        if variance is not None and avg_average and avg_average > 0
+        else None
+    )
+    lows = [float(point.get("lowest") or 0) for point in series if point.get("lowest") not in (None, "")]
+    highs = [float(point.get("highest") or 0) for point in series if point.get("highest") not in (None, "")]
+    return {
+        "sample_days": len(series),
+        "first_date": series[0].get("date"),
+        "last_date": series[-1].get("date"),
+        "first_average": round(first_average, 2) if first_average is not None else None,
+        "latest_average": round(latest_average, 2) if latest_average is not None else None,
+        "change_pct": round(change_pct, 2) if change_pct is not None else None,
+        "high": round(max(highs), 2) if highs else None,
+        "low": round(min(lows), 2) if lows else None,
+        "avg_volume": round((sum(volumes) / len(volumes)), 2) if volumes else None,
+        "volatility_pct": round(volatility_pct, 2) if volatility_pct is not None else None,
+    }
 
 @app.route("/api/characters/<character_id>", methods=["DELETE"])
 def api_characters_remove(character_id):
@@ -1817,6 +2327,8 @@ def api_job_planner():
     calc_system_param = request.args.get("system", "Korsiki").strip() or "Korsiki"
     calc_facility_param = request.args.get("facility", "large").strip().lower() or "large"
     calc_facility_tax_param = request.args.get("facility_tax_rate", "").strip()
+    operations_corp_id_param = request.args.get("operations_corp_id", "").strip()
+    corp_input_division_param = request.args.get("corp_input_division", "").strip()
 
     char_records = load_characters()
     _default_bp_permissions = normalize_bp_permissions()
@@ -1832,6 +2344,57 @@ def api_job_planner():
         return bool(_bp_permissions_for(character_id).get(permission_key))
     calc_rig_bonus_mfg_param = request.args.get("rig_bonus_mfg", "").strip()
     planner_refresh_nonce = request.args.get("refresh_nonce", "").strip()
+    preferred_key_exact = _calc_cache_key(
+        calc_system_param,
+        calc_facility_param,
+        "",
+        calc_facility_tax_param,
+        calc_rig_bonus_mfg_param,
+    )
+
+    if _consume_planner_refresh_nonce(preferred_key_exact, planner_refresh_nonce):
+        global _ASSETS_CACHE, _ASSETS_CACHE_TS
+        global _ESI_JOBS_CACHE, _ESI_JOBS_CACHE_TS
+        global _ESI_ORDERS_CACHE, _ESI_ORDERS_CACHE_TS
+        global _CHAR_CORP_CACHE, _CHAR_CORP_CACHE_TS
+        global _CORP_SOURCE_CACHE, _CORP_CONTEXT_CACHE, _CORP_CONTEXT_CACHE_TS
+        global _CHAR_SLOT_DETAILS_CACHE, _CHAR_SLOT_DETAILS_CACHE_TS, _CHAR_SLOT_DETAILS_CACHE_KEY
+        global _MAX_JOBS_CACHE, _MAX_JOBS_CACHE_TS, _MAX_SCIENCE_JOBS_CACHE, _MAX_SCIENCE_JOBS_CACHE_TS
+        global _COPY_TIME_MODIFIER, _INVENT_TIME_MODIFIER, _MFG_TIME_MODIFIER
+        global _SELL_RECOMMENDATION_CACHE
+
+        with _ESI_STATE_CACHE_LOCK:
+            _ESI_BP_CACHE = {}
+            _ESI_BP_CACHE_TS = 0
+            _ASSETS_CACHE = {}
+            _ASSETS_CACHE_TS = 0
+            _ESI_JOBS_CACHE = {}
+            _ESI_JOBS_CACHE_TS = 0
+            _ESI_ORDERS_CACHE = {}
+            _ESI_ORDERS_CACHE_TS = 0
+            _CHAR_SLOT_DETAILS_CACHE = {}
+            _CHAR_SLOT_DETAILS_CACHE_TS = 0
+            _CHAR_SLOT_DETAILS_CACHE_KEY = ()
+            _MAX_JOBS_CACHE = 0
+            _MAX_JOBS_CACHE_TS = 0
+            _MAX_SCIENCE_JOBS_CACHE = 0
+            _MAX_SCIENCE_JOBS_CACHE_TS = 0
+            _COPY_TIME_MODIFIER = 1.0
+            _INVENT_TIME_MODIFIER = 1.0
+            _MFG_TIME_MODIFIER = 1.0
+
+        _CHAR_CORP_CACHE = {}
+        _CHAR_CORP_CACHE_TS = 0
+        _CORP_SOURCE_CACHE = {}
+        _CORP_CONTEXT_CACHE = {}
+        _CORP_CONTEXT_CACHE_TS = 0
+        _SELL_RECOMMENDATION_CACHE = {}
+        _calc_cache.pop(preferred_key_exact, None)
+        try:
+            from invention import invalidate_invention_cache
+            invalidate_invention_cache()
+        except Exception as _e:
+            print(f"[job-planner] Invention cache refresh failed: {_e}")
     
     cycle_config = {
         "cycle_duration_hours": cycle_duration_hours,
@@ -1908,23 +2471,6 @@ def api_job_planner():
             print(f"[job-planner] Orders cache refresh failed: {_e}")
 
     # ── Ensure calculator cache exists for this exact planner context ───────
-    preferred_key_exact = _calc_cache_key(
-        calc_system_param,
-        calc_facility_param,
-        "",
-        calc_facility_tax_param,
-        calc_rig_bonus_mfg_param,
-    )
-    if _consume_planner_refresh_nonce(preferred_key_exact, planner_refresh_nonce):
-        _calc_cache.pop(preferred_key_exact, None)
-        with _ESI_STATE_CACHE_LOCK:
-            _ESI_BP_CACHE.clear()
-            _ESI_BP_CACHE_TS = 0
-        try:
-            from invention import invalidate_invention_cache
-            invalidate_invention_cache()
-        except Exception as _e:
-            print(f"[job-planner] Invention cache refresh failed: {_e}")
     if not _calc_is_fresh(preferred_key_exact):
         try:
             api_calculator()
@@ -2474,6 +3020,7 @@ def api_job_planner():
         flat_jobs.sort(key=lambda item: (int(item[0] or 0), str(item[1] or ""), str(item[2] or "")))
         future_personal_bpc_jobs_by_output[int(out_id)] = flat_jobs
     character_slot_details = _get_character_slot_details()
+    character_corporations = _get_character_corporations()
     running_mfg_by_character: dict[str, int] = {}
     running_science_by_character: dict[str, int] = {}
     for job in _ESI_JOBS_CACHE.get("jobs", []):
@@ -2538,6 +3085,8 @@ def api_job_planner():
             str(char_id): {
                 "character_id": str(char_id),
                 "character_name": details.get("character_name", f"Char {char_id}"),
+                "corporation_id": (character_corporations.get(str(char_id), {}) or {}).get("corporation_id"),
+                "corporation_name": (character_corporations.get(str(char_id), {}) or {}).get("corporation_name"),
                 "running": int(running_science_by_character.get(char_id, 0) or 0),
                 "total": int(details.get("science_slots", 0) or 0),
                 "free": max(0, int(details.get("science_slots", 0) or 0) - int(running_science_by_character.get(char_id, 0) or 0)),
@@ -2548,6 +3097,8 @@ def api_job_planner():
             str(char_id): {
                 "character_id": str(char_id),
                 "character_name": details.get("character_name", f"Char {char_id}"),
+                "corporation_id": (character_corporations.get(str(char_id), {}) or {}).get("corporation_id"),
+                "corporation_name": (character_corporations.get(str(char_id), {}) or {}).get("corporation_name"),
                 "running": int(running_mfg_by_character.get(char_id, 0) or 0),
                 "total": int(details.get("mfg_slots", 0) or 0),
                 "free": max(0, int(details.get("mfg_slots", 0) or 0) - int(running_mfg_by_character.get(char_id, 0) or 0)),
@@ -2558,7 +3109,12 @@ def api_job_planner():
 
     # ── Planner opportunity model ─────────────────────────────────────────────
     cycle_seconds = max(3600, int(cycle_duration_hours * 3600))
-    wallet_total = _get_wallet()
+    planner_asset_source = _get_asset_source_for_request(
+        operations_corp_id=operations_corp_id_param,
+        division_flag=corp_input_division_param,
+        fallback_to_personal=not bool(operations_corp_id_param),
+    )
+    wallet_total, wallet_source = _get_wallet_source_for_request(operations_corp_id_param)
     URGENCY_HORIZON_DAYS   = 7.0
     MIN_PREMIUM_DAILY_VOL  = 20.0
     MIN_FALLBACK_DAILY_VOL = 50.0
@@ -2609,6 +3165,52 @@ def api_job_planner():
         if extra:
             payload.update(extra)
         blocked_recommendations[reason_key] = payload
+
+    selected_operations_corp_id = int(str(operations_corp_id_param or "").strip() or 0)
+    if selected_operations_corp_id > 0:
+        off_corp_mfg_slots = [
+            slot for slot in planner_character_slots.get("manufacturing", {}).values()
+            if int(slot.get("free", 0) or 0) > 0 and int(slot.get("corporation_id") or 0) not in (0, selected_operations_corp_id)
+        ]
+        if off_corp_mfg_slots:
+            free_count = sum(int(slot.get("free", 0) or 0) for slot in off_corp_mfg_slots)
+            affected_chars = ", ".join(str(slot.get("character_name") or "").strip() for slot in off_corp_mfg_slots[:3])
+            if len(off_corp_mfg_slots) > 3:
+                affected_chars = f"{affected_chars}, +{len(off_corp_mfg_slots) - 3} more"
+            _record_blocked(
+                f"ops-corp-mfg-slots-{selected_operations_corp_id}",
+                "Idle skilled manufacturing slots",
+                "manufacture",
+                f"{free_count} free manufacturing slot{'s' if free_count != 1 else ''} sit outside the selected operations corp inventory pool.",
+                score=float(free_count) * 1_000_000.0,
+                extra={
+                    "block_kind": "access",
+                    "unlock_path": f"{affected_chars} can use their slots, but would need manual blueprint or material transfers into the operations corp flow.",
+                    "estimated_profit": 0.0,
+                },
+            )
+
+        off_corp_science_slots = [
+            slot for slot in planner_character_slots.get("science", {}).values()
+            if int(slot.get("free", 0) or 0) > 0 and int(slot.get("corporation_id") or 0) not in (0, selected_operations_corp_id)
+        ]
+        if off_corp_science_slots:
+            free_count = sum(int(slot.get("free", 0) or 0) for slot in off_corp_science_slots)
+            affected_chars = ", ".join(str(slot.get("character_name") or "").strip() for slot in off_corp_science_slots[:3])
+            if len(off_corp_science_slots) > 3:
+                affected_chars = f"{affected_chars}, +{len(off_corp_science_slots) - 3} more"
+            _record_blocked(
+                f"ops-corp-sci-slots-{selected_operations_corp_id}",
+                "Idle skilled science slots",
+                "science",
+                f"{free_count} free science slot{'s' if free_count != 1 else ''} sit outside the selected operations corp inventory pool.",
+                score=float(free_count) * 900_000.0,
+                extra={
+                    "block_kind": "access",
+                    "unlock_path": f"{affected_chars} can still copy or invent, but any handoff back into the operations corp remains manual while you are split across corps.",
+                    "estimated_profit": 0.0,
+                },
+            )
 
     def _slot_is_reaction(result: dict) -> bool:
         return "reaction" in str(result.get("slot_type") or "").lower()
@@ -3176,7 +3778,7 @@ def api_job_planner():
             base_item["why"] = f"{base_item.get('why', '')} Self-crafting prerequisites saves about {round(buy_cost_avoided):,} ISK versus buying intermediates.".strip()
         return base_item
 
-    _assets = _ASSETS_CACHE.get("assets", {})
+    _assets = dict(planner_asset_source.get("assets") or {})
 
     def _build_downstream(result: dict) -> dict | None:
         out_id = int(result.get("output_id") or 0)
@@ -4644,9 +5246,63 @@ def api_job_planner():
         "me_bonus_pct":         _me_bonus_pct,
         "te_bonus_pct":         _te_bonus_pct,
         "wallet_total_isk":     round(wallet_total),
+        "wallet_source": {
+            key: value
+            for key, value in wallet_source.items()
+            if key != "assets" and key != "names"
+        },
+        "inventory_source": {
+            key: value
+            for key, value in planner_asset_source.items()
+            if key != "assets" and key != "names"
+        },
         # Echo back cycle config for UI sync
         "cycle_config":     cycle_config,
     })
+
+
+@app.route("/api/tools/opportunities", methods=["GET"])
+def api_tools_opportunities():
+    """Expose planner opportunities under the Tools namespace."""
+    return api_job_planner()
+
+
+@app.route("/api/tools/market-history", methods=["GET"])
+def api_tools_market_history():
+    """Return cached daily market history plus current pricing for one type."""
+    try:
+        type_id = int(request.args.get("type_id", 0) or 0)
+        days = max(7, min(int(request.args.get("days", 90) or 90), 365))
+        if type_id <= 0:
+            return jsonify({
+                "error": "type_id is required",
+                "type_id": type_id,
+                "days": days,
+                "current": None,
+                "summary": _summarize_market_history([]),
+                "series": [],
+            }), 200
+
+        from pricer import get_market_history_series, get_price
+
+        series = get_market_history_series(type_id, days=days)
+        current = get_price(type_id)
+        return jsonify({
+            "type_id": type_id,
+            "days": days,
+            "current": current,
+            "summary": _summarize_market_history(series),
+            "series": series,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "error": str(e),
+            "current": None,
+            "summary": _summarize_market_history([]),
+            "series": [],
+        }), 200
 
 
 @app.route("/api/invention/costs", methods=["GET"])
@@ -6460,6 +7116,7 @@ _MAX_JOBS_CACHE_TS: float = 0.0
 _MAX_JOBS_TTL             = 1800  # 30 min
 _CHAR_SLOT_DETAILS_CACHE: dict  = {}
 _CHAR_SLOT_DETAILS_CACHE_TS: float = 0.0
+_CHAR_SLOT_DETAILS_CACHE_KEY: tuple[str, ...] = ()
 
 # science/research slots cached alongside mfg slots
 _MAX_SCIENCE_JOBS_CACHE:    int   = 0
@@ -6473,6 +7130,28 @@ _ESI_ORDERS_CACHE:    dict  = {}
 _ESI_ORDERS_CACHE_TS: float = 0
 _ESI_ORDERS_TTL             = 120   # 2 min
 _LAST_SELL_POS_BY_ORDER: dict[int, int] = {}
+
+
+def _current_character_slot_cache_key() -> tuple[str, ...] | None:
+    try:
+        from characters import load_characters
+
+        return tuple(sorted(str(cid) for cid in (load_characters() or {}).keys()))
+    except Exception:
+        return None
+
+
+def _character_slot_cache_is_current(now_ts: float | None = None) -> bool:
+    if not _CHAR_SLOT_DETAILS_CACHE:
+        return False
+    if now_ts is None:
+        now_ts = time.time()
+    if (now_ts - _CHAR_SLOT_DETAILS_CACHE_TS) >= _MAX_JOBS_TTL:
+        return False
+    current_key = _current_character_slot_cache_key()
+    if current_key is not None and current_key != _CHAR_SLOT_DETAILS_CACHE_KEY:
+        return False
+    return True
 
 
 def _load_utilization_history() -> list[dict]:
@@ -7559,10 +8238,12 @@ def api_craft_timeline():
 def _get_character_slot_details() -> dict[str, dict]:
     """Return per-character manufacturing/science slot details, refreshed every 30 min."""
     global _CHAR_SLOT_DETAILS_CACHE, _CHAR_SLOT_DETAILS_CACHE_TS
+    global _CHAR_SLOT_DETAILS_CACHE_KEY
     global _MAX_JOBS_CACHE, _MAX_JOBS_CACHE_TS, _MAX_SCIENCE_JOBS_CACHE, _MAX_SCIENCE_JOBS_CACHE_TS
     global _MFG_TIME_MODIFIER, _COPY_TIME_MODIFIER, _INVENT_TIME_MODIFIER
 
-    if _CHAR_SLOT_DETAILS_CACHE and (time.time() - _CHAR_SLOT_DETAILS_CACHE_TS) < _MAX_JOBS_TTL:
+    cache_key = _current_character_slot_cache_key()
+    if _character_slot_cache_is_current():
         return dict(_CHAR_SLOT_DETAILS_CACHE)
 
     MASS_PROD     = 3387
@@ -7648,6 +8329,7 @@ def _get_character_slot_details() -> dict[str, dict]:
     with _ESI_STATE_CACHE_LOCK:
         _CHAR_SLOT_DETAILS_CACHE = dict(slot_details)
         _CHAR_SLOT_DETAILS_CACHE_TS = time.time()
+        _CHAR_SLOT_DETAILS_CACHE_KEY = cache_key if cache_key is not None else tuple(sorted(slot_details.keys()))
 
         total_mfg_slots = sum(int(details.get("mfg_slots", 0) or 0) for details in slot_details.values())
         total_science_slots = sum(int(details.get("science_slots", 0) or 0) for details in slot_details.values())
@@ -7667,7 +8349,8 @@ def _get_character_slot_details() -> dict[str, dict]:
 
 def _get_max_jobs(running_fallback: int = 0) -> int:
     """Return sum of manufacturing slots across all characters, refreshed every 30 min."""
-    if _MAX_JOBS_CACHE > 0 and (time.time() - _MAX_JOBS_CACHE_TS) < _MAX_JOBS_TTL:
+    now_ts = time.time()
+    if _MAX_JOBS_CACHE > 0 and (now_ts - _MAX_JOBS_CACHE_TS) < _MAX_JOBS_TTL and _character_slot_cache_is_current(now_ts):
         return _MAX_JOBS_CACHE
     slot_details = _get_character_slot_details()
     total_mfg_slots = sum(int(details.get("mfg_slots", 0) or 0) for details in slot_details.values())
@@ -7679,7 +8362,8 @@ def _get_max_jobs(running_fallback: int = 0) -> int:
 def _get_max_science_jobs(running_fallback: int = 0) -> int:
     """Return sum of science/research slots across all characters (Lab Op + Adv Lab Op).
     Also updates _COPY_TIME_MODIFIER with the best copy-time reduction across all characters."""
-    if _MAX_SCIENCE_JOBS_CACHE > 0 and (time.time() - _MAX_SCIENCE_JOBS_CACHE_TS) < _MAX_JOBS_TTL:
+    now_ts = time.time()
+    if _MAX_SCIENCE_JOBS_CACHE > 0 and (now_ts - _MAX_SCIENCE_JOBS_CACHE_TS) < _MAX_JOBS_TTL and _character_slot_cache_is_current(now_ts):
         return _MAX_SCIENCE_JOBS_CACHE
     slot_details = _get_character_slot_details()
     total_science_slots = sum(int(details.get("science_slots", 0) or 0) for details in slot_details.values())
@@ -8654,6 +9338,8 @@ def api_haul_sell_recommendations():
         requested_hub = (request.args.get("hub") or "Jita").strip()
         limit = max(1, min(int(request.args.get("limit", 30) or 30), 100))
         min_total_value = max(float(request.args.get("min_total_value", 1000000) or 0), 0.0)
+        operations_corp_id = (request.args.get("operations_corp_id") or "").strip()
+        corp_output_division = (request.args.get("corp_output_division") or "").strip()
 
         target_hub = next(
             (hub for hub in _MARKET_HUBS_SMART if hub["name"].lower() == requested_hub.lower()),
@@ -8665,16 +9351,20 @@ def api_haul_sell_recommendations():
             "hub": target_hub["name"],
             "limit": limit,
             "min_total_value": min_total_value,
+            "operations_corp_id": operations_corp_id,
+            "corp_output_division": corp_output_division,
         }, sort_keys=True)
         cached = _SELL_RECOMMENDATION_CACHE.get(cache_key)
         if cached and (time.time() - cached["_ts"]) < _SELL_RECOMMENDATION_CACHE_TTL:
             return jsonify({k: v for k, v in cached.items() if k != "_ts"})
 
-        if not _ASSETS_CACHE or (time.time() - _ASSETS_CACHE_TS) >= _ASSETS_TTL:
-            api_assets()
-
-        assets = _ASSETS_CACHE.get("assets", {}) if _ASSETS_CACHE else {}
-        names = _ASSETS_CACHE.get("names", {}) if _ASSETS_CACHE else {}
+        asset_source = _get_asset_source_for_request(
+            operations_corp_id=operations_corp_id,
+            division_flag=corp_output_division,
+            fallback_to_personal=not bool(operations_corp_id),
+        )
+        assets = dict(asset_source.get("assets") or {})
+        names = dict(asset_source.get("names") or {})
 
         if not assets:
             payload = {
@@ -8686,6 +9376,11 @@ def api_haul_sell_recommendations():
                     "total_units": 0,
                     "total_recommended_value": 0.0,
                     "items_with_better_hub": 0,
+                },
+                "inventory_source": {
+                    key: value
+                    for key, value in asset_source.items()
+                    if key != "assets" and key != "names"
                 },
                 "items": [],
             }
@@ -8749,6 +9444,11 @@ def api_haul_sell_recommendations():
                     "total_units": 0,
                     "total_recommended_value": 0.0,
                     "items_with_better_hub": 0,
+                },
+                "inventory_source": {
+                    key: value
+                    for key, value in asset_source.items()
+                    if key != "assets" and key != "names"
                 },
                 "items": [],
             }
@@ -8897,6 +9597,11 @@ def api_haul_sell_recommendations():
             "goal": goal,
             "selected_hub": target_hub["name"],
             "hubs": [hub["name"] for hub in _MARKET_HUBS_SMART],
+            "inventory_source": {
+                key: value
+                for key, value in asset_source.items()
+                if key != "assets" and key != "names"
+            },
             "summary": {
                 "item_count": len(items),
                 "total_units": sum(item["quantity"] for item in items),

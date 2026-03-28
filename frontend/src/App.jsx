@@ -6,7 +6,6 @@ import CharactersPage from './pages/CharactersPage';
 import CraftLogPage from './pages/CraftLogPage';
 import MessagesPage from './pages/MessagesPage';
 import QueuePlannerPage from './pages/QueuePlannerPage';
-import BlueprintsPage from './pages/BlueprintsPage';
 import OrdersPage from './pages/OrdersPage';
 import InventoryPage from './pages/InventoryPage';
 import ResearchPage from './pages/ResearchPage';
@@ -14,6 +13,8 @@ import InventionPage from './pages/InventionPage';
 import MineralPricesPage from './pages/MineralPricesPage';
 import HaulPlannerPage from './pages/HaulPlannerPage';
 import AppSettingsPage from './pages/AppSettingsPage';
+import OpportunitiesPage from './pages/OpportunitiesPage';
+import MarketPrognosisPage from './pages/MarketPrognosisPage';
 import BootScreen from './components/BootScreen';
 import { useApi } from './hooks/useApi';
 import { loadAppSettings, saveAppSettings } from './utils/appSettings';
@@ -142,6 +143,11 @@ export default function App() {
               <QueuePlannerPage appSettings={appSettings} />
             </div>
           )}
+          {mountedTabs.has('OPPORTUNITIES') && (
+            <div style={{ display: activeTab === 'OPPORTUNITIES' ? 'contents' : 'none' }}>
+              <OpportunitiesPage appSettings={appSettings} />
+            </div>
+          )}
           {mountedTabs.has('APP_SETTINGS') && (
             <div style={{ display: activeTab === 'APP_SETTINGS' ? 'contents' : 'none' }}>
               <AppSettingsPage appSettings={appSettings} onSaveSettings={handleSaveSettings} />
@@ -159,7 +165,12 @@ export default function App() {
           )}
           {mountedTabs.has('BLUEPRINTS') && (
             <div style={{ display: activeTab === 'BLUEPRINTS' ? 'contents' : 'none' }}>
-              <BlueprintsPage refreshKey={refreshKey} />
+              <MarketPrognosisPage refreshKey={refreshKey} />
+            </div>
+          )}
+          {mountedTabs.has('MARKET_PROGNOSIS') && (
+            <div style={{ display: activeTab === 'MARKET_PROGNOSIS' ? 'contents' : 'none' }}>
+              <MarketPrognosisPage refreshKey={refreshKey} />
             </div>
           )}
           {mountedTabs.has('REVENUE') && (
@@ -179,7 +190,7 @@ export default function App() {
           )}
           {mountedTabs.has('HAUL_PLANNER') && (
             <div style={{ display: activeTab === 'HAUL_PLANNER' ? 'contents' : 'none' }}>
-              <HaulPlannerPage appSettings={appSettings} />
+              <HaulPlannerPage appSettings={appSettings} onSaveSettings={handleSaveSettings} />
             </div>
           )}
           {mountedTabs.has('INVENTORY') && (

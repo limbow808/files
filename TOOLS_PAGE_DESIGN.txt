@@ -1,0 +1,102 @@
+TOOLS PAGE DESIGN NOTES
+
+These notes describe the design direction of the new Tools pages so the look and structure can be preserved in future work.
+
+Pages covered:
+- Opportunities
+- Market Prognosis
+
+Overall design intent:
+- Keep the pages feeling like part of CREST, not like generic admin tables.
+- Make the layout feel operational and high-signal: dense enough for real decision-making, but still visually legible.
+- Use the existing EVE-industrial language of muted dark panels, sharp borders, restrained glow, mono metadata, and strong highlight colors.
+- Separate "overview information" from "decision detail". The user should be able to scan the left side quickly, then study the right side deeply.
+
+Visual system:
+- Backgrounds are layered, not flat. Use subtle gradients and low-contrast panel fills instead of empty black slabs.
+- Borders are thin and crisp. Most structure comes from border rhythm and spacing, not heavy shadows.
+- Typography is split by role:
+  - Titles and main labels use the existing interface text styling.
+  - Small metadata, tags, and system readouts use the mono look.
+- Accent colors should communicate state, not decoration:
+  - Green for healthy or actionable upside.
+  - Orange for heat, attention, or warning.
+  - Blue for alternate system context or supporting analysis.
+  - Neutral gray for inactive or informational structure.
+
+Layout pattern:
+- Each page starts with a strong header band containing:
+  - the page title
+  - a short subtitle explaining the decision context
+  - lightweight status text plus a refresh action
+- Summary cards come next. They should provide immediate orientation before the user touches the main content.
+- Source/context cards sit near the top so the user can see what inventory, wallet, or market context is driving the analysis.
+- The main body uses a two-lane composition:
+  - left lane for scanning lists, cards, or tables
+  - right lane for sticky-style detail analysis
+- On narrower screens, the layout collapses into a vertical flow without losing the same hierarchy.
+
+Opportunities page design:
+- The page should feel like a command deck for actionable and blocked queue decisions.
+- Content is grouped by decision state instead of one blended list.
+- Each group has a clear section head and compact cards underneath it.
+- Opportunity cards are intentionally not oversized. They should feel like tactical records, not marketing tiles.
+- Card states are shown with small color shifts and left-edge emphasis rather than loud fills.
+- The detail panel should answer:
+  - why this opportunity matters
+  - whether it is ready or blocked
+  - what the likely payoff is
+  - what character or queue context is involved
+
+Market Prognosis page design:
+- The page should feel more analytical and investment-oriented than the Opportunities page.
+- The table remains the fast scanning surface.
+- The right-side detail lane is where the page becomes sophisticated:
+  - exact current market values
+  - horizon-aware context
+  - trend interpretation
+  - simple prognosis language
+- History visuals should stay restrained. They support judgment; they should not dominate the page.
+- Sparkline and history cards should feel technical and calm, not flashy.
+- Prognosis badges should summarize the read at a glance using labels like Stable, Overheated, Weakening, or Undervalued.
+
+Important styling principles:
+- Avoid generic dashboard softness. The pages should stay angular, precise, and operational.
+- Avoid bright color everywhere. Most of the screen should remain quiet so the few highlights matter.
+- Use spacing to separate thought units:
+  - header area
+  - summary area
+  - context/source area
+  - primary scan area
+  - deep detail area
+- Keep cards and tables information-dense, but do not collapse line-height so far that scanning becomes tiring.
+
+Interaction pattern:
+- Selecting an item on the left should immediately enrich the right-side panel.
+- Hover and active states should be subtle but obvious.
+- Refresh actions should feel like operational tools, not primary CTA buttons.
+- Status text should explain whether data is loading, refreshing, thin, or unavailable without overwhelming the page.
+
+How to preserve this style in future work:
+- Reuse the same summary card language before inventing new header widgets.
+- Add new analysis blocks to the right-side detail lane before expanding the top of the page.
+- Prefer small badges, short labels, and compact metric blocks over large explanatory containers.
+- If adding charts, keep them low-noise and integrated with the panel system.
+- If adding more Tools pages, follow the same pattern:
+  - header
+  - summary
+  - source/context strip
+  - scan lane
+  - detail lane
+
+What would break the design:
+- Replacing the layout with generic centered cards.
+- Using large bright gradients or overly glossy effects.
+- Turning the right-side detail lane into a wall of prose.
+- Mixing unrelated controls into the summary area.
+- Duplicating the same information in both the left and right lanes.
+
+Short version:
+- Opportunities = tactical queue intelligence.
+- Market Prognosis = long-horizon investment analysis.
+- Both pages should feel sharp, industrial, information-dense, and calm.
