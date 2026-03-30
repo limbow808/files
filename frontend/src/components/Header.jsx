@@ -86,15 +86,15 @@ const DROPDOWNS = {
   ],
   SETTINGS: [
     {
-      title: 'Configuration',
-      items: [
-        { id: 'APP_SETTINGS', label: 'App Settings' },
-      ],
-    },
-    {
       title: 'Profiles',
       items: [
         { id: 'CHARACTERS', label: 'Characters' },
+      ],
+    },
+    {
+      title: 'Configuration',
+      items: [
+        { id: 'APP_SETTINGS', label: 'App Settings' },
       ],
     },
     {

@@ -10,56 +10,10 @@ const GROUPS = [
     ],
   },
   {
-    label: 'ALERT FILTERS',
+    label: 'QUEUE NOTIFICATIONS',
     fields: [
-      { key: 'BLUEPRINT_TYPE',       label: 'Blueprint Type',    type: 'radio',  options: [
-          { value: 'bpo',  label: 'BPO — Originals only' },
-          { value: 'bpc',  label: 'BPC — Copies only' },
-          { value: 'both', label: 'BOTH — Originals & copies' },
-        ],
-        info: 'BPOs are permanent and can be used indefinitely. BPCs have a limited run count. "Both" watches for either type in contracts.',
-      },
-      { key: 'ROI_THRESHOLD',        label: 'Min ROI %',           type: 'number', hint: 'minimum ROI to trigger alert',
-        info: 'Return on investment threshold. A blueprint with 20% ROI means you earn 20% of your material cost back as profit per manufacturing run. Lower values = more alerts.',
-      },
-      { key: 'BREAKEVEN_MAX_RUNS',   label: 'Max Breakeven Runs',  type: 'number', hint: 'max runs to recover BP cost',
-        info: 'Maximum number of manufacturing runs to recover the blueprint purchase price. e.g. 100 means: if the BP costs 500M and each run profits 5M, that\'s exactly 100 runs to break even — and it would be accepted. 101 runs would be rejected.',
-      },
-      { key: 'MIN_NET_PROFIT',       label: 'Min Net Profit (ISK)', type: 'number', hint: 'e.g. 1000000 = 1M ISK',
-        info: 'Minimum profit per manufacturing run in ISK. Filters out low-margin junk. 1,000,000 = 1M ISK per run.',
-      },
-      { key: 'ALERT_COOLDOWN_HOURS', label: 'Cooldown (hours)',    type: 'number', hint: 'hours before re-alerting same deal',
-        info: 'Suppresses repeat alerts for the same contract. If a BPO listing is still up 6 hours later, it will fire again. Lower values increase noise.',
-      },
-    ],
-  },
-  {
-    label: 'SCAN INTERVALS',
-    fields: [
-      { key: 'CONTRACT_SCAN_INTERVAL', label: 'Contract Scan (s)', type: 'number', hint: 'seconds between contract scans',
-        info: 'How often to scan public ESI contracts for blueprint deals.\n\n• 300s (5 min) — aggressive sniping, highest ESI load\n• 900s (15 min) — recommended balance\n• 1800s (30 min) — light load, may miss short-lived listings\n\nEach scan fetches up to MAX_PAGES × 1000 contracts, resolves item details for all candidates, then sends alerts. Lower = more ESI requests per hour.',
-      },
       { key: 'JOB_SCAN_INTERVAL',      label: 'Job Scan (s)',       type: 'number', hint: 'seconds between industry job checks',
         info: 'How often to poll each character\'s industry jobs for completion or 5-minute warnings.\n\n• 60s — near-real-time, one ESI call per character per minute\n• 300s (5 min) — default, low overhead\n• 600s — very light, may miss the 5-min warning window\n\nCost: 1 authenticated ESI call per character per interval.',
-      },
-    ],
-  },
-  {
-    label: 'ADVANCED',
-    fields: [
-      { key: 'MAX_PAGES', label: 'Max ESI Pages', type: 'number', hint: 'max contract pages to fetch (1 page = 1000 contracts)',
-        info: 'Each ESI page contains 1000 contracts. New listings always appear on early pages, so high values rarely find more deals but significantly increase scan time and ESI error rate.\n\n• 1–3 pages — fastest, catches freshly posted contracts only\n• 5–10 pages — recommended, covers the last few hours of listings\n• 20+ pages — slow, high ESI load, diminishing returns\n\nNote: items within each matching contract require a separate ESI call, so fewer pages = fewer total requests.',
-      },
-      { key: 'REGION_ID', label: 'Region', type: 'select',
-        options: [
-          { value: 0,        label: 'ALL MAJOR HUBS — Jita · Amarr · Dodixie · Hek · Rens' },
-          { value: 10000002, label: 'The Forge — Jita' },
-          { value: 10000043, label: 'Domain — Amarr' },
-          { value: 10000032, label: 'Sinq Laison — Dodixie' },
-          { value: 10000042, label: 'Metropolis — Hek' },
-          { value: 10000030, label: 'Heimatar — Rens' },
-        ],
-        info: 'Which market region(s) to scan for contracts.\n\n• ALL MAJOR HUBS — scans all 5 trade hubs per cycle; multiplies ESI load by 5 but covers the entire empire market.\n• Individual region — lower load, faster scan, recommended if you trade in one hub.',
       },
     ],
   },
@@ -67,7 +21,7 @@ const GROUPS = [
 
 const ALL_KEYS = GROUPS.flatMap(g => g.fields.map(f => f.key));
 // Default form values for fields that aren't plain text/number inputs
-const FIELD_DEFAULTS = { BLUEPRINT_TYPE: 'bpo', REGION_ID: 10000002 };
+const FIELD_DEFAULTS = { JOB_SCAN_INTERVAL: 300 };
 const LS_KEY = 'crest_bot_settings';
 
 function isMaskedTokenValue(value) {
@@ -94,7 +48,7 @@ function validateBotForm(form) {
   return null;
 }
 
-export default function MessagesPage() {
+export default function MessagesPage({ embedded = false, sectionId }) {
   const [form, setForm]         = useState({});
   const [status, setStatus]     = useState(null);
   const [saving, setSaving]     = useState(false);
@@ -119,12 +73,11 @@ export default function MessagesPage() {
         setForm(init);
         try { localStorage.setItem(LS_KEY, JSON.stringify(init)); } catch {}
         setStatus({
-          running:            data.running,
-          last_contract_scan: data.last_contract_scan,
-          last_job_scan:      data.last_job_scan,
-          last_alert_sent:    data.last_alert_sent,
-          alerts_sent:        data.alerts_sent,
-          last_error:         data.last_error,
+          running:         data.running,
+          last_job_scan:   data.last_job_scan,
+          last_alert_sent: data.last_alert_sent,
+          alerts_sent:     data.alerts_sent,
+          last_error:      data.last_error,
         });
       })
       .catch(() => {});
@@ -201,9 +154,8 @@ export default function MessagesPage() {
     try { return new Date(ts).toLocaleTimeString(); } catch { return ts; }
   }
 
-  return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', height: '100%', overflowY: 'auto' }}>
-    <div style={{ padding: '24px 28px', width: '100%', maxWidth: 720 }}>
+  const content = (
+    <>
 
       {/* Page title */}
       <div style={{ marginBottom: 28 }}>
@@ -211,7 +163,7 @@ export default function MessagesPage() {
           SETTINGS / MESSAGES
         </div>
         <div style={{ fontSize: 20, letterSpacing: 3, color: 'var(--text)', fontWeight: 400 }}>
-          TELEGRAM BOT CONFIGURATION
+          TELEGRAM QUEUE NOTIFICATIONS
         </div>
       </div>
 
@@ -382,18 +334,18 @@ export default function MessagesPage() {
         )}
       </div>
 
-      {/* Scanner status strip */}
+      {/* Queue notifier status strip */}
       {status && (
         <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
           <div style={{ fontSize: 9, letterSpacing: 2, color: 'var(--dim)', marginBottom: 10 }}>
-            SCANNER STATUS
+            QUEUE NOTIFIER STATUS
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px 20px' }}>
             {[
-              { label: 'Running',         val: status.running ? 'YES' : 'NO', color: status.running ? 'var(--green)' : 'var(--dim)' },
-              { label: 'Alerts Sent',     val: status.alerts_sent ?? '—' },
-              { label: 'Last Contract',   val: fmtTs(status.last_contract_scan) },
-              { label: 'Last Job Scan',   val: fmtTs(status.last_job_scan) },
+              { label: 'Running',            val: status.running ? 'YES' : 'NO', color: status.running ? 'var(--green)' : 'var(--dim)' },
+              { label: 'Notifications Sent', val: status.alerts_sent ?? '—' },
+              { label: 'Last Queue Scan',    val: fmtTs(status.last_job_scan) },
+              { label: 'Last Notification',  val: fmtTs(status.last_alert_sent) },
             ].map(item => (
               <div key={item.label}>
                 <div style={{ fontSize: 9, letterSpacing: 1.5, color: 'var(--dim)', textTransform: 'uppercase', marginBottom: 3 }}>
@@ -412,7 +364,28 @@ export default function MessagesPage() {
           )}
         </div>
       )}
-    </div>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <section
+        id={sectionId}
+        className="settings-stack-section"
+        style={{ display: 'flex', justifyContent: 'center', background: 'rgba(255,255,255,0.018)', border: '1px solid rgba(255,255,255,0.06)' }}
+      >
+        <div style={{ padding: '24px 28px', width: '100%', maxWidth: 900 }}>
+          {content}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', height: '100%', overflowY: 'auto' }}>
+      <div style={{ padding: '24px 28px', width: '100%', maxWidth: 720 }}>
+        {content}
+      </div>
     </div>
   );
 }

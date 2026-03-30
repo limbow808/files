@@ -1,6 +1,7 @@
 import { useMemo, useState, memo } from 'react';
 import { useApi } from '../hooks/useApi';
 import { API } from '../App';
+import { normalizeBlueprintTech } from '../utils/blueprintTech';
 import { fmtDuration, fmtISK, fmtVol } from '../utils/fmt';
 
 const SORT_DEFAULT = { key: 'payback_days', dir: 'asc' };
@@ -8,7 +9,7 @@ const SORT_DEFAULT = { key: 'payback_days', dir: 'asc' };
 const COLUMNS = [
   { key: 'name', label: 'ITEM', align: 'left' },
   { key: 'category', label: 'CAT' },
-  { key: 'tech', label: 'TECH' },
+  { key: 'tech_label', label: 'TECH' },
   { key: 'price', label: 'BPO PRICE' },
   { key: 'adj_net_profit', label: 'PROFIT/RUN' },
   { key: 'roi', label: 'ROI' },
@@ -67,7 +68,10 @@ function BlueprintsPage({ refreshKey = 0 }) {
 
   const rows = data?.results || [];
   const filteredRows = useMemo(() => {
-    let next = rows;
+    let next = rows.map((row) => ({
+      ...row,
+      tech_label: normalizeBlueprintTech(row.tech || row.tech_level),
+    }));
     if (search) {
       const query = search.toLowerCase();
       next = next.filter((row) => {
@@ -89,7 +93,7 @@ function BlueprintsPage({ refreshKey = 0 }) {
     }
 
     if (techFilter !== 'ALL') {
-      next = next.filter((row) => String(row.tech || '').toUpperCase() === techFilter);
+      next = next.filter((row) => row.tech_label === techFilter);
     }
 
     return [...next].sort((left, right) => {
@@ -162,13 +166,13 @@ function BlueprintsPage({ refreshKey = 0 }) {
             <div className="filter-group">
               <span className="filter-label">Tech</span>
               <div className="filter-options">
-                {['ALL', '1', '2'].map((option) => (
+                {['ALL', 'T1', 'T2'].map((option) => (
                   <button
                     key={option}
                     className={`chip${techFilter === option ? ' active' : ''}`}
                     onClick={() => setTechFilter(option)}
                   >
-                    {option === 'ALL' ? 'All' : `T${option}`}
+                    {option === 'ALL' ? 'All' : option}
                   </button>
                 ))}
               </div>
@@ -253,7 +257,7 @@ function BlueprintsPage({ refreshKey = 0 }) {
                       </div>
                     </td>
                     <td>{row.category || '—'}</td>
-                    <td>{row.tech ? `T${row.tech}` : '—'}</td>
+                    <td>{row.tech_label || '—'}</td>
                     <td>{fmtISK(row.price)}</td>
                     <td style={{ color: row.adj_net_profit > 0 ? 'var(--green)' : 'var(--text)' }}>{fmtISK(row.adj_net_profit)}</td>
                     <td>{fmtPct(row.roi)}</td>

@@ -1,29 +1,22 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { API } from '../App';
+import { DetailStat, PageHeader, SummaryCard, TwoPaneLayout } from '../components/shared/PagePrimitives';
+import { normalizeBlueprintTech } from '../utils/blueprintTech';
 import { fmtDuration, fmtISK, fmtVol } from '../utils/fmt';
 
 const SORT_DEFAULT = { key: 'payback_days', dir: 'asc' };
 
 const COLUMNS = [
   { key: 'name', label: 'ITEM', align: 'left' },
-  { key: 'price', label: 'BPO PRICE' },
+  { key: 'price', label: 'ENTRY PRICE' },
   { key: 'expected_daily_profit', label: 'DAILY PROFIT' },
   { key: 'payback_days', label: 'PAYBACK' },
   { key: 'avg_daily_volume', label: 'DEMAND' },
   { key: 'market_spread_pct', label: 'SPREAD' },
   { key: 'value_gap_pct', label: 'VALUE GAP' },
-  { key: 'tech', label: 'TECH' },
+  { key: 'tech_label', label: 'TECH' },
 ];
-
-function SummaryCard({ label, value, tone = 'neutral' }) {
-  return (
-    <div className={`bp-investment-summary bp-investment-summary--${tone}`}>
-      <div className="bp-investment-summary__value">{value}</div>
-      <div className="bp-investment-summary__label">{label}</div>
-    </div>
-  );
-}
 
 function fmtPct(value) {
   if (value == null || !Number.isFinite(value)) return '—';
@@ -121,15 +114,6 @@ function valueGapPct(row) {
   return ((price - reference) / reference) * 100.0;
 }
 
-function DetailStat({ label, value, tone }) {
-  return (
-    <div className="tools-detail-stat">
-      <div className="tools-detail-stat__label">{label}</div>
-      <div className="tools-detail-stat__value" style={tone ? { color: tone } : undefined}>{value}</div>
-    </div>
-  );
-}
-
 function HistoryCard({ title, summary, current, loading, error, stale, series }) {
   const outlook = describeHistory(summary);
   return (
@@ -166,7 +150,11 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
   const rows = data?.results || [];
 
   const filteredRows = useMemo(() => {
-    let next = rows.map((row) => ({ ...row, value_gap_pct: valueGapPct(row) }));
+    let next = rows.map((row) => ({
+      ...row,
+      tech_label: normalizeBlueprintTech(row.tech || row.tech_level),
+      value_gap_pct: valueGapPct(row),
+    }));
     if (search) {
       const query = search.toLowerCase();
       next = next.filter((row) => {
@@ -180,7 +168,7 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
     }
     if (affordableOnly) next = next.filter((row) => row.affordable !== false);
     if (hideOwned) next = next.filter((row) => !row.already_owned);
-    if (techFilter !== 'ALL') next = next.filter((row) => String(row.tech || '').toUpperCase() === techFilter);
+    if (techFilter !== 'ALL') next = next.filter((row) => row.tech_label === techFilter);
     return [...next].sort((left, right) => {
       const value = compareValues(left[sort.key], right[sort.key], sort.dir);
       if (value !== 0) return value;
@@ -199,10 +187,21 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
   }, [filteredRows, selectedBlueprintId]);
 
   const selectedRow = filteredRows.find((row) => row.blueprint_id === selectedBlueprintId) || null;
+  const selectedEntryBlueprintId = selectedRow
+    ? Number(selectedRow.entry_blueprint_history_type_id || selectedRow.entry_blueprint_id || selectedRow.blueprint_id || 0)
+    : null;
+  const selectedEntryBlueprintName = selectedRow?.entry_blueprint_name || (selectedRow ? `${selectedRow.name} Blueprint` : 'Blueprint');
+  const selectedIsInvention = selectedRow?.source === 'invention';
+  const selectedEntryAsk = selectedRow?.entry_blueprint_price ?? selectedRow?.market_price ?? null;
+  const selectedEntryBid = selectedRow?.entry_blueprint_buy_price ?? selectedRow?.market_buy_price ?? null;
+  const selectedEntrySpread = selectedRow?.entry_blueprint_market_spread_pct ?? selectedRow?.market_spread_pct ?? null;
+  const selectedInventionSuccess = selectedRow?.invention_success_chance ?? selectedRow?.invention_detail?.success_chance ?? null;
+  const selectedInventionRunsPerBpc = selectedRow?.inv_output_runs_per_bpc ?? selectedRow?.invention_detail?.output_runs_per_bpc ?? null;
+  const selectedInventionCostPerRun = selectedRow?.invention_cost_per_run ?? selectedRow?.invention_detail?.total_cost_per_run ?? null;
   const outputHistoryUrl = selectedRow ? `${API}/api/tools/market-history?type_id=${selectedRow.output_id}&days=${historyDays}` : null;
-  const bpoHistoryUrl = selectedRow ? `${API}/api/tools/market-history?type_id=${selectedRow.blueprint_id}&days=${historyDays}` : null;
+  const entryHistoryUrl = selectedEntryBlueprintId ? `${API}/api/tools/market-history?type_id=${selectedEntryBlueprintId}&days=${historyDays}` : null;
   const { data: outputHistory, loading: outputLoading, error: outputError, stale: outputStale } = useApi(outputHistoryUrl, [outputHistoryUrl]);
-  const { data: bpoHistory, loading: bpoLoading, error: bpoError, stale: bpoStale } = useApi(bpoHistoryUrl, [bpoHistoryUrl]);
+  const { data: entryHistory, loading: entryLoading, error: entryError, stale: entryStale } = useApi(entryHistoryUrl, [entryHistoryUrl]);
 
   const bestPayback = filteredRows.find((row) => row.payback_days != null) || null;
   const topDailyProfit = filteredRows.reduce((best, row) => {
@@ -225,21 +224,17 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
 
   return (
     <div className="calc-page">
-      <div className="panel tools-shell">
-        <div className="panel-hdr bp-investment-header">
-          <div>
-            <div className="panel-title">Market Prognosis</div>
-            <div className="bp-investment-subtitle">
-              Exact current BPO pricing, output liquidity, and cached market history for evaluating blueprint entries as long-term investments.
-            </div>
-          </div>
-          <div className="tools-header-meta">
-            <span>{stale ? 'Refreshing live market view…' : 'Jita market + cached history'}</span>
-            <button type="button" className="header-scan-btn" onClick={refetch}>Refresh</button>
-          </div>
-        </div>
+      <div className="panel tools-shell app-page-shell">
+        <PageHeader
+          title="Market Prognosis"
+          subtitle="Exact current BPO pricing, output liquidity, and cached market history for evaluating blueprint entries as long-term investments."
+          metaClassName="tools-header-meta"
+        >
+          <span>{stale ? 'Refreshing live market view…' : 'Jita market + cached history'}</span>
+          <button type="button" className="header-scan-btn" onClick={refetch}>Refresh</button>
+        </PageHeader>
 
-        <div className="bp-investment-summary-grid">
+        <div className="app-summary-grid">
           <SummaryCard label="Visible Opportunities" value={filteredRows.length.toLocaleString()} tone="neutral" />
           <SummaryCard label="Fastest Payback" value={bestPayback ? `${bestPayback.name} · ${fmtDays(bestPayback.payback_days)}` : '—'} tone="good" />
           <SummaryCard label="Highest Daily Profit" value={topDailyProfit ? `${topDailyProfit.name} · ${fmtISK(topDailyProfit.expected_daily_profit)}` : '—'} tone="accent" />
@@ -273,9 +268,9 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
             <div className="filter-group">
               <span className="filter-label">Tech</span>
               <div className="filter-options">
-                {['ALL', '1', '2'].map((option) => (
+                {['ALL', 'T1', 'T2'].map((option) => (
                   <button key={option} className={`chip${techFilter === option ? ' active' : ''}`} onClick={() => setTechFilter(option)}>
-                    {option === 'ALL' ? 'All' : `T${option}`}
+                    {option === 'ALL' ? 'All' : option}
                   </button>
                 ))}
               </div>
@@ -316,8 +311,11 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
         )}
 
         {!!filteredRows.length && (
-          <div className="market-prognosis-layout">
-            <div className="calc-body bp-investment-table-wrap">
+          <TwoPaneLayout
+            className="market-prognosis-layout"
+            mainClassName="calc-body bp-investment-table-wrap"
+            detailClassName="tools-detail-panel market-prognosis-detail"
+            main={(
               <table className="calc-table bp-investment-table market-prognosis-table">
                 <thead>
                   <tr>
@@ -357,6 +355,7 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
                             <div className="bp-investment-item__name">{row.name}</div>
                             <div className="bp-investment-item__meta">
                               <span>{row.item_group || 'Blueprint'}</span>
+                              {row.source === 'invention' && <span>{row.source_label}</span>}
                               {row.personal_owned && <span className="bp-investment-badge bp-investment-badge--owned">OWNED</span>}
                               {row.corp_owned && <span className="bp-investment-badge bp-investment-badge--corp">CORP</span>}
                               {row.affordable && <span className="bp-investment-badge bp-investment-badge--affordable">READY</span>}
@@ -370,69 +369,71 @@ export default memo(function MarketPrognosisPage({ refreshKey = 0 }) {
                       <td>{fmtVol(row.avg_daily_volume)}</td>
                       <td>{fmtPct(row.market_spread_pct)}</td>
                       <td>{fmtPct(row.value_gap_pct)}</td>
-                      <td>{row.tech ? `T${row.tech}` : '—'}</td>
+                      <td>{row.tech_label || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </div>
-
-            <aside className="tools-detail-panel market-prognosis-detail">
-              {selectedRow ? (
-                <>
-                  <div className="tools-detail-head">
-                    <div>
-                      <div className="tools-detail-title">{selectedRow.name}</div>
-                      <div className="tools-detail-subtitle">{selectedRow.item_group || selectedRow.category || 'Blueprint'} · T{selectedRow.tech || '—'}</div>
-                    </div>
-                    <PrognosisBadge label={describeHistory(outputHistory?.summary).label} tone={describeHistory(outputHistory?.summary).tone} />
+            )}
+            detail={selectedRow ? (
+              <>
+                <div className="app-detail-head">
+                  <div>
+                    <div className="app-detail-title">{selectedRow.name}</div>
+                    <div className="app-detail-subtitle">{selectedRow.item_group || selectedRow.category || 'Blueprint'} · {selectedRow.tech_label || '—'} · {selectedRow.source_label || 'JITA MARKET'}</div>
                   </div>
+                  <PrognosisBadge label={describeHistory(outputHistory?.summary).label} tone={describeHistory(outputHistory?.summary).tone} />
+                </div>
 
-                  <div className="tools-detail-copy">
-                    Blueprint entry is priced against current Jita data, while the detail lane shows cached history for both the finished item and the blueprint original itself over the selected horizon.
-                  </div>
+                <div className="app-detail-copy">
+                  {selectedIsInvention
+                    ? `Payback is measured against ${selectedEntryBlueprintName}, because invention cost is already included in the per-run profit model for ${selectedRow.name}.`
+                    : 'Blueprint entry is priced against current Jita data, while the detail lane shows cached history for both the finished item and the blueprint original itself over the selected horizon.'}
+                </div>
 
-                  <div className="tools-detail-grid">
-                    <DetailStat label="BPO Ask" value={fmtISK(selectedRow.market_price)} />
-                    <DetailStat label="BPO Bid" value={fmtISK(selectedRow.market_buy_price)} />
-                    <DetailStat label="Spread" value={fmtPct(selectedRow.market_spread_pct)} />
-                    <DetailStat label="Value Gap" value={fmtPct(selectedRow.value_gap_pct)} tone={Number(selectedRow.value_gap_pct || 0) <= 0 ? 'var(--green)' : 'var(--accent)'} />
-                    <DetailStat label="Daily Profit" value={fmtISK(selectedRow.expected_daily_profit)} tone="var(--green)" />
-                    <DetailStat label="Payback" value={fmtDays(selectedRow.payback_days)} />
-                    <DetailStat label="Demand" value={fmtVol(selectedRow.avg_daily_volume)} />
-                    <DetailStat label="Job Time" value={fmtDuration(selectedRow.duration)} />
-                  </div>
+                <div className="app-detail-grid">
+                  <DetailStat label={selectedIsInvention ? 'Entry BPO Ask' : 'BPO Ask'} value={fmtISK(selectedEntryAsk)} />
+                  <DetailStat label={selectedIsInvention ? 'Entry BPO Bid' : 'BPO Bid'} value={fmtISK(selectedEntryBid)} />
+                  <DetailStat label="Spread" value={fmtPct(selectedEntrySpread)} />
+                  <DetailStat label="Value Gap" value={fmtPct(selectedRow.value_gap_pct)} tone={Number(selectedRow.value_gap_pct || 0) <= 0 ? 'var(--green)' : 'var(--accent)'} />
+                  {selectedIsInvention && <DetailStat label="Success" value={fmtPct(selectedInventionSuccess != null ? Number(selectedInventionSuccess) * 100 : null)} />}
+                  {selectedIsInvention && <DetailStat label="Inv Cost / Run" value={fmtISK(selectedInventionCostPerRun)} />}
+                  {selectedIsInvention && <DetailStat label="Runs / BPC" value={selectedInventionRunsPerBpc != null ? String(selectedInventionRunsPerBpc) : '—'} />}
+                  <DetailStat label="Daily Profit" value={fmtISK(selectedRow.expected_daily_profit)} tone="var(--green)" />
+                  <DetailStat label="Payback" value={fmtDays(selectedRow.payback_days)} />
+                  <DetailStat label="Demand" value={fmtVol(selectedRow.avg_daily_volume)} />
+                  <DetailStat label="Job Time" value={fmtDuration(selectedRow.duration)} />
+                </div>
 
-                  <HistoryCard
-                    title="Output Market"
-                    summary={outputHistory?.summary}
-                    current={outputHistory?.current}
-                    loading={outputLoading}
-                    error={outputError}
-                    stale={outputStale}
-                    series={outputHistory?.series}
-                  />
+                <HistoryCard
+                  title="Output Market"
+                  summary={outputHistory?.summary}
+                  current={outputHistory?.current}
+                  loading={outputLoading}
+                  error={outputError}
+                  stale={outputStale}
+                  series={outputHistory?.series}
+                />
 
-                  <HistoryCard
-                    title="BPO Market"
-                    summary={bpoHistory?.summary}
-                    current={bpoHistory?.current}
-                    loading={bpoLoading}
-                    error={bpoError}
-                    stale={bpoStale}
-                    series={bpoHistory?.series}
-                  />
+                <HistoryCard
+                  title={selectedIsInvention ? 'Entry BPO Market' : 'BPO Market'}
+                  summary={entryHistory?.summary}
+                  current={entryHistory?.current}
+                  loading={entryLoading}
+                  error={entryError}
+                  stale={entryStale}
+                  series={entryHistory?.series}
+                />
 
-                  <div className="bp-investment-links" style={{ marginTop: 10 }}>
-                    <a href={`https://www.eveworkbench.com/market/sell/${selectedRow.blueprint_id}`} target="_blank" rel="noreferrer">BPO</a>
-                    <a href={`https://market.fuzzwork.co.uk/type/${selectedRow.output_id}/`} target="_blank" rel="noreferrer">ITEM</a>
-                  </div>
-                </>
-              ) : (
-                <div className="tools-detail-empty">Select a blueprint to inspect its exact market state and cached history.</div>
-              )}
-            </aside>
-          </div>
+                <div className="bp-investment-links" style={{ marginTop: 10 }}>
+                  <a href={`https://www.eveworkbench.com/market/sell/${selectedEntryBlueprintId || selectedRow.blueprint_id}`} target="_blank" rel="noreferrer">{selectedIsInvention ? 'ENTRY BPO' : 'BPO'}</a>
+                  <a href={`https://market.fuzzwork.co.uk/type/${selectedRow.output_id}/`} target="_blank" rel="noreferrer">ITEM</a>
+                </div>
+              </>
+            ) : (
+              <div className="app-detail-empty">Select a blueprint to inspect its exact market state and cached history.</div>
+            )}
+          />
         )}
       </div>
     </div>

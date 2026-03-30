@@ -29,7 +29,7 @@ files/
 │   ├── auth.py         # EVE SSO OAuth2 flow
 │   ├── assets.py       # Character assets & wallet
 │   ├── hangar.py       # Hangar inventory & buildability
-│   ├── alert_scanner.py# Background Telegram alerts
+│   ├── queue_notifier.py # Telegram queue notifications
 │   ├── contracts_cache.py # Contract cache DB
 │   ├── seeder.py       # SDE → crest.db importer
 │   ├── *.db, *.json    # Runtime data (gitignored)
@@ -61,7 +61,7 @@ files/
 - Python 3.10+
 - Node.js 18+
 - An EVE developer app at [developers.eveonline.com](https://developers.eveonline.com) (free)
-- Optional: a Telegram bot token for alerts
+- Optional: a Telegram bot token for queue notifications
 
 ---
 
@@ -94,9 +94,10 @@ ESI_CLIENT_SECRET=your_client_secret
 ESI_CALLBACK_URL=http://localhost:8080/callback
 TELEGRAM_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
+JOB_SCAN_INTERVAL=300
 ```
 
-`TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` are optional — alerts simply won't fire if omitted.
+`TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` are optional — queue notifications simply won't fire if omitted. `JOB_SCAN_INTERVAL` defaults to `300` seconds if you leave it out.
 
 Note: if VS Code shows `An environment file is configured but terminal environment injection is disabled`, that warning is about VS Code terminal sessions, not CREST itself. This backend reads `backend/.env` directly at startup, so `python server.py` still picks up `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` from that file. Enable the VS Code setting `python.terminal.useEnvFile` only if you also want `.env` values injected into new integrated terminal sessions and debug launches.
 
@@ -175,7 +176,5 @@ Key tunables are at the top of each file (in `backend/`):
 |---|---|---|---|
 | `calculator.py` | `sales_tax` | `0.036` | Accounting L5 = 3.6% |
 | `calculator.py` | `broker_fee` | `0.03` | Broker Relations L5 = 3% |
-| `alert_scanner.py` | `ROI_THRESHOLD` | `50.0` | Min ROI % for Telegram alert |
-| `alert_scanner.py` | `BREAKEVEN_MAX_RUNS` | `1000` | Max breakeven runs for contract alerts |
-| `alert_scanner.py` | `ALERT_COOLDOWN_HOURS` | `6` | Re-alert cooldown per deal |
+| `queue_notifier.py` | `JOB_SCAN_INTERVAL` | `300` | Seconds between industry job checks for 5-minute warnings and completion notices |
 

@@ -2,30 +2,32 @@ import { memo, useMemo, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import CargoTimelinePanel from '../components/CargoTimelinePanel';
 import { LoadingState } from '../components/ui';
-import { fmtISK } from '../utils/fmt';
+import { fmtISK, fmtVol } from '../utils/fmt';
 import { API } from '../App';
 import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/appSettings';
 
+function formatCubicMeters(value) {
+  if (!value || Number(value) <= 0) return '0 m3';
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(Number(value))} m3`;
+}
+
+function buildCopyMultibuyText(rows, mode) {
+  return rows
+    .map((row) => {
+      const quantity = Math.max(0, Math.ceil(Number(mode === 'delta' ? row.delta_qty : row.required_qty) || 0));
+      if (!quantity) return null;
+      return `${row.name} ${quantity}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
 export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTINGS, onSaveSettings }) {
-  const [goal, setGoal] = useState('balanced');
-  const [hub, setHub] = useState('Jita');
-  const [minValue, setMinValue] = useState('1000000');
+  const [copiedMode, setCopiedMode] = useState('');
   const plannerStructureType = facilityToPlannerStructureType(appSettings?.facility);
   const operationsCorpId = String(appSettings?.operations_corp_id || '');
   const corpInputDivision = String(appSettings?.corp_input_division || '');
   const corpOutputDivision = String(appSettings?.corp_output_division || '');
-
-  const query = useMemo(() => {
-    const params = new URLSearchParams({
-      goal,
-      hub,
-      limit: '30',
-      min_total_value: minValue || '0',
-    });
-    if (operationsCorpId) params.set('operations_corp_id', operationsCorpId);
-    if (corpOutputDivision) params.set('corp_output_division', corpOutputDivision);
-    return `${API}/api/haul/sell-recommendations?${params.toString()}`;
-  }, [corpOutputDivision, goal, hub, minValue, operationsCorpId]);
 
   const plannerQuery = useMemo(() => {
     const params = new URLSearchParams({
@@ -51,8 +53,7 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
     return `${API}/api/job-planner?${params.toString()}`;
   }, [appSettings, corpInputDivision, corpOutputDivision, operationsCorpId, plannerStructureType]);
 
-  const { data, loading, error, stale, refetch } = useApi(query, [query]);
-  const { data: plannerData } = useApi(plannerQuery, [plannerQuery]);
+  const { data: plannerData, loading, error, stale, refetch } = useApi(plannerQuery, [plannerQuery]);
   const {
     data: corpContext,
     loading: corpContextLoading,
@@ -60,73 +61,101 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
     refetch: refetchCorpContext,
   } = useApi(`${API}/api/corp-context`, []);
 
-  const items = data?.items || [];
-  const summary = data?.summary || {};
-  const hubs = data?.hubs || ['Jita', 'Amarr', 'Dodixie', 'Rens', 'Hek'];
   const plannerItems = plannerData?.items || [];
+  const inboundRows = plannerData?.inbound_requirements?.rows || [];
+  const inboundSummary = plannerData?.inbound_requirements?.summary || {};
   const plannerSciItems = plannerItems.filter(item => ['copy_first', 'copy_then_invent', 'invent_first'].includes(item.action_type));
   const plannerMfgItems = plannerItems.filter(item => item.action_type === 'manufacture');
-  const haulInventorySource = data?.inventory_source || null;
   const plannerInventorySource = plannerData?.inventory_source || null;
   const plannerWalletSource = plannerData?.wallet_source || null;
   const corporations = corpContext?.corporations || [];
   const selectedCorp = corporations.find(corp => String(corp.corporation_id) === operationsCorpId) || null;
   const divisionOptions = selectedCorp?.available_divisions || [];
   const corpWarnings = corpContext?.warnings || [];
+  const selectedOutputDivision = divisionOptions.find((division) => String(division.flag) === corpOutputDivision) || null;
+  const plannerSourceCorpName = String(selectedCorp?.corporation_name || plannerInventorySource?.corporation_name || 'UNKNOWN CORP').toUpperCase();
+  const plannerSourceDivision = String(
+    plannerInventorySource?.division_label
+    || plannerInventorySource?.division_flag
+    || (corpInputDivision ? `Input ${corpInputDivision}` : 'Select Input Hangar'),
+  ).toUpperCase();
+  const outputSourceDivision = String(
+    selectedOutputDivision?.label
+    || selectedOutputDivision?.flag
+    || (corpOutputDivision ? `Output ${corpOutputDivision}` : 'Select Output Hangar'),
+  ).toUpperCase();
+  const deltaRows = useMemo(
+    () => inboundRows.filter((row) => Number(row.delta_qty || 0) > 0),
+    [inboundRows],
+  );
+  const allRows = useMemo(
+    () => inboundRows.filter((row) => Number(row.required_qty || 0) > 0),
+    [inboundRows],
+  );
 
   function updateSettings(patch) {
     onSaveSettings?.({ ...appSettings, ...patch });
+  }
+
+  async function handleCopy(mode) {
+    const relevantRows = mode === 'delta' ? deltaRows : allRows;
+    const text = buildCopyMultibuyText(relevantRows, mode);
+    if (!text || !navigator?.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedMode(mode);
+      window.setTimeout(() => setCopiedMode(''), 1800);
+    } catch {
+      // Ignore clipboard failures; the page remains usable without OS clipboard access.
+    }
   }
 
   return (
     <div className="calc-page" style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div className="panel-hdr" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         <span style={{ fontSize: 11, letterSpacing: 2, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
-          SMART SELL LISTINGS
+          INBOUND HAUL REQUIREMENTS
         </span>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
-          GOAL
-          <select
-            value={goal}
-            onChange={(e) => setGoal(e.target.value)}
-            style={controlStyle}
-          >
-            <option value="fast">FAST</option>
-            <option value="balanced">BALANCED</option>
-            <option value="max">MAX ISK</option>
-          </select>
-        </label>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
-          SELL HUB
-          <select
-            value={hub}
-            onChange={(e) => setHub(e.target.value)}
-            style={controlStyle}
-          >
-            {hubs.map((option) => (
-              <option key={option} value={option}>{option.toUpperCase()}</option>
-            ))}
-          </select>
-        </label>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
-          MIN VALUE
-          <input
-            type="number"
-            min="0"
-            step="100000"
-            value={minValue}
-            onChange={(e) => setMinValue(e.target.value)}
-            style={{ ...controlStyle, width: 110 }}
-          />
-        </label>
 
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 10, color: stale ? 'var(--accent)' : 'var(--dim)', letterSpacing: 1 }}>
-            {stale ? 'REFRESHING' : `${summary.item_count || 0} ITEMS`}
+            {stale ? 'REFRESHING' : `${inboundSummary.row_count || 0} MATERIALS · ${inboundSummary.consumer_count || 0} JOBS`}
           </span>
+          <button
+            onClick={() => handleCopy('delta')}
+            disabled={!deltaRows.length}
+            style={{
+              background: deltaRows.length ? '#4cff91' : 'rgba(255,255,255,0.08)',
+              border: '1px solid var(--border)',
+              color: deltaRows.length ? '#000' : 'var(--dim)',
+              fontFamily: 'var(--mono)',
+              fontSize: 10,
+              letterSpacing: 1,
+              padding: '3px 10px',
+              cursor: deltaRows.length ? 'pointer' : 'default',
+              fontWeight: 700,
+            }}
+            title="Copy only what is still missing from the planner input hangar"
+          >
+            {copiedMode === 'delta' ? 'COPIED DELTA' : 'COPY DELTA'}
+          </button>
+          <button
+            onClick={() => handleCopy('all')}
+            disabled={!allRows.length}
+            style={{
+              background: 'none',
+              border: '1px solid var(--border)',
+              color: allRows.length ? 'var(--text)' : 'var(--dim)',
+              fontFamily: 'var(--mono)',
+              fontSize: 10,
+              letterSpacing: 1,
+              padding: '3px 10px',
+              cursor: allRows.length ? 'pointer' : 'default',
+            }}
+            title="Copy the full planner requirement list regardless of current stock"
+          >
+            {copiedMode === 'all' ? 'COPIED ALL' : 'COPY ALL'}
+          </button>
           <button
             onClick={refetch}
             disabled={loading}
@@ -214,17 +243,17 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
       <div style={{ padding: '8px 14px 10px', borderBottom: '1px solid var(--border)', background: 'rgba(255,157,61,0.05)', display: 'flex', flexDirection: 'column', gap: 4 }}>
         <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
           {operationsCorpId
-            ? `OPERATIONS SOURCE · ${String(selectedCorp?.corporation_name || haulInventorySource?.corporation_name || 'UNKNOWN CORP').toUpperCase()}${corpInputDivision ? ` · INPUT ${corpInputDivision}` : ''}${corpOutputDivision ? ` · OUTPUT ${corpOutputDivision}` : ''}`
-            : 'OPERATIONS SOURCE · PERSONAL / LEGACY ASSET MODE'}
+            ? `INBOUND TARGET · ${plannerSourceCorpName} · ${plannerSourceDivision}`
+            : 'INBOUND TARGET · PERSONAL / LEGACY ASSET MODE'}
         </div>
-        {haulInventorySource?.warning && (
-          <div style={{ fontSize: 10, color: 'var(--accent)', letterSpacing: 0.4 }}>
-            HAUL SOURCE WARNING: {haulInventorySource.warning}
+        {operationsCorpId && (
+          <div style={{ fontSize: 10, letterSpacing: 1, color: 'var(--dim)' }}>
+            {`OUTPUT INVENTORY · ${outputSourceDivision}`}
           </div>
         )}
         {plannerInventorySource?.warning && (
           <div style={{ fontSize: 10, color: 'var(--accent)', letterSpacing: 0.4 }}>
-            PLANNER SOURCE WARNING: {plannerInventorySource.warning}
+            INPUT HANGAR WARNING: {plannerInventorySource.warning}
           </div>
         )}
         {plannerWalletSource?.warning && (
@@ -240,10 +269,11 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, padding: '10px 14px', borderBottom: '1px solid var(--border)', background: 'linear-gradient(180deg, rgba(255,71,0,0.08), rgba(255,71,0,0))' }}>
-        <MetricCard label="TARGET GROSS" value={fmtISK(summary.total_recommended_value)} tone="var(--accent)" />
-        <MetricCard label="NET AFTER FEES" value={fmtISK(summary.total_net_after_fees)} tone="var(--green)" />
-        <MetricCard label="ITEMS WITH BETTER HUB" value={`${summary.items_with_better_hub || 0}`} tone="var(--blue)" />
-        <MetricCard label="UNITS" value={new Intl.NumberFormat('en-US').format(summary.total_units || 0)} tone="var(--text)" />
+        <MetricCard label="PLANNED JOBS" value={`${inboundSummary.consumer_count || 0}`} tone="var(--text)" />
+        <MetricCard label="TOTAL REQUIRED" value={fmtISK(inboundSummary.total_required_cost)} tone="var(--accent)" />
+        <MetricCard label="TO BUY" value={fmtISK(inboundSummary.total_delta_cost)} tone="var(--green)" />
+        <MetricCard label="TO HAUL" value={formatCubicMeters(inboundSummary.total_delta_m3)} tone="#4da6ff" />
+        <MetricCard label="STOCKED LINES" value={`${inboundSummary.stocked_count || 0}/${inboundSummary.row_count || 0}`} tone="var(--text)" />
       </div>
 
       <CargoTimelinePanel
@@ -254,45 +284,42 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
       />
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-        {loading && !data ? (
-          <LoadingState label="ANALYZING SELL OPTIONS" sub="ASSETS · ORDERS · HUBS" />
+        {loading && !plannerData ? (
+          <LoadingState label="BUILDING INBOUND HAUL LIST" sub="PLANNER JOBS · INPUT HANGAR · INVENTION" />
         ) : error ? (
           <div style={{ padding: '24px 16px', color: 'var(--error)', fontSize: 11, letterSpacing: 1 }}>
-            SELL RECOMMENDATIONS UNAVAILABLE
+            INBOUND REQUIREMENTS UNAVAILABLE
           </div>
-        ) : items.length === 0 ? (
+        ) : inboundRows.length === 0 ? (
           <div style={{ padding: '24px 16px', color: 'var(--dim)', fontSize: 11, letterSpacing: 1, textAlign: 'center' }}>
-            NO SELL CANDIDATES MATCH THE CURRENT FILTERS
+            NO INBOUND MATERIALS ARE REQUIRED FOR THE CURRENT JOB PLANNER QUEUE
           </div>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
             <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
               <tr style={{ background: 'var(--table-row-bg)' }}>
-                <th style={{ width: '30%', textAlign: 'left' }}>ITEM</th>
-                <th style={{ width: '8%' }}>QTY</th>
-                <th style={{ width: '12%' }}>LIST</th>
-                <th style={{ width: '12%' }}>NET</th>
-                <th style={{ width: '10%' }}>ETA</th>
-                <th style={{ width: '14%' }}>MARKET</th>
-                <th style={{ width: '14%', paddingRight: 14 }}>BETTER ELSEWHERE</th>
+                <th style={{ width: '31%', textAlign: 'left' }}>MATERIAL</th>
+                <th style={{ width: '11%' }}>TYPE</th>
+                <th style={{ width: '9%' }}>REQUIRED</th>
+                <th style={{ width: '10%' }}>INPUT</th>
+                <th style={{ width: '9%' }}>DELTA</th>
+                <th style={{ width: '10%' }}>DELTA M3</th>
+                <th style={{ width: '10%' }}>ALL MATS</th>
+                <th style={{ width: '10%', paddingRight: 14 }}>DELTA COST</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((item, idx) => {
-                const betterHub = item.better_hub;
-                const bestTone = betterHub ? 'var(--blue)' : 'var(--dim)';
-                const etaColor = item.estimated_days_to_sell == null
-                  ? 'var(--dim)'
-                  : item.estimated_days_to_sell <= 2
-                    ? 'var(--green)'
-                    : item.estimated_days_to_sell >= 10
-                      ? 'var(--accent)'
-                      : 'var(--text)';
+              {inboundRows.map((item, idx) => {
+                const stocked = Boolean(item.stocked);
+                const deltaQty = Number(item.delta_qty || 0);
+                const deltaTone = stocked ? '#4cff91' : 'var(--accent)';
+                const typeLabel = (item.groups || []).join(' · ') || 'MATERIAL';
+                const consumerLabel = `${item.consumer_count || 0} job${Number(item.consumer_count || 0) === 1 ? '' : 's'}`;
 
                 return (
                   <tr key={item.type_id} className="eve-row-reveal" style={{ animationDelay: `${idx * 18}ms` }}>
                     <td style={{ padding: '8px 10px', textAlign: 'left' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }} title={(item.consumer_names || []).join(' · ')}>
                         <img
                           src={`https://images.evetech.net/types/${item.type_id}/icon?size=32`}
                           alt=""
@@ -304,46 +331,31 @@ export default memo(function HaulPlannerPage({ appSettings = DEFAULT_APP_SETTING
                             {item.name}
                           </div>
                           <div style={{ display: 'flex', gap: 8, marginTop: 3, fontSize: 9, color: 'var(--dim)', letterSpacing: 0.5, flexWrap: 'wrap' }}>
-                            <span>{item.selected_hub.toUpperCase()}</span>
-                            <span>{item.goal.toUpperCase()}</span>
-                            {item.existing_listed_qty > 0 && <span>{item.existing_listed_qty} ALREADY LISTED</span>}
+                            <span>{consumerLabel.toUpperCase()}</span>
+                            <span>{fmtISK(item.unit_price || 0)}/UNIT</span>
+                            {stocked && <span style={{ color: '#4cff91' }}>STOCKED</span>}
                           </div>
                         </div>
                       </div>
                     </td>
-                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{new Intl.NumberFormat('en-US').format(item.quantity)}</td>
-                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--accent)' }}>
-                      <div>{fmtISK(item.recommended_price)}</div>
-                      <div style={{ fontSize: 9, color: 'var(--dim)', marginTop: 2 }}>
-                        floor {fmtISK(item.price_floor)}
-                      </div>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: typeLabel.includes('DATACORE') ? '#4da6ff' : 'var(--text)' }}>
+                      {typeLabel}
                     </td>
-                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--green)' }}>
-                      <div>{fmtISK(item.total_net_after_fees)}</div>
-                      <div style={{ fontSize: 9, color: 'var(--dim)', marginTop: 2 }}>
-                        {fmtISK(item.net_after_fees_per_unit)}/unit
-                      </div>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{fmtVol(item.required_qty)}</td>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: Number(item.available_qty || 0) > 0 ? '#4cff91' : 'var(--dim)' }}>
+                      {fmtVol(item.available_qty)}
                     </td>
-                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: etaColor }}>
-                      {item.estimated_days_to_sell != null ? `${item.estimated_days_to_sell.toFixed(1)}d` : '—'}
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: deltaTone }}>
+                      {stocked ? 'STOCKED' : fmtVol(item.delta_qty)}
                     </td>
-                    <td style={{ fontSize: 10, lineHeight: 1.4 }}>
-                      <div style={{ color: 'var(--text)' }}>
-                        best {fmtISK(item.selected_hub_best_sell)}
-                      </div>
-                      <div style={{ color: 'var(--dim)' }}>
-                        {item.selected_hub_order_count || 0} listings · vol {item.daily_volume != null ? fmtISK(item.daily_volume).replace(/\.0$/, '') : '—'}/day
-                      </div>
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: deltaQty > 0 ? '#4da6ff' : 'var(--dim)' }}>
+                      {deltaQty > 0 ? formatCubicMeters(item.delta_volume_m3) : '—'}
                     </td>
-                    <td style={{ paddingRight: 14, fontSize: 10, lineHeight: 1.4, color: bestTone }}>
-                      {betterHub ? (
-                        <>
-                          <div>{betterHub.hub.toUpperCase()} {fmtISK(betterHub.best_sell)}</div>
-                          <div style={{ color: 'var(--dim)' }}>+{fmtISK(betterHub.delta_total)} total</div>
-                        </>
-                      ) : (
-                        <span style={{ color: 'var(--dim)' }}>CURRENT HUB IS FINE</span>
-                      )}
+                    <td style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--text)' }}>
+                      {fmtISK(item.total_required_cost)}
+                    </td>
+                    <td style={{ paddingRight: 14, fontFamily: 'var(--mono)', fontSize: 11, color: deltaTone }}>
+                      {deltaQty > 0 ? fmtISK(item.delta_cost) : '—'}
                     </td>
                   </tr>
                 );

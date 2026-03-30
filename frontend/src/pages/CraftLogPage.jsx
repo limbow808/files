@@ -1,27 +1,11 @@
 import { useState, useMemo, memo } from 'react';
 import { useApi } from '../hooks/useApi';
+import { ContextCard, PageHeader, SummaryCard } from '../components/shared/PagePrimitives';
 import { fmtISK } from '../utils/fmt';
 import Loader from '../components/shared/Loader';
 import CraftJobProfitChart from '../components/CraftJobProfitChart';
 
 const API = '';
-
-// ── Small helpers ─────────────────────────────────────────────────────────────
-
-function KpiCard({ label, value, sub, color = 'var(--text)' }) {
-  return (
-    <div style={{
-      flex: 1, minWidth: 0,
-      padding: '10px 14px',
-      borderRight: '1px solid var(--border)',
-      display: 'flex', flexDirection: 'column', gap: 3,
-    }}>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 8, letterSpacing: 1.5, color: 'var(--dim)' }}>{label}</span>
-      <span style={{ fontFamily: 'var(--mono)', fontSize: 16, fontWeight: 700, color, lineHeight: 1 }}>{value}</span>
-      {sub && <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)' }}>{sub}</span>}
-    </div>
-  );
-}
 
 const profitColor  = v => v == null ? 'var(--dim)' : v >= 0 ? '#00cc66' : '#cc3333';
 const sellRateColor = rate => {
@@ -116,96 +100,88 @@ function CraftLogPage() {
     : sellRatePct >= 80 ? '#00cc66'
     : sellRatePct >= 50 ? '#ffcc44'
     : '#cc3333';
+  const activeViewLabel = tab === 'stats' ? 'By Item' : tab === 'log' ? 'Job Log' : 'Trends';
+  const activeRowCount = tab === 'stats' ? sortedItems.length : tab === 'log' ? log.length : weeks.length;
+  const syncStatus = syncing ? 'SYNCING ESI' : (syncMsg || 'READY');
+  const loadingStatus = statsLoading || logLoading || (tab === 'trends' && timelineLoading)
+    ? 'Refreshing revenue datasets…'
+    : 'Craft history, job log, and trend rollups are current.';
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--bg)' }}>
+    <div className="calc-page">
+      <div className="panel app-page-shell revenue-shell">
+        <PageHeader
+          title="Revenue"
+          subtitle="Completed-job economics, realized sales, and rolling craft performance across item, log, and trend views."
+        >
+          <span>{loadingStatus}</span>
+          <span>{syncStatus}</span>
+        </PageHeader>
 
-      {/* Header bar */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        padding: '6px 16px',
-        borderBottom: '1px solid var(--border)',
-        flexShrink: 0,
-      }}>
-        <span style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, color: 'var(--accent)' }}>◈ CRAFT LOG</span>
-        <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
-          {[30, 60, 90].map(d => (
-            <button key={d} onClick={() => setDays(d)} style={{
-              padding: '2px 8px', background: days === d ? 'var(--accent)' : 'transparent',
-              border: `1px solid ${days === d ? 'var(--accent)' : 'var(--border)'}`,
-              color: days === d ? '#000' : 'var(--dim)',
-              fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1, cursor: 'pointer', borderRadius: 2,
-            }}>{d}D</button>
-          ))}
+        <div className="app-summary-grid">
+          <SummaryCard label="Realized Profit" value={totals.realized_profit != null ? fmtISK(totals.realized_profit) : '—'} tone="good" className="revenue-summary-card" />
+          <SummaryCard label="Total Cost" value={totals.total_cost != null ? fmtISK(totals.total_cost) : '—'} tone="neutral" className="revenue-summary-card" />
+          <SummaryCard label="Avg Margin" value={avgMarginPct != null ? `${avgMarginPct.toFixed(1)}%` : '—'} tone="accent" className="revenue-summary-card" />
+          <SummaryCard label="ISK / Day" value={iskPerDay != null ? fmtISK(iskPerDay) : '—'} tone="good" className="revenue-summary-card" />
+          <SummaryCard label="Sell Rate" value={sellRatePct != null ? `${sellRatePct.toFixed(1)}%` : '—'} tone="neutral" className="revenue-summary-card" />
+          <SummaryCard label="Market Estimate" value={totals.est_profit != null ? fmtISK(totals.est_profit) : '—'} tone="neutral" className="revenue-summary-card" />
         </div>
-        <button onClick={handleSync} disabled={syncing} style={{
-          padding: '2px 10px', background: 'transparent',
-          border: '1px solid var(--border)',
-          color: syncing ? 'var(--dim)' : 'var(--text)',
-          fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
-          cursor: syncing ? 'default' : 'pointer', borderRadius: 2,
-        }}>
-          {syncing ? 'SYNCING...' : 'SYNC ESI'}
-        </button>
-        {syncMsg && <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: '#00cc66' }}>{syncMsg}</span>}
-      </div>
 
-      {/* KPI row */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-        <KpiCard
-          label="REALIZED PROFIT"
-          value={totals.realized_profit != null ? fmtISK(totals.realized_profit) : '—'}
-          color={profitColor(totals.realized_profit)}
-          sub="from actual sales"
-        />
-        <KpiCard
-          label="TOTAL COST"
-          value={totals.total_cost != null ? fmtISK(totals.total_cost) : '—'}
-          color="#ffcc44"
-          sub="mat + inv/copy overhead"
-        />
-        <KpiCard
-          label="AVG MARGIN"
-          value={avgMarginPct != null ? `${avgMarginPct.toFixed(1)}%` : '—'}
-          color={profitColor(avgMarginPct)}
-          sub="est profit ÷ revenue"
-        />
-        <KpiCard
-          label="ISK / DAY"
-          value={iskPerDay != null ? fmtISK(iskPerDay) : '—'}
-          color={profitColor(iskPerDay)}
-          sub={`over ${days} days`}
-        />
-        <KpiCard
-          label="SELL RATE"
-          value={sellRatePct != null ? `${sellRatePct.toFixed(1)}%` : '—'}
-          color={sellRateKpiColor}
-          sub="realized ÷ est revenue"
-        />
-        <KpiCard
-          label="MKT EST"
-          value={totals.est_profit != null ? fmtISK(totals.est_profit) : '—'}
-          color="var(--dim)"
-          sub={`${totals.job_count ?? 0} jobs · ${(totals.total_runs ?? 0).toLocaleString()} runs`}
-        />
-      </div>
+        <div className="app-context-grid">
+          <ContextCard
+            label="Horizon"
+            value={`${days} DAY WINDOW`}
+            meta={`${totals.job_count ?? 0} jobs · ${(totals.total_runs ?? 0).toLocaleString()} runs tracked in the selected period`}
+          />
+          <ContextCard
+            label="Active View"
+            value={`${activeViewLabel.toUpperCase()} · ${activeRowCount.toLocaleString()} rows`}
+            meta={tab === 'trends' ? 'Weekly rollups pair the profit chart with cost, revenue, and cumulative-profit history.' : tab === 'log' ? 'The job log shows imported completed runs with material cost, estimated profit, and completion date.' : 'The by-item view aggregates realized and estimated performance by manufactured output.'}
+          />
+          <ContextCard
+            label="Sync Status"
+            value={syncStatus}
+            meta="Sync ESI imports completed industry jobs, then refreshes the item and log datasets used by this page."
+          />
+        </div>
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-        {[['stats', 'BY ITEM'], ['log', 'JOB LOG'], ['trends', 'TRENDS']].map(([key, label]) => (
-          <button key={key} onClick={() => setTab(key)} style={{
-            padding: '4px 16px', background: 'transparent', border: 'none',
-            borderBottom: tab === key ? '2px solid var(--accent)' : '2px solid transparent',
-            color: tab === key ? 'var(--accent)' : 'var(--dim)',
-            fontFamily: 'var(--mono)', fontSize: 9, letterSpacing: 1,
-            cursor: 'pointer',
-          }}>{label}</button>
-        ))}
-      </div>
+        <div className="calc-filters">
+          <div className="calc-filters-inputs bp-investment-filters">
+            <div className="filter-group" style={{ borderRight: 'none' }}>
+              <span className="filter-label">Horizon</span>
+              <div className="filter-options">
+                {[30, 60, 90].map((value) => (
+                  <button key={value} className={`chip${days === value ? ' active' : ''}`} onClick={() => setDays(value)}>
+                    {value}D
+                  </button>
+                ))}
+              </div>
+            </div>
 
-      {/* Content */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            <div className="filter-group">
+              <span className="filter-label">View</span>
+              <div className="filter-options">
+                {[['stats', 'By Item'], ['log', 'Job Log'], ['trends', 'Trends']].map(([key, label]) => (
+                  <button key={key} className={`chip${tab === key ? ' active' : ''}`} onClick={() => setTab(key)}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="filter-group">
+              <span className="filter-label">Sync</span>
+              <div className="filter-options">
+                <button className="chip" onClick={handleSync} disabled={syncing}>
+                  {syncing ? 'Syncing…' : 'Sync ESI'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="revenue-content">
 
         {/* ── BY ITEM ── */}
         {tab === 'stats' && (
@@ -488,6 +464,7 @@ function CraftLogPage() {
           </div>
         )}
 
+        </div>
       </div>
     </div>
   );

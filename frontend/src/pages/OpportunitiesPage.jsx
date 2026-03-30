@@ -1,19 +1,11 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { useApi } from '../hooks/useApi';
 import { API } from '../App';
+import { ContextCard, DetailStat, PageHeader, SummaryCard, TwoPaneLayout } from '../components/shared/PagePrimitives';
 import { DEFAULT_APP_SETTINGS, facilityToPlannerStructureType } from '../utils/appSettings';
 import { fmtDuration, fmtISK, fmtVol } from '../utils/fmt';
 
 const SCIENCE_ACTIONS = new Set(['copy_first', 'copy_then_invent', 'invent_first']);
-
-function SummaryCard({ label, value, tone = 'neutral' }) {
-  return (
-    <div className={`bp-investment-summary bp-investment-summary--${tone}`}>
-      <div className="bp-investment-summary__value">{value}</div>
-      <div className="bp-investment-summary__label">{label}</div>
-    </div>
-  );
-}
 
 function buildOpportunityId(item) {
   return item.rec_id || item.reason_key || `${item.output_id || item.name}-${item.action_type || item.block_kind || 'opportunity'}`;
@@ -49,26 +41,17 @@ function opportunityValue(item, blocked = false) {
   return blocked ? Number(item.estimated_profit || 0) : Number(item.profit_per_cycle || 0);
 }
 
-function DetailStat({ label, value, tone }) {
-  return (
-    <div className="tools-detail-stat">
-      <div className="tools-detail-stat__label">{label}</div>
-      <div className="tools-detail-stat__value" style={tone ? { color: tone } : undefined}>{value}</div>
-    </div>
-  );
-}
-
 function SourceCard({ label, source }) {
   if (!source) return null;
   const sourceValue = source.mode === 'corp'
     ? `${source.corporation_name || 'Corp'}${source.division_flag ? ` · ${source.division_flag}` : ''}`
     : 'Personal / Legacy';
   return (
-    <div className="tools-source-card">
-      <div className="tools-source-card__label">{label}</div>
-      <div className="tools-source-card__value">{sourceValue}</div>
-      {source.warning && <div className="tools-source-card__warning">{source.warning}</div>}
-    </div>
+    <ContextCard
+      label={label}
+      value={sourceValue}
+      meta={source.warning || null}
+    />
   );
 }
 
@@ -167,39 +150,31 @@ export default memo(function OpportunitiesPage({ appSettings = DEFAULT_APP_SETTI
 
   return (
     <div className="calc-page">
-      <div className="panel tools-shell">
-        <div className="panel-hdr bp-investment-header">
-          <div>
-            <div className="panel-title">Opportunities</div>
-            <div className="bp-investment-subtitle">
-              Immediate queue candidates and blocked upside pulled out of the planner into a dedicated tools surface.
-            </div>
-          </div>
-          <div className="tools-header-meta">
-            <span>{stale ? 'Refreshing planner intelligence…' : 'Planner intelligence feed'}</span>
-            <button type="button" className="header-scan-btn" onClick={refetch}>Refresh</button>
-          </div>
-        </div>
+      <div className="panel tools-shell app-page-shell">
+        <PageHeader
+          title="Opportunities"
+          subtitle="Immediate queue candidates and blocked upside pulled out of the planner into a dedicated tools surface."
+          metaClassName="tools-header-meta"
+        >
+          <span>{stale ? 'Refreshing planner intelligence…' : 'Planner intelligence feed'}</span>
+          <button type="button" className="header-scan-btn" onClick={refetch}>Refresh</button>
+        </PageHeader>
 
-        <div className="bp-investment-summary-grid">
+        <div className="app-summary-grid">
           <SummaryCard label="Ready Now" value={availableItems.length.toLocaleString()} tone="good" />
           <SummaryCard label="Locked Upside" value={fmtISK(lockedUpside)} tone="accent" />
           <SummaryCard label="Manufacturing Queue" value={availableManufacturing.length.toLocaleString()} tone="neutral" />
           <SummaryCard label="Science Queue" value={availableScience.length.toLocaleString()} tone="neutral" />
         </div>
 
-        <div className="tools-source-grid">
+        <div className="app-context-grid">
           <SourceCard label="Inventory Source" source={data?.inventory_source} />
           <SourceCard label="Wallet Source" source={data?.wallet_source} />
-          <div className="tools-source-card">
-            <div className="tools-source-card__label">Planner Context</div>
-            <div className="tools-source-card__value">
-              {`${String(data?.structure_name || 'Structure').toUpperCase()} · ${data?.cycle_config?.cycle_duration_hours || appSettings?.cycle_duration_hours || DEFAULT_APP_SETTINGS.cycle_duration_hours}H CYCLE`}
-            </div>
-            <div className="tools-source-card__warning">
-              {loading ? 'Loading recommendations…' : error ? 'Planner feed unavailable.' : `${blockedItems.length} blocked opportunities · ${availableItems.length} actionable items`}
-            </div>
-          </div>
+          <ContextCard
+            label="Planner Context"
+            value={`${String(data?.structure_name || 'Structure').toUpperCase()} · ${data?.cycle_config?.cycle_duration_hours || appSettings?.cycle_duration_hours || DEFAULT_APP_SETTINGS.cycle_duration_hours}H CYCLE`}
+            meta={loading ? 'Loading recommendations…' : error ? 'Planner feed unavailable.' : `${blockedItems.length} blocked opportunities · ${availableItems.length} actionable items`}
+          />
         </div>
 
         {loading && !data && (
@@ -223,71 +198,69 @@ export default memo(function OpportunitiesPage({ appSettings = DEFAULT_APP_SETTI
         )}
 
         {!!flattened.length && (
-          <div className="opportunities-layout">
-            <div className="opportunities-groups">
-              {groups.map((group) => (
-                <section key={group.key} className="opportunity-group">
-                  <div className="opportunity-group__head">
-                    <span>{group.title}</span>
-                    <span>{group.items.length}</span>
+          <TwoPaneLayout
+            className="opportunities-layout"
+            mainClassName="opportunities-groups"
+            detailClassName="tools-detail-panel"
+            main={groups.map((group) => (
+              <section key={group.key} className="opportunity-group">
+                <div className="opportunity-group__head">
+                  <span>{group.title}</span>
+                  <span>{group.items.length}</span>
+                </div>
+                <div className="opportunity-group__list">
+                  {group.items.map((item) => (
+                    <OpportunityCard
+                      key={buildOpportunityId(item)}
+                      item={item}
+                      blocked={group.blocked}
+                      tone={group.tone}
+                      active={buildOpportunityId(item) === selectedId}
+                      onSelect={setSelectedId}
+                    />
+                  ))}
+                </div>
+              </section>
+            ))}
+            detail={selected ? (
+              <>
+                <div className="app-detail-head">
+                  <div>
+                    <div className="app-detail-title">{selected.name}</div>
+                    <div className="app-detail-subtitle">{actionLabel(selected)}{selected.__blocked ? ' · blocked upside' : ' · immediately actionable'}</div>
                   </div>
-                  <div className="opportunity-group__list">
-                    {group.items.map((item) => (
-                      <OpportunityCard
-                        key={buildOpportunityId(item)}
-                        item={item}
-                        blocked={group.blocked}
-                        tone={group.tone}
-                        active={buildOpportunityId(item) === selectedId}
-                        onSelect={setSelectedId}
-                      />
-                    ))}
+                  <div className={`prognosis-badge prognosis-badge--${selected.__tone}`}>
+                    {selected.__blocked ? 'Locked' : 'Ready'}
                   </div>
-                </section>
-              ))}
-            </div>
+                </div>
 
-            <aside className="tools-detail-panel">
-              {selected ? (
-                <>
-                  <div className="tools-detail-head">
-                    <div>
-                      <div className="tools-detail-title">{selected.name}</div>
-                      <div className="tools-detail-subtitle">{actionLabel(selected)}{selected.__blocked ? ' · blocked upside' : ' · immediately actionable'}</div>
+                <div className="app-detail-copy">
+                  {selected.unlock_path || selected.why || selected.reason || 'No additional explanation is available for this opportunity.'}
+                </div>
+
+                <div className="app-detail-grid">
+                  <DetailStat label={selected.__blocked ? 'Estimated Upside' : 'Profit / Cycle'} value={fmtISK(opportunityValue(selected, selected.__blocked))} tone={opportunityValue(selected, selected.__blocked) >= 0 ? 'var(--green)' : 'var(--accent)'} />
+                  <DetailStat label="Demand" value={selected.__blocked ? '—' : fmtVol(selected.avg_daily_volume)} />
+                  <DetailStat label="Sell Through" value={typeof selected.days_to_sell === 'number' ? `${selected.days_to_sell.toFixed(1)}d` : '—'} />
+                  <DetailStat label="Duration" value={fmtDuration(selected.duration)} />
+                  <DetailStat label="Assigned" value={selected.assigned_character?.character_name || 'Unassigned'} />
+                  <DetailStat label="Capital Share" value={typeof selected.capital_share_pct === 'number' ? `${selected.capital_share_pct.toFixed(1)}%` : '—'} tone={selected.capital_warning ? 'var(--accent)' : undefined} />
+                </div>
+
+                <div className="tools-source-card" style={{ marginTop: 14 }}>
+                  <div className="tools-source-card__label">Queue rationale</div>
+                  <div className="tools-source-card__value">{selected.why || selected.reason || 'Planner rationale unavailable.'}</div>
+                  {Array.isArray(selected.characters) && selected.characters.length > 0 && (
+                    <div className="tools-source-card__warning">
+                      Candidate characters: {selected.characters.map((character) => character.character_name).join(', ')}
                     </div>
-                    <div className={`prognosis-badge prognosis-badge--${selected.__tone}`}>
-                      {selected.__blocked ? 'Locked' : 'Ready'}
-                    </div>
-                  </div>
-
-                  <div className="tools-detail-copy">
-                    {selected.unlock_path || selected.why || selected.reason || 'No additional explanation is available for this opportunity.'}
-                  </div>
-
-                  <div className="tools-detail-grid">
-                    <DetailStat label={selected.__blocked ? 'Estimated Upside' : 'Profit / Cycle'} value={fmtISK(opportunityValue(selected, selected.__blocked))} tone={opportunityValue(selected, selected.__blocked) >= 0 ? 'var(--green)' : 'var(--accent)'} />
-                    <DetailStat label="Demand" value={selected.__blocked ? '—' : fmtVol(selected.avg_daily_volume)} />
-                    <DetailStat label="Sell Through" value={typeof selected.days_to_sell === 'number' ? `${selected.days_to_sell.toFixed(1)}d` : '—'} />
-                    <DetailStat label="Duration" value={fmtDuration(selected.duration)} />
-                    <DetailStat label="Assigned" value={selected.assigned_character?.character_name || 'Unassigned'} />
-                    <DetailStat label="Capital Share" value={typeof selected.capital_share_pct === 'number' ? `${selected.capital_share_pct.toFixed(1)}%` : '—'} tone={selected.capital_warning ? 'var(--accent)' : undefined} />
-                  </div>
-
-                  <div className="tools-source-card" style={{ marginTop: 14 }}>
-                    <div className="tools-source-card__label">Queue rationale</div>
-                    <div className="tools-source-card__value">{selected.why || selected.reason || 'Planner rationale unavailable.'}</div>
-                    {Array.isArray(selected.characters) && selected.characters.length > 0 && (
-                      <div className="tools-source-card__warning">
-                        Candidate characters: {selected.characters.map((character) => character.character_name).join(', ')}
-                      </div>
-                    )}
-                  </div>
-                </>
-              ) : (
-                <div className="tools-detail-empty">Select an opportunity to inspect its queue rationale and economics.</div>
-              )}
-            </aside>
-          </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <div className="app-detail-empty">Select an opportunity to inspect its queue rationale and economics.</div>
+            )}
+          />
         )}
       </div>
     </div>

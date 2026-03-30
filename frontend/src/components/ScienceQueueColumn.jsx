@@ -32,6 +32,7 @@ const ACCESS_FLAG_META = {
   personal_bpo: { label: 'PERS BPO', bg: '#4da6ff' },
   personal_bpc: { label: 'PERS BPC', bg: '#66ccff' },
   corp_bpo: { label: 'CORP BPO', bg: '#9098a1' },
+  corp_bpc: { label: 'CORP BPC', bg: '#c6a07a' },
   future_personal_bpc: { label: 'FUTURE BPC', bg: '#ffd24d' },
 };
 
@@ -44,38 +45,56 @@ function getEffectiveAccessFlag(item) {
 
 function DetailRow({ label, value, valueColor = 'var(--text)' }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 11, borderBottom: '1px solid #0d0d0d' }}>
-      <span style={{ color: 'var(--dim)', letterSpacing: 0.3 }}>{label}</span>
-      <span style={{ fontFamily: 'var(--mono)', color: valueColor }}>{value}</span>
+    <div className="planner-detail-row">
+      <span className="planner-detail-row__label">{label}</span>
+      <span className="planner-detail-row__value" style={{ color: valueColor }}>{value}</span>
     </div>
   );
 }
 
-function DetailBlock({ label, value, color = 'var(--dim)' }) {
+function DetailBlock({ label, value, color = 'var(--dim)', className = '' }) {
   if (!value) return null;
   return (
-    <div style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(255,255,255,0.03)', border: '1px solid #0d0d0d', borderRadius: 2 }}>
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color, letterSpacing: 0.8, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 11, color: 'var(--text)', lineHeight: 1.5 }}>{value}</div>
+    <div
+      className={`planner-detail-card planner-detail-card--note ${className}`.trim()}
+      style={{ '--planner-detail-accent': color }}
+    >
+      <div className="planner-detail-card__title">{label}</div>
+      <div className="planner-detail-note">{value}</div>
     </div>
   );
 }
 
-function StepBlock({ title, accentColor, rows, footnote }) {
+function DetailSection({ title, color = 'var(--dim)', children, className = '' }) {
+  return (
+    <div
+      className={`planner-detail-card ${className}`.trim()}
+      style={{ '--planner-detail-accent': color }}
+    >
+      <div className="planner-detail-card__title">{title}</div>
+      <div className="planner-detail-card__content">{children}</div>
+    </div>
+  );
+}
+
+function StepBlock({ title, accentColor, rows, footnote, className = '' }) {
   if (!rows.length) return null;
   return (
-    <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(255,255,255,0.03)', border: '1px solid #0d0d0d', borderRadius: 2 }}>
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 13, color: accentColor, letterSpacing: 0.8, marginBottom: 6 }}>
-        {title}
+    <div
+      className={`planner-detail-card planner-detail-card--step ${className}`.trim()}
+      style={{ '--planner-detail-accent': accentColor }}
+    >
+      <div className="planner-detail-card__title">{title}</div>
+      <div className="planner-detail-card__content">
+        {rows.map(([label, value]) => (
+          <DetailRow key={label} label={label} value={value} />
+        ))}
+        {footnote && (
+          <div className="planner-detail-footnote">
+            {footnote}
+          </div>
+        )}
       </div>
-      {rows.map(([label, value]) => (
-        <DetailRow key={label} label={label} value={value} />
-      ))}
-      {footnote && (
-        <div style={{ marginTop: 6, fontSize: 11, color: 'var(--dim)', lineHeight: 1.5 }}>
-          {footnote}
-        </div>
-      )}
     </div>
   );
 }
@@ -429,15 +448,19 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
       </div>
 
       {isOpen && (
-        <div style={{ background: 'var(--bg2)', borderLeft: `3px solid ${isInvention ? 'var(--planner-invention)' : 'var(--planner-copy)'}`, padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
-          <div className="planner-detail-grid">
-            <div>
+        <div className={`planner-detail-shell ${isInvention ? 'planner-detail-shell--invention' : 'planner-detail-shell--copy'}`}>
+          <div className="planner-detail-grid planner-detail-grid--summary">
+            <DetailSection
+              title="SCIENCE OVERVIEW"
+              color={isInvention ? 'var(--planner-invention)' : 'var(--planner-copy)'}
+              className="planner-detail-card--summary"
+            >
               <DetailRow label="Duration" value={formatSeconds(item.science_total_secs || item.duration_secs || item.duration_seconds || 0)} />
               <DetailRow label="Time until manufactured" value={formatSeconds(timeUntilManufactured)} />
               {item.structure_job_time_bonus_pct > 0 && <DetailRow label="Structure time bonus" value={`−${Number(item.structure_job_time_bonus_pct).toFixed(1)}%`} />}
               {isInvention && <DetailRow label="Success chance" value={`${Math.round(successChance * 100)}%`} valueColor={successChanceColor} />}
               {isInvention && optimalChanceWarning && (
-                <div style={{ marginTop: 4, fontSize: 11, color: '#ff9d3d', lineHeight: 1.5 }}>
+                <div className="planner-detail-warning">
                   {optimalChanceWarning}
                 </div>
               )}
@@ -448,8 +471,8 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
               {hasPrerequisites && <DetailRow label="Self-craft savings" value={fmtISK(item.prerequisite_buy_cost_avoided || 0)} />}
               <DetailRow label="Expected batch profit" value={fmtISK(expectedProfit)} valueColor={expectedProfit >= 0 ? '#4cff91' : 'var(--accent)'} />
               <DetailRow label="Profit margin" value={`${expectedMarginPct.toFixed(1)}%`} valueColor={expectedMarginPct >= 0 ? '#4cff91' : 'var(--accent)'} />
-            </div>
-            <div>
+            </DetailSection>
+            <DetailSection title="MARKET + CAPACITY" color="#4da6ff" className="planner-detail-card--summary">
               <DetailRow label="Market vol/day" value={(item.avg_daily_volume || 0).toFixed(1)} />
               <DetailRow label="Saturation" value={`${(item.market_saturation_pct || 0).toFixed(1)}%`} />
               <DetailRow label="Days to sell" value={`${(item.days_to_sell || 0).toFixed(1)}d`} />
@@ -464,13 +487,13 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
                 </>
               )}
               {hasPrerequisites && <DetailRow label="Chain duration" value={formatSeconds(item.chain_total_duration_secs || item.time_until_manufactured_secs || 0)} />}
-            </div>
+            </DetailSection>
           </div>
+
           {(copyStepRows.length > 0 || inventionStepRows.length > 0 || manufacturingStepRows.length > 0) && (
-            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0d0d0d' }}>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color: 'var(--dim)', marginBottom: 4 }}>TIMELINE</div>
+            <div className="planner-detail-card-grid planner-detail-card-grid--timeline">
               <StepBlock
-                title={isInvention ? 'STEP 1 · COPYING' : 'STEP 1 · COPYING'}
+                title="STEP 1 · COPYING"
                 accentColor="var(--planner-copy)"
                 rows={copyStepRows}
                 footnote={item.action_type === 'copy_first' ? 'This stage only prepares the BPC; manufacturing revenue and profit below reflect the downstream batch once the copy is ready.' : null}
@@ -507,43 +530,49 @@ const ScienceQueueRow = memo(function ScienceQueueRow({ item, hasSciSlot, cycleC
               />
             </div>
           )}
-          {isInvention && Object.keys(datacoreCosts).length > 0 && (
-            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0d0d0d' }}>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color: 'var(--dim)', marginBottom: 4 }}>DATACORES</div>
-              {datacoreMaterials.length > 0 ? datacoreMaterials.map((material) => (
-                <DetailRow
-                  key={material.type_id}
-                  label={material.name || `Type ${material.type_id}`}
-                  value={`${Number(material.have_qty || 0).toLocaleString()} / ${Number(material.needed_qty_total || 0).toLocaleString()} · ${fmtISK(material.total_line_cost || 0)}`}
-                />
-              )) : Object.entries(datacoreCosts).map(([dc, cost]) => (
-                <DetailRow key={dc} label={dc} value={`${(cost / 1_000_000).toFixed(1)}M`} />
-              ))}
-            </div>
-          )}
-          {hasPrerequisites && Array.isArray(item.prerequisite_jobs) && item.prerequisite_jobs.length > 0 && (
-            <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0d0d0d' }}>
-              <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color: '#ffd24d', marginBottom: 4 }}>PREREQUISITES</div>
-              {item.prerequisite_jobs.map((job) => (
-                <DetailRow
-                  key={`${job.output_id}-${job.run_count}-${job.depth || 0}`}
-                  label={job.name}
-                  value={`${job.run_count || 0} runs · ${formatSeconds(job.total_duration_secs || job.duration_secs || 0)} · ${fmtISK(job.resolved_total_cost || 0)}`}
-                />
-              ))}
-            </div>
-          )}
-          {Array.isArray(item.timeline_steps) && item.timeline_steps.length > 0 && (
-            <DetailBlock label="TIMELINE" value={item.timeline_steps.join(' → ')} color="var(--planner-copy)" />
-          )}
-          <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
-          {item.runner_up_name && (
-            <DetailBlock
-              label="RUNNER-UP"
-              value={`${item.runner_up_name} · ${((item.runner_up_profit_per_cycle || 0) / 1_000_000).toFixed(1)}M/cycle`}
-              color="#ff9d3d"
-            />
-          )}
+
+          <div className="planner-detail-card-grid">
+            {isInvention && Object.keys(datacoreCosts).length > 0 && (
+              <DetailSection title="DATACORES" color="var(--planner-invention)" className="planner-detail-card--dense">
+                {datacoreMaterials.length > 0 ? datacoreMaterials.map((material) => (
+                  <DetailRow
+                    key={material.type_id}
+                    label={material.name || `Type ${material.type_id}`}
+                    value={`${Number(material.have_qty || 0).toLocaleString()} / ${Number(material.needed_qty_total || 0).toLocaleString()} · ${fmtISK(material.total_line_cost || 0)}`}
+                    valueColor={Number(material.have_qty || 0) < Number(material.needed_qty_total || 0) ? '#ff9d3d' : '#4cff91'}
+                  />
+                )) : Object.entries(datacoreCosts).map(([dc, cost]) => (
+                  <DetailRow key={dc} label={dc} value={`${(cost / 1_000_000).toFixed(1)}M`} />
+                ))}
+              </DetailSection>
+            )}
+            {hasPrerequisites && Array.isArray(item.prerequisite_jobs) && item.prerequisite_jobs.length > 0 && (
+              <DetailSection title={`PREREQUISITES (${item.prerequisite_jobs.length})`} color="#ffd24d" className="planner-detail-card--dense">
+                <div className="planner-detail-stack">
+                  {item.prerequisite_jobs.map((job) => (
+                    <DetailBlock
+                      key={`${job.output_id}-${job.run_count}-${job.depth || 0}`}
+                      label={job.name}
+                      value={`${job.run_count || 0} runs · ${formatSeconds(job.total_duration_secs || job.duration_secs || 0)} · ${fmtISK(job.resolved_total_cost || 0)}`}
+                      color="#ffd24d"
+                      className="planner-detail-card--subnote"
+                    />
+                  ))}
+                </div>
+              </DetailSection>
+            )}
+            {Array.isArray(item.timeline_steps) && item.timeline_steps.length > 0 && (
+              <DetailBlock label="TIMELINE" value={item.timeline_steps.join(' → ')} color="var(--planner-copy)" />
+            )}
+            <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
+            {item.runner_up_name && (
+              <DetailBlock
+                label="RUNNER-UP"
+                value={`${item.runner_up_name} · ${((item.runner_up_profit_per_cycle || 0) / 1_000_000).toFixed(1)}M/cycle`}
+                color="#ff9d3d"
+              />
+            )}
+          </div>
         </div>
       )}
     </div>

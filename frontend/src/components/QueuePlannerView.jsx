@@ -65,37 +65,60 @@ function OwnBadge({ kind }) {
   );
 }
 
-// Slot squares that wrap — fully flexible for any slot count
-function SlotDots({ total, occupied, activeColor }) {
+// Slot squares that wrap — occupied slots keep their queue color, planner-accounted free slots are green, and true idle slots are gray.
+function SlotDots({ total, occupied = 0, planned = 0, occupiedColor = 'var(--planner-copy)' }) {
   const SZ = 6;
+  const normalizedTotal = Math.max(total, 1);
+  const normalizedOccupied = Math.max(0, Math.min(normalizedTotal, occupied));
+  const normalizedPlanned = Math.max(0, Math.min(normalizedTotal - normalizedOccupied, planned));
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2, maxWidth: 140 }}>
-      {Array.from({ length: Math.max(total, 1) }).map((_, i) => (
-        <div key={i} style={{
-          width: SZ, height: SZ, borderRadius: 0,
-          background: i < occupied ? activeColor : '#4cff91',
-          border: '0px solid rgba(255,255,255,0.07)',
-          flexShrink: 0,
-        }} title={i < occupied ? 'In use' : 'Free'} />
-      ))}
+      {Array.from({ length: normalizedTotal }).map((_, i) => {
+        let background = 'var(--planner-idle)';
+        let title = 'Idle / not accounted for';
+        if (i < normalizedOccupied) {
+          background = occupiedColor;
+          title = 'Currently occupied';
+        } else if (i < normalizedOccupied + normalizedPlanned) {
+          background = 'var(--green)';
+          title = 'Accounted for in planner';
+        }
+        return (
+          <div key={i} style={{
+            width: SZ, height: SZ, borderRadius: 0,
+            background,
+            border: '0px solid rgba(255,255,255,0.07)',
+            flexShrink: 0,
+          }} title={title} />
+        );
+      })}
     </div>
   );
 }
 
-function QueuePaneHeader({ label, total, occupied, activeColor, summary, tone = 'science' }) {
-  const free = Math.max(0, total - occupied);
-  const freeColor = free > 0 ? '#4cff91' : 'var(--accent)';
+function QueuePaneHeader({ label, total, occupied = 0, planned = 0, summary, tone = 'science' }) {
+  const occupiedColor = tone === 'science' ? 'var(--planner-copy)' : 'var(--planner-mfg)';
+  const normalizedTotal = Math.max(0, total);
+  const normalizedOccupied = Math.max(0, Math.min(normalizedTotal, occupied));
+  const normalizedPlanned = Math.max(0, Math.min(normalizedTotal - normalizedOccupied, planned));
+  const idle = Math.max(0, normalizedTotal - normalizedOccupied - normalizedPlanned);
+  const occupiedTextColor = normalizedOccupied > 0 ? occupiedColor : 'var(--dim)';
+  const plannedColor = planned > 0 ? 'var(--green)' : 'var(--dim)';
+  const idleColor = idle > 0 ? 'var(--planner-idle)' : 'var(--green)';
   return (
     <div className={`planner-pane-header planner-pane-header--${tone}`}>
       <div className="planner-pane-header__top">
         <span style={{ fontFamily: 'var(--mono)', fontSize: 13, letterSpacing: 1.2, color: 'var(--text)', whiteSpace: 'nowrap' }}>{label}</span>
-        <SlotDots total={total} occupied={occupied} activeColor={activeColor} />
+        <SlotDots total={normalizedTotal} occupied={normalizedOccupied} planned={normalizedPlanned} occupiedColor={occupiedColor} />
         <div className="planner-pane-header__meta">
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: freeColor, whiteSpace: 'nowrap' }}>
-            {free > 0 ? `${free} FREE` : 'FULL'}
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: occupiedTextColor, whiteSpace: 'nowrap' }}>
+            {normalizedOccupied} OCCUPIED
           </span>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--dim)', whiteSpace: 'nowrap' }}>
-            {occupied}/{total} USED
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: plannedColor, whiteSpace: 'nowrap' }}>
+            {normalizedPlanned} PLANNED
+          </span>
+          <span style={{ fontFamily: 'var(--mono)', fontSize: 9, color: idleColor, whiteSpace: 'nowrap' }}>
+            {idle} IDLE
           </span>
         </div>
         <span className="planner-pane-header__summary">{summary}</span>
@@ -886,10 +909,17 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   );
   const realSciItems = useMemo(() => sciItems.filter(i => !i.is_idle), [sciItems]);
   const realMfgItems = useMemo(() => mfgItems.filter(i => !i.is_idle), [mfgItems]);
+  const startNowSciCount = useMemo(() => {
+    return realSciItems.filter(i => !i.start_at || i.start_at <= plannerNow + 30).length;
+  }, [plannerNow, realSciItems]);
   const startNowMfgCount = useMemo(() => {
     return realMfgItems.filter(i => !i.start_at || i.start_at <= plannerNow + 30).length;
   }, [plannerNow, realMfgItems]);
   const queuedMfgCount = Math.max(0, realMfgItems.length - startNowMfgCount);
+  const occupiedScience = Math.max(0, Math.min(maxScience, runningScience));
+  const occupiedManufacturing = Math.max(0, Math.min(maxJobs, runningJobs));
+  const plannedScienceNow = Math.max(0, Math.min(freeScience, startNowSciCount));
+  const plannedManufacturingNow = Math.max(0, Math.min(freeSlots, startNowMfgCount));
 
   useEffect(() => {
     if (!tpData) return;
@@ -1103,8 +1133,8 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
           <QueuePaneHeader
             label="SCIENCE QUEUE"
             total={maxScience}
-            occupied={runningScience}
-            activeColor="var(--planner-copy)"
+            occupied={occupiedScience}
+            planned={plannedScienceNow}
             summary={`${cycleConfig.cycle_duration_hours}h / ${cycleConfig.min_profit_per_cycle / 1_000_000 | 0}M ISK/cycle`}
             tone="science"
           />
@@ -1125,9 +1155,9 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
           <QueuePaneHeader
             label="MANUFACTURING QUEUE"
             total={maxJobs}
-            occupied={runningJobs}
-            activeColor="var(--planner-mfg)"
-            summary={checkedIds.size > 0 ? `${checkedIds.size} SELECTED` : `${mfgItems.length} PLANNED · ${startNowMfgCount} NOW · ${queuedMfgCount} LATER`}
+            occupied={occupiedManufacturing}
+            planned={plannedManufacturingNow}
+            summary={checkedIds.size > 0 ? `${checkedIds.size} SELECTED` : `${realMfgItems.length} TOTAL · ${startNowMfgCount} NOW${queuedMfgCount > 0 ? ` · ${queuedMfgCount} LATER` : ''}`}
             tone="manufacturing"
           />
           <ManufacturingQueueColumn

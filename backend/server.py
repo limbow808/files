@@ -36,7 +36,7 @@ from database import (
     upsert_craft_jobs, get_craft_log, get_craft_stats, get_craft_timeline,
     get_sell_velocity_by_type_id,
 )
-import alert_scanner as _alert_scanner
+import queue_notifier as _queue_notifier
 import contracts_cache as _cc
 
 # ── Contract cache background refresher config ────────────────────────────────
@@ -178,39 +178,6 @@ def _contract_cache_refresher() -> None:
 
 app = cors(Quart(__name__))  # Allow React dev server (localhost:3000 / file://) to call the API
 
-# ── Corp BPO static fallback ──────────────────────────────────────────────────
-# Loaded once at startup from src/corp_BPOs (tab-separated, col 0 = BP name).
-# Used when ESI corp blueprints endpoint returns 403 (insufficient role).
-def _load_corp_bpo_type_ids() -> set:
-    """Parse corp_BPOs and return a set of blueprint type_ids via crest.db lookup."""
-    result = set()
-    try:
-        import sqlite3 as _sq
-        _base = os.path.dirname(__file__)
-        _txt  = os.path.join(_base, "corp_BPOs")
-        _db   = os.path.join(_base, "crest.db")
-        if not os.path.exists(_txt) or not os.path.exists(_db):
-            return result
-        con = _sq.connect(_db)
-        cur = con.cursor()
-        cur.execute("SELECT blueprint_id, output_name FROM blueprints")
-        name_to_id = {(row[1].strip() + " Blueprint").lower(): row[0] for row in cur.fetchall()}
-        con.close()
-        with open(_txt, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split("\t")
-                if not parts or not parts[0].strip():
-                    continue
-                key = parts[0].strip().lower()
-                if key in name_to_id:
-                    result.add(name_to_id[key])
-        print(f"  [corp_BPOs] Loaded {len(result)} unique corp BP type_ids from static file.")
-    except Exception as e:
-        print(f"  [corp_BPOs] Failed to load static file: {e}")
-    return result
-
-CORP_BPO_TYPE_IDS: set = _load_corp_bpo_type_ids()
-
 # ── PLEX config ───────────────────────────────────────────────────────────────
 PLEX_CONFIG = {
     "accounts":         6,
@@ -246,8 +213,8 @@ _SKILL_NAMES_MAX_AGE = 7 * 86400  # re-download after 7 days
 
 # ── Warmup state ─────────────────────────────────────────────────────────────
 # _server_ready: True once the prewarm scan+calculator caches are populated.
-# _warmup_done:  Event set at the same moment — used by alert_scanner to delay
-#                its first contract scan until the server is fully warm.
+# _warmup_done:  Event set at the same moment so startup helpers can wait for
+#                the server to become fully warm when needed.
 _server_ready: bool           = False
 _warmup_done: threading.Event = threading.Event()
 _warmup_stage: str            = "starting"  # "starting" | "scan" | "ready"
@@ -799,21 +766,38 @@ def _get_corp_source_snapshot(corporation_id, force_refresh: bool = False) -> di
         return copy.deepcopy(cached)
 
     try:
-        from characters import get_all_auth_headers
+        from characters import get_all_auth_headers, load_characters
 
         char_corps = _get_character_corporations(force_refresh=force_refresh)
         auth_headers = get_all_auth_headers()
+        char_records = load_characters()
         candidate_characters = []
         corporation_name = None
         for cid, headers in auth_headers:
             membership = char_corps.get(str(cid), {})
-            if int(membership.get("corporation_id") or 0) != corp_id:
-                continue
-            corporation_name = corporation_name or membership.get("corporation_name")
-            candidate_characters.append((str(cid), membership.get("character_name") or f"Char {cid}", headers))
+            if int(membership.get("corporation_id") or 0) == corp_id:
+                corporation_name = corporation_name or membership.get("corporation_name")
+            candidate_characters.append((
+                str(cid),
+                membership.get("character_name")
+                or char_records.get(str(cid), {}).get("character_name")
+                or f"Char {cid}",
+                headers,
+            ))
 
         if not candidate_characters:
             return None
+
+        if not corporation_name:
+            try:
+                corp_resp = requests.get(
+                    f"https://esi.evetech.net/latest/corporations/{corp_id}/",
+                    timeout=10,
+                )
+                if corp_resp.ok:
+                    corporation_name = corp_resp.json().get("name") or f"Corp {corp_id}"
+            except Exception:
+                corporation_name = None
 
         asset_items = None
         asset_access_characters = []
@@ -821,67 +805,81 @@ def _get_corp_source_snapshot(corporation_id, force_refresh: bool = False) -> di
         wallet_divisions = []
         wallet_access_characters = []
 
+        def _append_access_character(target: list[dict], character_id: str, character_name: str) -> None:
+            if not character_id:
+                return
+            if any(str(existing.get("character_id") or "") == str(character_id) for existing in target):
+                return
+            target.append({"character_id": str(character_id), "character_name": character_name})
+
         for char_id, char_name, headers in candidate_characters:
-            if asset_items is None:
-                page = 1
-                corp_items = []
-                assets_ok = False
-                while True:
-                    try:
-                        resp = requests.get(
-                            f"https://esi.evetech.net/latest/corporations/{corp_id}/assets/",
-                            headers=headers,
-                            params={"page": page},
-                            timeout=15,
-                        )
-                    except Exception:
-                        corp_items = []
-                        assets_ok = False
-                        break
-                    if not resp.ok:
-                        corp_items = []
-                        assets_ok = False
-                        break
+            assets_resp = None
+            try:
+                assets_resp = requests.get(
+                    f"https://esi.evetech.net/latest/corporations/{corp_id}/assets/",
+                    headers=headers,
+                    params={"page": 1},
+                    timeout=15,
+                )
+            except Exception:
+                assets_resp = None
+            if assets_resp is not None and assets_resp.ok:
+                _append_access_character(asset_access_characters, char_id, char_name)
+                if asset_items is None:
+                    page = 1
+                    corp_items = []
                     assets_ok = True
-                    page_items = resp.json() or []
-                    if not page_items:
-                        break
-                    corp_items.extend(page_items)
-                    if len(page_items) < 1000:
-                        break
-                    page += 1
-                if assets_ok:
-                    asset_items = corp_items
-                    asset_access_characters.append({"character_id": char_id, "character_name": char_name})
+                    page_items = list(assets_resp.json() or [])
+                    while True:
+                        corp_items.extend(page_items)
+                        if len(page_items) < 1000:
+                            break
+                        page += 1
+                        try:
+                            page_resp = requests.get(
+                                f"https://esi.evetech.net/latest/corporations/{corp_id}/assets/",
+                                headers=headers,
+                                params={"page": page},
+                                timeout=15,
+                            )
+                        except Exception:
+                            assets_ok = False
+                            break
+                        if not page_resp.ok:
+                            assets_ok = False
+                            break
+                        page_items = list(page_resp.json() or [])
+                        if not page_items:
+                            break
+                    if assets_ok:
+                        asset_items = corp_items
 
-            if wallet_total_isk is None:
-                try:
-                    resp = requests.get(
-                        f"https://esi.evetech.net/latest/corporations/{corp_id}/wallets/",
-                        headers=headers,
-                        timeout=15,
-                    )
-                    if resp.ok:
-                        wallet_rows = resp.json() or []
-                        parsed_divisions = []
-                        wallet_total = 0.0
-                        for row in wallet_rows:
-                            division = int(row.get("division") or 0)
-                            balance = float(row.get("balance") or 0.0)
-                            if division > 0:
-                                parsed_divisions.append({
-                                    "division": division,
-                                    "balance": round(balance, 2),
-                                })
-                            wallet_total += balance
-                        wallet_total_isk = wallet_total
-                        wallet_divisions = parsed_divisions
-                        wallet_access_characters.append({"character_id": char_id, "character_name": char_name})
-                except Exception:
-                    pass
-
-            if asset_items is not None and wallet_total_isk is not None:
-                break
+            wallet_resp = None
+            try:
+                wallet_resp = requests.get(
+                    f"https://esi.evetech.net/latest/corporations/{corp_id}/wallets/",
+                    headers=headers,
+                    timeout=15,
+                )
+            except Exception:
+                wallet_resp = None
+            if wallet_resp is not None and wallet_resp.ok:
+                _append_access_character(wallet_access_characters, char_id, char_name)
+                if wallet_total_isk is None:
+                    wallet_rows = wallet_resp.json() or []
+                    parsed_divisions = []
+                    wallet_total = 0.0
+                    for row in wallet_rows:
+                        division = int(row.get("division") or 0)
+                        balance = float(row.get("balance") or 0.0)
+                        if division > 0:
+                            parsed_divisions.append({
+                                "division": division,
+                                "balance": round(balance, 2),
+                            })
+                        wallet_total += balance
+                    wallet_total_isk = wallet_total
+                    wallet_divisions = parsed_divisions
 
         from collections import defaultdict
 
@@ -2329,6 +2327,7 @@ def api_job_planner():
     calc_facility_tax_param = request.args.get("facility_tax_rate", "").strip()
     operations_corp_id_param = request.args.get("operations_corp_id", "").strip()
     corp_input_division_param = request.args.get("corp_input_division", "").strip()
+    selected_operations_corp_id = int(str(operations_corp_id_param or "").strip() or 0)
 
     char_records = load_characters()
     _default_bp_permissions = normalize_bp_permissions()
@@ -2537,15 +2536,20 @@ def api_job_planner():
     personal_bpo_bp_ids: set = set()   # personal BPOs — original, need copying
     personal_bpc_bp_ids: set = set()   # personal BPCs — ready to manufacture
     corp_bp_ids: set         = set()
+    corp_original_bp_ids: set = set()
     corp_copy_bp_ids: set    = set()
     corp_manufacture_bp_ids: set = set()
+    corp_bpc_bp_ids: set     = set()
     # Per-type counts tracked separately so max_dups uses the correct pool
     personal_bpo_count: dict[int, int] = {}  # type_id → # of personal BPOs in ESI
     personal_bpc_count: dict[int, int] = {}  # type_id → # of personal BPCs in ESI
     personal_bpc_runs_by_bp_id: dict[int, list[int]] = {}  # bp type_id → individual BPC run counts
+    personal_bpc_runs_by_tid_character: dict[int, dict[str, list[int]]] = {}
     corp_bpo_count:     dict[int, int] = {}  # type_id → # of corp BPOs in ESI
     corp_bpo_copy_count: dict[int, int] = {}
     corp_bpo_manufacture_count: dict[int, int] = {}
+    corp_bpc_count:     dict[int, int] = {}
+    corp_bpc_runs_by_bp_id: dict[int, list[int]] = {}
     # Per-type character tracking: type_id → set of (character_id, character_name)
     _char_owners_by_tid: dict[int, set] = {}
     personal_bpo_count_by_tid_character: dict[int, dict[str, int]] = {}
@@ -2570,15 +2574,14 @@ def api_job_planner():
                     or _bp_permission_enabled(access_cid, "corp_bpc")
                 ):
                     permitted_access_characters.append({"character_id": access_cid, "character_name": access_cname})
-                    _char_owners_by_tid.setdefault(tid, set()).add((access_cid, access_cname))
-        elif bp.get("owner") != "corp" and _cid and _cname:
-            _char_owners_by_tid.setdefault(tid, set()).add((_cid, _cname))
         if bp.get("owner") == "personal":
             if bp.get("bp_type") == "BPO" or bp.get("runs", -1) == -1:
                 if not _bp_permission_enabled(_cid, "personal_bpo"):
                     continue
                 personal_bpo_bp_ids.add(tid)
                 personal_bpo_count[tid] = personal_bpo_count.get(tid, 0) + 1
+                if _cid and _cname:
+                    _char_owners_by_tid.setdefault(tid, set()).add((str(_cid), _cname))
                 if _cid:
                     _cid_str = str(_cid)
                     per_char = personal_bpo_count_by_tid_character.setdefault(tid, {})
@@ -2588,35 +2591,74 @@ def api_job_planner():
                     continue
                 personal_bpc_bp_ids.add(tid)
                 personal_bpc_count[tid] = personal_bpc_count.get(tid, 0) + 1
+                if _cid and _cname:
+                    _char_owners_by_tid.setdefault(tid, set()).add((str(_cid), _cname))
                 if _cid:
                     _cid_str = str(_cid)
                     per_char = personal_bpc_count_by_tid_character.setdefault(tid, {})
                     per_char[_cid_str] = per_char.get(_cid_str, 0) + 1
                 try:
-                    personal_bpc_runs_by_bp_id.setdefault(tid, []).append(max(0, int(bp.get("runs") or 0)))
+                    run_count = max(0, int(bp.get("runs") or 0))
                 except Exception:
-                    personal_bpc_runs_by_bp_id.setdefault(tid, []).append(0)
+                    run_count = 0
+                personal_bpc_runs_by_bp_id.setdefault(tid, []).append(run_count)
+                if _cid:
+                    personal_bpc_runs_by_tid_character.setdefault(tid, {}).setdefault(str(_cid), []).append(run_count)
         else:
-            copy_access = any(
-                _bp_permission_enabled(access.get("character_id"), "corp_bpo_copy")
-                for access in permitted_access_characters
-            )
-            manufacture_access = any(
-                _bp_permission_enabled(access.get("character_id"), "corp_bpo_manufacture")
-                for access in permitted_access_characters
-            )
             if not permitted_access_characters:
                 continue
-            if not copy_access and not manufacture_access:
+            bp_corp_id = int(bp.get("corp_id") or 0)
+            if selected_operations_corp_id > 0 and bp_corp_id > 0 and bp_corp_id != selected_operations_corp_id:
                 continue
-            corp_bp_ids.add(tid)
-            corp_bpo_count[tid] = corp_bpo_count.get(tid, 0) + 1
-            if copy_access:
-                corp_copy_bp_ids.add(tid)
-                corp_bpo_copy_count[tid] = corp_bpo_copy_count.get(tid, 0) + 1
-            if manufacture_access:
-                corp_manufacture_bp_ids.add(tid)
-                corp_bpo_manufacture_count[tid] = corp_bpo_manufacture_count.get(tid, 0) + 1
+            copy_access_characters = [
+                access for access in permitted_access_characters
+                if _bp_permission_enabled(access.get("character_id"), "corp_bpo_copy")
+            ]
+            manufacture_access_characters = [
+                access for access in permitted_access_characters
+                if _bp_permission_enabled(access.get("character_id"), "corp_bpo_manufacture")
+            ]
+            corp_bpc_access_characters = [
+                access for access in permitted_access_characters
+                if _bp_permission_enabled(access.get("character_id"), "corp_bpc")
+            ]
+            if bp.get("bp_type") == "BPO" or bp.get("runs", -1) == -1:
+                if not copy_access_characters and not manufacture_access_characters:
+                    continue
+                corp_bp_ids.add(tid)
+                corp_original_bp_ids.add(tid)
+                corp_bpo_count[tid] = corp_bpo_count.get(tid, 0) + 1
+                combined_access_characters = list(copy_access_characters)
+                for access in manufacture_access_characters:
+                    access_cid = str(access.get("character_id") or "")
+                    if access_cid and not any(str(existing.get("character_id") or "") == access_cid for existing in combined_access_characters):
+                        combined_access_characters.append(access)
+                for access in combined_access_characters:
+                    access_cid = str(access.get("character_id") or "")
+                    access_cname = access.get("character_name") or f"Char {access_cid}"
+                    if access_cid:
+                        _char_owners_by_tid.setdefault(tid, set()).add((access_cid, access_cname))
+                if copy_access_characters:
+                    corp_copy_bp_ids.add(tid)
+                    corp_bpo_copy_count[tid] = corp_bpo_copy_count.get(tid, 0) + 1
+                if manufacture_access_characters:
+                    corp_manufacture_bp_ids.add(tid)
+                    corp_bpo_manufacture_count[tid] = corp_bpo_manufacture_count.get(tid, 0) + 1
+            else:
+                if not corp_bpc_access_characters:
+                    continue
+                corp_bp_ids.add(tid)
+                corp_bpc_bp_ids.add(tid)
+                corp_bpc_count[tid] = corp_bpc_count.get(tid, 0) + 1
+                for access in corp_bpc_access_characters:
+                    access_cid = str(access.get("character_id") or "")
+                    access_cname = access.get("character_name") or f"Char {access_cid}"
+                    if access_cid:
+                        _char_owners_by_tid.setdefault(tid, set()).add((access_cid, access_cname))
+                try:
+                    corp_bpc_runs_by_bp_id.setdefault(tid, []).append(max(0, int(bp.get("runs") or 0)))
+                except Exception:
+                    corp_bpc_runs_by_bp_id.setdefault(tid, []).append(0)
 
     # Also treat any blueprint type found as a BPC in the assets cache as a personal BPC.
     # This catches BPCs the ESI blueprints endpoint may miss (e.g. location_flag edge cases).
@@ -2624,7 +2666,6 @@ def api_job_planner():
         personal_bpc_bp_ids.add(tid)
         personal_bpo_bp_ids.discard(tid)  # asset BPCs are never BPOs
 
-    corp_bp_ids.update(CORP_BPO_TYPE_IDS)
     personal_bp_ids = personal_bpo_bp_ids | personal_bpc_bp_ids
     all_bp_ids = personal_bp_ids | corp_bp_ids
     if not all_bp_ids:
@@ -2636,6 +2677,7 @@ def api_job_planner():
     corp_output_ids: set         = set()
     corp_copy_output_ids: set    = set()
     corp_manufacture_output_ids: set = set()
+    corp_bpc_output_ids: set     = set()
     output_id_by_blueprint_id: dict[int, int] = {}
     # Per-output counts for duplicate cap — BPOs and BPCs tracked separately
     bpo_count_by_output: dict[int, int] = {}  # output_id → # of copyable BPOs owned
@@ -2643,10 +2685,13 @@ def api_job_planner():
     corp_bpo_count_by_output: dict[int, int] = {}
     corp_bpo_count_by_output_copy: dict[int, int] = {}
     corp_bpo_count_by_output_manufacture: dict[int, int] = {}
+    corp_bpc_count_by_output: dict[int, int] = {}
     bpc_count_by_output: dict[int, int] = {}  # output_id → # of BPCs in hand
     bpc_runs_by_output: dict[int, list[int]] = {}  # output_id → individual BPC run counts
     personal_bpo_count_by_output_character: dict[int, dict[str, int]] = {}
     personal_bpc_count_by_output_character: dict[int, dict[str, int]] = {}
+    personal_bpc_runs_by_output_character: dict[int, dict[str, list[int]]] = {}
+    corp_bpc_runs_by_output: dict[int, list[int]] = {}
 
     try:
         db_path = os.path.join(os.path.dirname(__file__), "crest.db")
@@ -2674,7 +2719,10 @@ def api_job_planner():
                 for _char_id, _char_count in personal_bpc_count_by_tid_character.get(bp_id, {}).items():
                     per_char = personal_bpc_count_by_output_character.setdefault(out_id, {})
                     per_char[_char_id] = per_char.get(_char_id, 0) + int(_char_count or 0)
-            if bp_id in corp_bp_ids:
+                for _char_id, _run_list in personal_bpc_runs_by_tid_character.get(bp_id, {}).items():
+                    per_char_runs = personal_bpc_runs_by_output_character.setdefault(out_id, {}).setdefault(_char_id, [])
+                    per_char_runs.extend(max(0, int(runs or 0)) for runs in (_run_list or []))
+            if bp_id in corp_original_bp_ids:
                 corp_output_ids.add(out_id)
                 _count = corp_bpo_count.get(bp_id, 1)
                 corp_bpo_count_by_output[out_id] = corp_bpo_count_by_output.get(out_id, 0) + _count
@@ -2687,6 +2735,15 @@ def api_job_planner():
                 corp_manufacture_output_ids.add(out_id)
                 _count = corp_bpo_manufacture_count.get(bp_id, 1)
                 corp_bpo_count_by_output_manufacture[out_id] = corp_bpo_count_by_output_manufacture.get(out_id, 0) + _count
+            if bp_id in corp_bpc_bp_ids:
+                corp_output_ids.add(out_id)
+                corp_bpc_output_ids.add(out_id)
+                _count = corp_bpc_count.get(bp_id, 0)
+                corp_bpc_count_by_output[out_id] = corp_bpc_count_by_output.get(out_id, 0) + _count
+                bpc_count_by_output[out_id] = bpc_count_by_output.get(out_id, 0) + _count
+                corp_runs = list(corp_bpc_runs_by_bp_id.get(bp_id, []) or [])
+                corp_bpc_runs_by_output.setdefault(out_id, []).extend(corp_runs)
+                bpc_runs_by_output.setdefault(out_id, []).extend(corp_runs)
     except Exception as e:
         print(f"[job-planner] DB error: {e}")
 
@@ -2704,6 +2761,7 @@ def api_job_planner():
     personal_output_ids = personal_bpo_output_ids | personal_bpc_output_ids
     owned_output_ids    = personal_output_ids | corp_output_ids
     manufacture_owned_output_ids = set(personal_output_ids)
+    manufacture_owned_output_ids.update(corp_bpc_output_ids)
     if count_corp_original_blueprints_as_own:
         manufacture_owned_output_ids.update(corp_manufacture_output_ids)
 
@@ -2911,6 +2969,152 @@ def api_job_planner():
             cached_secs = 0
         invention_time_by_blueprint_id[source_blueprint_id] = cached_secs
         return cached_secs
+
+    def _reserve_bpc_copy(run_list: list[int] | None, required_runs: int) -> int:
+        normalized_pool = [max(0, int(runs or 0)) for runs in (run_list or []) if int(runs or 0) > 0]
+        if not normalized_pool:
+            if isinstance(run_list, list):
+                run_list[:] = []
+            return 0
+        needed_runs = max(1, int(required_runs or 1))
+        eligible_indices = [idx for idx, runs in enumerate(normalized_pool) if int(runs or 0) >= needed_runs]
+        if eligible_indices:
+            chosen_idx = min(eligible_indices, key=lambda idx: (int(normalized_pool[idx] or 0), idx))
+        else:
+            chosen_idx = max(range(len(normalized_pool)), key=lambda idx: (int(normalized_pool[idx] or 0), -idx))
+        reserved_runs = int(normalized_pool.pop(chosen_idx) or 0)
+        if isinstance(run_list, list):
+            run_list[:] = normalized_pool
+        return reserved_runs
+
+    def _remove_matching_bpc_copy(run_list: list[int] | None, reserved_runs: int) -> bool:
+        normalized_pool = [max(0, int(runs or 0)) for runs in (run_list or []) if int(runs or 0) > 0]
+        target_runs = max(0, int(reserved_runs or 0))
+        for idx, available_runs in enumerate(normalized_pool):
+            if int(available_runs or 0) == target_runs:
+                normalized_pool.pop(idx)
+                if isinstance(run_list, list):
+                    run_list[:] = normalized_pool
+                return True
+        if not normalized_pool:
+            if isinstance(run_list, list):
+                run_list[:] = []
+            return False
+        fallback_idx = min(range(len(normalized_pool)), key=lambda idx: abs(int(normalized_pool[idx] or 0) - target_runs))
+        normalized_pool.pop(fallback_idx)
+        if isinstance(run_list, list):
+            run_list[:] = normalized_pool
+        return True
+
+    def _decrement_output_counter(counter: dict[int, int], output_id: int, amount: int = 1) -> None:
+        if output_id <= 0:
+            return
+        counter[output_id] = max(0, int(counter.get(output_id, 0) or 0) - max(1, int(amount or 1)))
+
+    def _reserve_personal_bpo_output(output_id: int, char_id: str) -> bool:
+        if output_id <= 0 or not char_id:
+            return False
+        per_char = personal_bpo_count_by_output_character.get(output_id) or {}
+        if int(per_char.get(char_id, 0) or 0) <= 0:
+            return False
+        per_char[char_id] = max(0, int(per_char.get(char_id, 0) or 0) - 1)
+        _decrement_output_counter(personal_bpo_count_by_output, output_id)
+        _decrement_output_counter(bpo_count_by_output, output_id)
+        return True
+
+    def _reserve_corp_bpo_output(output_id: int) -> bool:
+        available = max(
+            int(corp_bpo_count_by_output.get(output_id, 0) or 0),
+            int(corp_bpo_count_by_output_copy.get(output_id, 0) or 0),
+            int(corp_bpo_count_by_output_manufacture.get(output_id, 0) or 0),
+        )
+        if available <= 0:
+            return False
+        _decrement_output_counter(corp_bpo_count_by_output, output_id)
+        _decrement_output_counter(corp_bpo_count_by_output_copy, output_id)
+        _decrement_output_counter(corp_bpo_count_by_output_manufacture, output_id)
+        _decrement_output_counter(bpo_count_by_output, output_id)
+        return True
+
+    def _reserve_personal_bpc_output(output_id: int, char_id: str, required_runs: int) -> bool:
+        if output_id <= 0 or not char_id:
+            return False
+        per_char_runs = ((personal_bpc_runs_by_output_character.get(output_id) or {}).get(char_id) or [])
+        reserved_runs = _reserve_bpc_copy(per_char_runs, required_runs)
+        if reserved_runs <= 0:
+            return False
+        per_char_counts = personal_bpc_count_by_output_character.get(output_id) or {}
+        if char_id in per_char_counts:
+            per_char_counts[char_id] = max(0, int(per_char_counts.get(char_id, 0) or 0) - 1)
+        _decrement_output_counter(bpc_count_by_output, output_id)
+        _remove_matching_bpc_copy(bpc_runs_by_output.get(output_id), reserved_runs)
+        return True
+
+    def _reserve_corp_bpc_output(output_id: int, required_runs: int) -> bool:
+        if output_id <= 0:
+            return False
+        corp_runs = corp_bpc_runs_by_output.get(output_id) or []
+        reserved_runs = _reserve_bpc_copy(corp_runs, required_runs)
+        if reserved_runs <= 0:
+            return False
+        _decrement_output_counter(corp_bpc_count_by_output, output_id)
+        _decrement_output_counter(bpc_count_by_output, output_id)
+        _remove_matching_bpc_copy(bpc_runs_by_output.get(output_id), reserved_runs)
+        return True
+
+    def _reserve_active_blueprint_for_job(job: dict) -> None:
+        activity_id = int(job.get("activity_id") or 0)
+        if activity_id not in (1, 3, 4, 5, 8):
+            return
+        source_blueprint_id = int(job.get("blueprint_type_id") or 0)
+        source_output_id = int(output_id_by_blueprint_id.get(source_blueprint_id) or 0)
+        if source_output_id <= 0:
+            return
+        char_id = str(job.get("character_id") or "")
+        required_runs = max(1, int(job.get("runs") or 1))
+        owner_hint = str(job.get("job_owner") or "").strip().lower()
+        if owner_hint == "personal":
+            scope_order = ["personal"]
+        elif owner_hint == "corp":
+            scope_order = ["corp"]
+        else:
+            scope_order = ["personal", "corp"]
+
+        if activity_id in (3, 4, 5):
+            for scope in scope_order:
+                if scope == "personal":
+                    if _reserve_personal_bpo_output(source_output_id, char_id):
+                        return
+                elif _reserve_corp_bpo_output(source_output_id):
+                    return
+            return
+
+        if activity_id == 8:
+            for scope in scope_order:
+                if scope == "personal":
+                    if _reserve_personal_bpc_output(source_output_id, char_id, required_runs):
+                        return
+                elif _reserve_corp_bpc_output(source_output_id, required_runs):
+                    return
+            return
+
+        for scope in scope_order:
+            if scope == "personal":
+                if _reserve_personal_bpc_output(source_output_id, char_id, required_runs):
+                    return
+                if _reserve_personal_bpo_output(source_output_id, char_id):
+                    return
+            else:
+                if _reserve_corp_bpc_output(source_output_id, required_runs):
+                    return
+                if _reserve_corp_bpo_output(source_output_id):
+                    return
+
+    _active_job_now_ts = int(time.time())
+    for _active_job in _ESI_JOBS_CACHE.get("jobs", []):
+        if int(_active_job.get("end_ts") or 0) <= _active_job_now_ts:
+            continue
+        _reserve_active_blueprint_for_job(_active_job)
 
     # ── Live signal 1: sell order inventory (supply coverage) ─────────────────
     # Aggregate volume_remain per type_id across all open sell orders.
@@ -3168,9 +3372,19 @@ def api_job_planner():
 
     selected_operations_corp_id = int(str(operations_corp_id_param or "").strip() or 0)
     if selected_operations_corp_id > 0:
+        selected_ops_snapshot = _get_corp_source_snapshot(selected_operations_corp_id)
+        selected_ops_access_char_ids = {
+            str(access.get("character_id") or "")
+            for access in (selected_ops_snapshot or {}).get("asset_access_characters") or []
+            if access.get("character_id")
+        }
         off_corp_mfg_slots = [
             slot for slot in planner_character_slots.get("manufacturing", {}).values()
-            if int(slot.get("free", 0) or 0) > 0 and int(slot.get("corporation_id") or 0) not in (0, selected_operations_corp_id)
+            if (
+                int(slot.get("free", 0) or 0) > 0
+                and int(slot.get("corporation_id") or 0) not in (0, selected_operations_corp_id)
+                and str(slot.get("character_id") or "") not in selected_ops_access_char_ids
+            )
         ]
         if off_corp_mfg_slots:
             free_count = sum(int(slot.get("free", 0) or 0) for slot in off_corp_mfg_slots)
@@ -3192,7 +3406,11 @@ def api_job_planner():
 
         off_corp_science_slots = [
             slot for slot in planner_character_slots.get("science", {}).values()
-            if int(slot.get("free", 0) or 0) > 0 and int(slot.get("corporation_id") or 0) not in (0, selected_operations_corp_id)
+            if (
+                int(slot.get("free", 0) or 0) > 0
+                and int(slot.get("corporation_id") or 0) not in (0, selected_operations_corp_id)
+                and str(slot.get("character_id") or "") not in selected_ops_access_char_ids
+            )
         ]
         if off_corp_science_slots:
             free_count = sum(int(slot.get("free", 0) or 0) for slot in off_corp_science_slots)
@@ -3903,6 +4121,8 @@ def api_job_planner():
             ownership.append("personal_bpc")
         if out_id in corp_manufacture_output_ids:
             ownership.append("corp_bpo")
+        if out_id in corp_bpc_output_ids:
+            ownership.append("corp_bpc")
 
         candidate = {
             "name":              result["name"],
@@ -3941,6 +4161,7 @@ def api_job_planner():
             "character_personal_bpo_counts": dict(personal_bpo_count_by_output_character.get(out_id, {}) or {}),
             "character_personal_bpc_counts": dict(personal_bpc_count_by_output_character.get(out_id, {}) or {}),
             "corp_bpo_count":    int(corp_bpo_count_by_output_manufacture.get(out_id, 0) or 0),
+            "corp_bpc_count":    int(corp_bpc_count_by_output.get(out_id, 0) or 0),
             "supply_qty":        sell_qty,
             "supply_days":       round(supply_days, 1),
             "producing_qty":     producing_qty,
@@ -4138,7 +4359,7 @@ def api_job_planner():
         t1_bp_id = int(invention_t1_by_t2.get(bp_id) or 0)
         if not t1_bp_id:
             return None
-        if t1_bp_id not in personal_bpo_bp_ids and t1_bp_id not in personal_bpc_bp_ids and t1_bp_id not in corp_copy_bp_ids:
+        if t1_bp_id not in personal_bpo_bp_ids and t1_bp_id not in personal_bpc_bp_ids and t1_bp_id not in corp_copy_bp_ids and t1_bp_id not in corp_bpc_bp_ids:
             return None
 
         inv_meta = invention_meta.get(bp_id, {})
@@ -4170,12 +4391,16 @@ def api_job_planner():
         runs_per_bpc = max(1, int(inv_meta.get("output_runs_per_bpc") or 10))
         if inv_detail.get("output_runs_per_bpc") is not None:
             runs_per_bpc = max(1, int(inv_detail.get("output_runs_per_bpc") or runs_per_bpc))
-        has_t1_bpc = t1_bp_id in personal_bpc_bp_ids
-        t1_bpc_runs = list(personal_bpc_runs_by_bp_id.get(t1_bp_id, []) or [])
-        t1_bpc_total_runs = _total_bpc_runs(t1_bpc_runs)
-        t1_bpc_usable_parallel = _usable_bpc_parallel(t1_bpc_runs, 1)
-
         t1_output_id = output_id_by_blueprint_id.get(t1_bp_id)
+        t1_bpc_runs = []
+        if t1_output_id:
+            for _run_list in (personal_bpc_runs_by_output_character.get(int(t1_output_id), {}) or {}).values():
+                t1_bpc_runs.extend(list(_run_list or []))
+            t1_bpc_runs.extend(list(corp_bpc_runs_by_output.get(int(t1_output_id), []) or []))
+        t1_bpc_total_runs = _total_bpc_runs(t1_bpc_runs)
+        t1_bpc_run_cap = max((max(0, int(runs or 0)) for runs in t1_bpc_runs), default=0)
+        has_t1_bpc = t1_bpc_run_cap > 0
+
         future_t1_bpc_jobs = future_personal_bpc_jobs_by_output_character.get(int(t1_output_id or 0), {}) if t1_output_id else {}
         future_t1_bpc_count = sum(len(jobs) for jobs in future_t1_bpc_jobs.values())
         future_t1_bpc_ready_at = min((int(job[0] or 0) for jobs in future_t1_bpc_jobs.values() for job in jobs), default=0)
@@ -4188,11 +4413,12 @@ def api_job_planner():
         else:
             invent_secs_per_attempt = _estimate_invention_secs(seed_copy_secs, int(downstream_run_secs * runs_per_bpc))
         available_attempt_cap = None
-        if has_t1_bpc and t1_bpc_total_runs > 0:
-            available_attempt_cap = t1_bpc_total_runs
+        if has_t1_bpc:
+            available_attempt_cap = t1_bpc_run_cap
         elif (not has_t1_bpc) and future_t1_bpc_count > 0:
             available_attempt_cap = future_t1_bpc_count
         invent_jobs_needed = _nearest_cycle_count(invent_secs_per_attempt, minimum=1, maximum=available_attempt_cap)
+        t1_bpc_usable_parallel = _usable_bpc_parallel(t1_bpc_runs, invent_jobs_needed) if has_t1_bpc else 0
         copy_secs_total = 0
         copy_job_cost_total = 0.0
         copy_breakdown = None
@@ -4223,19 +4449,19 @@ def api_job_planner():
                 f"Run {invent_jobs_needed} invention attempt{'s' if invent_jobs_needed != 1 else ''}",
                 f"Manufacture {expected_runs_covered} runs",
             ]
-        elif max_parallel < 1 or t1_bpc_total_runs < 1:
+        elif max_parallel < 1 or t1_bpc_total_runs < invent_jobs_needed:
             _record_blocked(
                 f"invent:{base_item['output_id']}",
                 str(base_item.get("name") or result.get("name") or "Unknown"),
                 "invent_first",
-                f"Blocked: existing T1 BPCs cannot support invention yet. Need at least 1 T1 BPC run, have {t1_bpc_total_runs} total BPC run{'s' if t1_bpc_total_runs != 1 else ''} across {len(t1_bpc_runs)} cop{'ies' if len(t1_bpc_runs) != 1 else 'y'}.",
+                f"Blocked: existing T1 BPCs cannot support invention yet. Need {invent_jobs_needed} T1 BPC run{'s' if invent_jobs_needed != 1 else ''} on a free copy, have {t1_bpc_total_runs} total free BPC run{'s' if t1_bpc_total_runs != 1 else ''} across {len(t1_bpc_runs)} free cop{'ies' if len(t1_bpc_runs) != 1 else 'y'}.",
                 float(base_item.get("_selection_score", 0) or 0),
                 {
                     "output_id": int(base_item.get("output_id") or 0),
                     "block_kind": "blueprint_runs",
                     "estimated_profit": round(float(base_item.get("profit_per_cycle", 0) or 0)),
-                    "unlock_path": f"Needs: at least 1 invention run · Have: {t1_bpc_total_runs}",
-                    "required_runs": 1,
+                    "unlock_path": f"Needs: {invent_jobs_needed} invention run{'s' if invent_jobs_needed != 1 else ''} · Have: {t1_bpc_total_runs}",
+                    "required_runs": invent_jobs_needed,
                     "available_runs": t1_bpc_total_runs,
                     "available_copies": len(t1_bpc_runs),
                 },
@@ -4313,6 +4539,8 @@ def api_job_planner():
             source_ownership.append("personal_bpc")
         if t1_output_id in corp_copy_output_ids:
             source_ownership.append("corp_bpo")
+        if t1_output_id in corp_bpc_output_ids:
+            source_ownership.append("corp_bpc")
         invention_eligible_character_ids = list(inv_detail.get("eligible_character_ids") or [])
         if not invention_eligible_character_ids and inv_detail.get("selected_character_id"):
             invention_eligible_character_ids = [str(inv_detail.get("selected_character_id"))]
@@ -4341,14 +4569,18 @@ def api_job_planner():
             "expected_successful_bpcs": round(expected_successful_bpcs, 2),
             "expected_runs_covered": expected_runs_covered,
             "source_bpc_count": len(t1_bpc_runs),
-            "source_bpc_total_runs": t1_bpc_total_runs + future_t1_bpc_count,
+            "source_bpc_total_runs": t1_bpc_total_runs,
             "source_bpc_usable_parallel": t1_bpc_usable_parallel,
-            "source_bpo_count": int(personal_bpo_count.get(t1_bp_id, 0) + corp_bpo_copy_count.get(t1_bp_id, 0) or 0),
+            "source_bpo_count": (
+                int(personal_bpo_count_by_output.get(t1_output_id, 0) or 0)
+                + int(corp_bpo_count_by_output_copy.get(t1_output_id, 0) or 0)
+            ) if t1_output_id else 0,
             "characters": characters_by_output.get(t1_output_id, []) if t1_output_id else [],
             "ownership": source_ownership,
             "character_personal_bpo_counts": dict(personal_bpo_count_by_output_character.get(t1_output_id, {}) or {}),
             "character_personal_bpc_counts": dict(personal_bpc_count_by_output_character.get(t1_output_id, {}) or {}),
             "corp_bpo_count": int(corp_bpo_count_by_output_copy.get(t1_output_id, 0) or 0) if t1_output_id else 0,
+            "corp_bpc_count": int(corp_bpc_count_by_output.get(t1_output_id, 0) or 0) if t1_output_id else 0,
             "copy_time_secs": copy_secs_total,
             "copy_job_cost": round(copy_job_cost_total),
             "copy_job_cost_per_run": round(copy_job_cost_total / max(1, invent_jobs_needed)),
@@ -4785,13 +5017,24 @@ def api_job_planner():
         int(out_id): {str(char_id): int(count or 0) for char_id, count in (per_char or {}).items()}
         for out_id, per_char in personal_bpo_count_by_output_character.items()
     }
-    shared_personal_bpc_remaining = {
-        int(out_id): {str(char_id): int(count or 0) for char_id, count in (per_char or {}).items()}
-        for out_id, per_char in personal_bpc_count_by_output_character.items()
+    shared_personal_bpc_runs_remaining = {
+        int(out_id): {
+            str(char_id): [max(0, int(runs or 0)) for runs in (run_list or []) if int(runs or 0) > 0]
+            for char_id, run_list in (per_char or {}).items()
+        }
+        for out_id, per_char in personal_bpc_runs_by_output_character.items()
     }
-    shared_corp_bpo_remaining = {
+    shared_corp_bpo_copy_remaining = {
         int(out_id): int(count or 0)
-        for out_id, count in corp_bpo_count_by_output.items()
+        for out_id, count in corp_bpo_count_by_output_copy.items()
+    }
+    shared_corp_bpo_manufacture_remaining = {
+        int(out_id): int(count or 0)
+        for out_id, count in corp_bpo_count_by_output_manufacture.items()
+    }
+    shared_corp_bpc_runs_remaining = {
+        int(out_id): [max(0, int(runs or 0)) for runs in (run_list or []) if int(runs or 0) > 0]
+        for out_id, run_list in corp_bpc_runs_by_output.items()
     }
     combined_future_personal_bpc_jobs_by_output_character: dict[int, dict[str, list[tuple[int, str | None]]]] = {}
     for source in (future_personal_bpc_jobs_by_output_character, planned_future_personal_bpc_jobs_by_output_character):
@@ -4830,11 +5073,61 @@ def api_job_planner():
         "science": {},
         "manufacturing": {},
     }
+    invention_capable_char_ids = {
+        str(candidate_id)
+        for queued_item in items
+        for candidate_id in (queued_item.get("invention_eligible_character_ids") or [])
+        if candidate_id
+    }
 
     def _record_idle_blocker(slot_kind: str, char_id: str, reason_key: str) -> None:
         slot_blockers = idle_blockers.setdefault(slot_kind, {})
         blocked = slot_blockers.setdefault(char_id, {"blueprint_busy": 0, "blueprint_missing": 0})
         blocked[reason_key] = int(blocked.get(reason_key, 0) or 0) + 1
+
+    def _normalized_bpc_run_pool(run_list: list[int] | None) -> list[int]:
+        return [max(0, int(runs or 0)) for runs in (run_list or []) if int(runs or 0) > 0]
+
+    def _bpc_pool_supports(run_list: list[int] | None, required_runs: int, require_single_copy: bool = False) -> bool:
+        normalized_pool = _normalized_bpc_run_pool(run_list)
+        needed_runs = max(1, int(required_runs or 1))
+        if require_single_copy:
+            return any(int(runs or 0) >= needed_runs for runs in normalized_pool)
+        return _total_bpc_runs(normalized_pool) >= needed_runs
+
+    def _consume_bpc_runs(run_list: list[int], required_runs: int, require_single_copy: bool = False) -> bool:
+        normalized_pool = sorted(_normalized_bpc_run_pool(run_list))
+        needed_runs = max(1, int(required_runs or 1))
+        if require_single_copy:
+            eligible_indices = [idx for idx, runs in enumerate(normalized_pool) if int(runs or 0) >= needed_runs]
+            if not eligible_indices:
+                return False
+            best_idx = min(eligible_indices, key=lambda idx: int(normalized_pool[idx] or 0))
+            remaining_runs = int(normalized_pool[best_idx] or 0) - needed_runs
+            if remaining_runs > 0:
+                normalized_pool[best_idx] = remaining_runs
+            else:
+                normalized_pool.pop(best_idx)
+        else:
+            pool_idx = 0
+            while needed_runs > 0 and pool_idx < len(normalized_pool):
+                available_runs = int(normalized_pool[pool_idx] or 0)
+                take_runs = min(available_runs, needed_runs)
+                normalized_pool[pool_idx] = available_runs - take_runs
+                needed_runs -= take_runs
+                if int(normalized_pool[pool_idx] or 0) <= 0:
+                    normalized_pool.pop(pool_idx)
+                else:
+                    pool_idx += 1
+            if needed_runs > 0:
+                return False
+        run_list[:] = normalized_pool
+        return True
+
+    def _required_bpc_runs_for_item(item: dict, slot_kind: str) -> int:
+        if slot_kind == "manufacturing":
+            return max(1, int(item.get("rec_runs") or item.get("recommended_runs") or 1))
+        return max(1, int(item.get("science_cycle_runs") or item.get("invention_attempts") or 1))
 
     def _mark_candidate_blockers(item: dict, slot_kind: str, reason_key: str) -> None:
         slot_map = slot_maps.get(slot_kind, {})
@@ -4845,7 +5138,7 @@ def api_job_planner():
         if slot_kind == "manufacturing":
             candidate_ids.update(personal_bpo_chars)
             candidate_ids.update(personal_bpc_chars)
-            if "corp_bpo" in (item.get("ownership") or []):
+            if "corp_bpo" in (item.get("ownership") or []) or "corp_bpc" in (item.get("ownership") or []):
                 candidate_ids.update(known_access_chars)
         elif item.get("action_type") in ("copy_first", "copy_then_invent"):
             candidate_ids.update(personal_bpo_chars)
@@ -4886,6 +5179,7 @@ def api_job_planner():
             can_use_personal_bpc = bool(char_permissions.get("personal_bpc"))
             can_use_corp_copy = bool(char_permissions.get("corp_bpo_copy"))
             can_use_corp_manufacture = bool(char_permissions.get("corp_bpo_manufacture"))
+            can_use_corp_bpc = bool(char_permissions.get("corp_bpc"))
             if slot_kind == "science":
                 slot_openings = science_slot_openings_by_character.get(char_id, [])
                 if not slot_openings:
@@ -4903,58 +5197,67 @@ def api_job_planner():
             future_bpc_ready_by = future_bpc_jobs[0][1] if future_bpc_jobs else None
             global_future_bpc_ready_at = int(future_bpc_jobs_global[0][0] or 0) if future_bpc_jobs_global else now_ts
             global_future_bpc_ready_by = future_bpc_jobs_global[0][1] if future_bpc_jobs_global else None
+            required_bpc_runs = _required_bpc_runs_for_item(item, slot_kind)
+            personal_bpc_runs = ((shared_personal_bpc_runs_remaining.get(access_output_id, {}) or {}).get(char_id) or [])
+            corp_bpc_runs = shared_corp_bpc_runs_remaining.get(access_output_id, []) or []
             access_kind = None
             access_priority = 9
             bp_ready_at = now_ts
             bp_ready_by = None
             if slot_kind == "manufacturing":
-                if can_use_personal_bpc and int((shared_personal_bpc_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
+                if can_use_personal_bpc and _bpc_pool_supports(personal_bpc_runs, required_bpc_runs, require_single_copy=True):
                     access_kind = "personal_bpc"
                     access_priority = 0
                 elif can_use_personal_bpo and int((shared_personal_bpo_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
                     access_kind = "personal_bpo"
                     access_priority = 1
-                elif can_use_corp_manufacture and "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) > 0:
-                    access_kind = "corp_bpo"
+                elif can_use_corp_bpc and "corp_bpc" in ownership and char_id in known_access_chars and _bpc_pool_supports(corp_bpc_runs, required_bpc_runs, require_single_copy=True):
+                    access_kind = "corp_bpc"
                     access_priority = 2
+                elif can_use_corp_manufacture and "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_manufacture_remaining.get(access_output_id, 0) or 0) > 0:
+                    access_kind = "corp_bpo"
+                    access_priority = 3
                 elif can_use_personal_bpc and future_bpc_jobs:
                     access_kind = "future_personal_bpc"
-                    access_priority = 3
+                    access_priority = 4
                     bp_ready_at = future_bpc_ready_at
                     bp_ready_by = future_bpc_ready_by
                 elif can_use_personal_bpc and future_bpc_jobs_global:
                     access_kind = "future_personal_bpc"
-                    access_priority = 3
+                    access_priority = 4
                     bp_ready_at = global_future_bpc_ready_at
                     bp_ready_by = global_future_bpc_ready_by
             elif action_type == "copy_first":
                 if can_use_personal_bpo and int((shared_personal_bpo_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
                     access_kind = "personal_bpo"
                     access_priority = 0
-                elif can_use_corp_copy and "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) > 0:
+                elif can_use_corp_copy and "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_copy_remaining.get(access_output_id, 0) or 0) > 0:
                     access_kind = "corp_bpo"
                     access_priority = 1
             elif action_type == "copy_then_invent":
                 if can_use_personal_bpo and int((shared_personal_bpo_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
                     access_kind = "personal_bpo"
                     access_priority = 0
-                elif can_use_corp_copy and "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) > 0:
+                elif can_use_corp_copy and "corp_bpo" in ownership and char_id in known_access_chars and int(shared_corp_bpo_copy_remaining.get(access_output_id, 0) or 0) > 0:
                     access_kind = "corp_bpo"
                     access_priority = 1
             else:
                 if invention_eligible_ids and char_id not in invention_eligible_ids:
                     access_kind = None
-                elif can_use_personal_bpc and int((shared_personal_bpc_remaining.get(access_output_id, {}) or {}).get(char_id, 0) or 0) > 0:
+                elif can_use_personal_bpc and _bpc_pool_supports(personal_bpc_runs, required_bpc_runs, require_single_copy=True):
                     access_kind = "personal_bpc"
                     access_priority = 0
+                elif can_use_corp_bpc and "corp_bpc" in ownership and char_id in known_access_chars and _bpc_pool_supports(corp_bpc_runs, required_bpc_runs, require_single_copy=True):
+                    access_kind = "corp_bpc"
+                    access_priority = 1
                 elif can_use_personal_bpc and future_bpc_jobs:
                     access_kind = "future_personal_bpc"
-                    access_priority = 1
+                    access_priority = 2
                     bp_ready_at = future_bpc_ready_at
                     bp_ready_by = future_bpc_ready_by
                 elif can_use_personal_bpc and future_bpc_jobs_global:
                     access_kind = "future_personal_bpc"
-                    access_priority = 1
+                    access_priority = 2
                     bp_ready_at = global_future_bpc_ready_at
                     bp_ready_by = global_future_bpc_ready_by
 
@@ -4974,9 +5277,21 @@ def api_job_planner():
                 "access_priority": access_priority,
             })
 
+        has_non_inventor_copy_option = (
+            action_type in ("copy_first", "copy_then_invent")
+            and any(str(option.get("character_id") or "") not in invention_capable_char_ids for option in options)
+        )
+        for option in options:
+            option["copy_skill_penalty"] = (
+                1
+                if has_non_inventor_copy_option and str(option.get("character_id") or "") in invention_capable_char_ids
+                else 0
+            )
+
         options.sort(key=lambda option: (
             int(option.get("access_priority", 9) or 9),
             int(option.get("effective_start_ts", 0) or 0),
+            int(option.get("copy_skill_penalty", 0) or 0),
             -int(option.get("remaining", 0) or 0),
             str(option.get("character_name", "")),
         ))
@@ -4986,12 +5301,17 @@ def api_job_planner():
         access_output_id = int(item.get("source_output_id") or item.get("output_id") or 0)
         char_id = str(chosen.get("character_id") or "")
         access_kind = chosen.get("access_kind")
+        slot_kind = "manufacturing" if item.get("action_type") == "manufacture" else "science"
+        required_bpc_runs = _required_bpc_runs_for_item(item, slot_kind)
         if access_kind == "personal_bpo":
             per_char = shared_personal_bpo_remaining.setdefault(access_output_id, {})
             per_char[char_id] = max(0, int(per_char.get(char_id, 0) or 0) - 1)
         elif access_kind == "personal_bpc":
-            per_char = shared_personal_bpc_remaining.setdefault(access_output_id, {})
-            per_char[char_id] = max(0, int(per_char.get(char_id, 0) or 0) - 1)
+            per_char_runs = shared_personal_bpc_runs_remaining.setdefault(access_output_id, {}).setdefault(char_id, [])
+            _reserve_bpc_copy(per_char_runs, required_bpc_runs)
+        elif access_kind == "corp_bpc":
+            corp_runs = shared_corp_bpc_runs_remaining.setdefault(access_output_id, [])
+            _reserve_bpc_copy(corp_runs, required_bpc_runs)
         elif access_kind == "future_personal_bpc":
             per_char_jobs = shared_future_personal_bpc_jobs.setdefault(access_output_id, {}).setdefault(char_id, [])
             consumed_job = None
@@ -5015,7 +5335,10 @@ def api_job_planner():
                     if consumed_per_char_jobs:
                         consumed_per_char_jobs.pop(0)
         elif access_kind == "corp_bpo":
-            shared_corp_bpo_remaining[access_output_id] = max(0, int(shared_corp_bpo_remaining.get(access_output_id, 0) or 0) - 1)
+            if slot_kind == "manufacturing":
+                shared_corp_bpo_manufacture_remaining[access_output_id] = max(0, int(shared_corp_bpo_manufacture_remaining.get(access_output_id, 0) or 0) - 1)
+            else:
+                shared_corp_bpo_copy_remaining[access_output_id] = max(0, int(shared_corp_bpo_copy_remaining.get(access_output_id, 0) or 0) - 1)
 
     def _consume_science_slot(chosen: dict) -> tuple[int, str | None]:
         char_id = str(chosen.get("character_id") or "")
@@ -5029,10 +5352,25 @@ def api_job_planner():
             slot_info["remaining"] = max(0, int(slot_info.get("remaining", 0) or 0) - 1)
         return int(slot_open_ts or now_ts), slot_freed_by
 
-    def _choose_invention_character(item: dict) -> dict | None:
+    def _peek_science_slot(char_id: str) -> tuple[int, str | None] | None:
+        slot_openings = science_slot_openings_by_character.get(str(char_id or ""), [])
+        if not slot_openings:
+            return None
+        slot_open_ts, slot_freed_by = slot_openings[0]
+        return int(slot_open_ts or now_ts), slot_freed_by
+
+    def _consume_science_slot_for_character(char_id: str) -> tuple[int, str | None]:
+        return _consume_science_slot({"character_id": str(char_id or "")})
+
+    def _choose_invention_character(
+        item: dict,
+        *,
+        copy_character_id: str | None = None,
+        copy_ready_at: int | None = None,
+    ) -> tuple[dict | None, int | None, str | None]:
         eligible_ids = [str(char_id) for char_id in (item.get("invention_eligible_character_ids") or []) if char_id]
         if not eligible_ids:
-            return None
+            return None, None, None
         preferred_id = str(item.get("preferred_invention_character_id") or "")
         eligible_chars = {
             str(char.get("character_id") or ""): {
@@ -5042,22 +5380,54 @@ def api_job_planner():
             for char in (item.get("invention_eligible_characters") or [])
             if char.get("character_id")
         }
-        if preferred_id and preferred_id in eligible_chars:
-            return dict(eligible_chars[preferred_id])
-        if preferred_id and preferred_id in eligible_ids:
-            return {
-                "character_id": preferred_id,
-                "character_name": item.get("preferred_invention_character_name") or f"Char {preferred_id}",
-            }
+        candidate_rows = []
         for char_id in eligible_ids:
+            if char_id == str(copy_character_id or ""):
+                slot_open_ts = int(copy_ready_at or now_ts)
+                slot_freed_by = None
+                effective_start_ts = slot_open_ts
+            else:
+                slot_opening = _peek_science_slot(char_id)
+                if not slot_opening:
+                    continue
+                slot_open_ts, slot_freed_by = slot_opening
+                effective_start_ts = max(int(copy_ready_at or now_ts), int(slot_open_ts or now_ts))
+
             if char_id in eligible_chars:
-                return dict(eligible_chars[char_id])
-            slot_info = free_science_slots_by_character.get(char_id) or free_mfg_slots_by_character.get(char_id) or {}
-            return {
-                "character_id": char_id,
-                "character_name": slot_info.get("character_name") or f"Char {char_id}",
-            }
-        return None
+                character_payload = dict(eligible_chars[char_id])
+            else:
+                slot_info = free_science_slots_by_character.get(char_id) or free_mfg_slots_by_character.get(char_id) or {}
+                character_payload = {
+                    "character_id": char_id,
+                    "character_name": slot_info.get("character_name") or f"Char {char_id}",
+                }
+
+            candidate_rows.append({
+                "character": character_payload,
+                "slot_open_ts": int(slot_open_ts or now_ts),
+                "slot_freed_by": slot_freed_by,
+                "effective_start_ts": int(effective_start_ts or now_ts),
+                "preferred_rank": 0 if preferred_id and char_id == preferred_id else 1,
+                "same_as_copy_penalty": (
+                    1
+                    if copy_character_id and char_id == str(copy_character_id) and any(other_id != str(copy_character_id) for other_id in eligible_ids)
+                    else 0
+                ),
+                "remaining": len(science_slot_openings_by_character.get(char_id, [])),
+            })
+
+        if not candidate_rows:
+            return None, None, None
+
+        candidate_rows.sort(key=lambda option: (
+            int(option.get("preferred_rank", 1) or 1),
+            int(option.get("effective_start_ts", 0) or 0),
+            int(option.get("same_as_copy_penalty", 0) or 0),
+            -int(option.get("remaining", 0) or 0),
+            str((option.get("character") or {}).get("character_name", "")),
+        ))
+        selected = candidate_rows[0]
+        return dict(selected.get("character") or {}), int(selected.get("slot_open_ts", now_ts) or now_ts), selected.get("slot_freed_by")
 
     assignment_priority = {
         "manufacture": 0,
@@ -5079,19 +5449,60 @@ def api_job_planner():
         item["slot_assignment_kind"] = slot_kind
         item["copy_character"] = None
         item["invent_character"] = None
+        item["invention_slot_freed_by"] = None
         if item.get("action_type") == "copy_then_invent":
             options = _candidate_options_for_item(item, slot_kind)
-            inventor = _choose_invention_character(item)
-            if not inventor:
-                _mark_candidate_blockers(item, slot_kind, "blueprint_missing")
-                item["characters"] = []
-                continue
             if not options:
                 _mark_candidate_blockers(item, slot_kind, "blueprint_busy")
                 item["characters"] = []
                 continue
-            chosen = options[0]
+            chosen = None
+            inventor = None
+            inventor_slot_open_at = None
+            inventor_slot_freed_by = None
+            for option in options:
+                copy_start_candidate = int(option.get("effective_start_ts") or now_ts)
+                copy_ready_candidate = copy_start_candidate + int(item.get("copy_time_secs") or item.get("estimated_copy_secs") or 0)
+                candidate_inventor, candidate_slot_open_at, candidate_slot_freed_by = _choose_invention_character(
+                    item,
+                    copy_character_id=str(option.get("character_id") or ""),
+                    copy_ready_at=copy_ready_candidate,
+                )
+                if not candidate_inventor:
+                    continue
+                chosen = option
+                inventor = candidate_inventor
+                inventor_slot_open_at = candidate_slot_open_at
+                inventor_slot_freed_by = candidate_slot_freed_by
+                break
+            if not chosen or not inventor:
+                if item.get("invention_eligible_character_ids"):
+                    _mark_candidate_blockers(item, slot_kind, "blueprint_busy")
+                else:
+                    _mark_candidate_blockers(item, slot_kind, "blueprint_missing")
+                item["characters"] = []
+                continue
             science_start_at, science_slot_freed_by = _consume_science_slot(chosen)
+            copy_start_at = max(int(science_start_at or now_ts), int(chosen.get("bp_ready_at") or now_ts))
+            copy_start_blocker = (
+                chosen.get("bp_ready_by")
+                if int(chosen.get("bp_ready_at") or now_ts) > int(science_start_at or now_ts)
+                else science_slot_freed_by
+            )
+            copy_duration_secs = int(item.get("copy_time_secs") or item.get("estimated_copy_secs") or 0)
+            invent_duration_secs = int(
+                item.get("estimated_invent_secs")
+                or max(0, int(item.get("science_total_secs") or 0) - copy_duration_secs)
+            )
+            copy_complete_at = copy_start_at + copy_duration_secs
+            chosen_char_id = str(chosen.get("character_id") or "")
+            inventor_char_id = str(inventor.get("character_id") or "")
+            if inventor_char_id and inventor_char_id != chosen_char_id:
+                inventor_slot_open_at, inventor_slot_freed_by = _consume_science_slot_for_character(inventor_char_id)
+                invention_start_at = max(copy_complete_at, int(inventor_slot_open_at or copy_complete_at))
+            else:
+                invention_start_at = copy_complete_at
+                inventor_slot_freed_by = None
             _consume_access(item, chosen)
             item["assigned_character"] = {
                 "character_id": chosen["character_id"],
@@ -5101,9 +5512,13 @@ def api_job_planner():
             item["invent_character"] = dict(inventor)
             item["characters"] = [dict(item["assigned_character"])]
             item["assignment_access_kind"] = chosen.get("access_kind")
-            item["start_at"] = science_start_at
-            item["slot_freed_by"] = science_slot_freed_by
-            item["manufacture_at"] = science_start_at + int(item.get("science_total_secs") or 0)
+            item["start_at"] = copy_start_at
+            item["copy_start_at"] = copy_start_at
+            item["copy_complete_at"] = copy_complete_at
+            item["invention_start_at"] = invention_start_at
+            item["slot_freed_by"] = copy_start_blocker
+            item["invention_slot_freed_by"] = inventor_slot_freed_by
+            item["manufacture_at"] = invention_start_at + invent_duration_secs + int(item.get("prerequisite_duration_secs") or 0)
             continue
         options = _candidate_options_for_item(item, slot_kind)
         if not options:
@@ -5200,6 +5615,144 @@ def api_job_planner():
             r["capital_warning"]   = False
             r["capital_share_pct"] = 0.0
 
+    def _normalize_requirement_quantity(value):
+        try:
+            number = float(value or 0)
+        except Exception:
+            return 0
+        if abs(number - round(number)) < 1e-6:
+            return max(0, int(round(number)))
+        return max(0.0, round(number, 2))
+
+    def _coerce_material_float(value, fallback: float = 0.0) -> float:
+        try:
+            return float(value or 0.0)
+        except Exception:
+            return fallback
+
+    def _collect_inbound_material_rows(materials, aggregate: dict, consumer_name: str, allowed_groups: set[str] | None = None) -> None:
+        for material in materials or []:
+            if not isinstance(material, dict):
+                continue
+
+            children = material.get("children") or []
+            if str(material.get("source") or "") == "craft" and children:
+                _collect_inbound_material_rows(children, aggregate, consumer_name, allowed_groups=allowed_groups)
+                continue
+
+            material_group = str(material.get("group") or "manufacturing").strip().lower()
+            if allowed_groups and material_group not in allowed_groups:
+                continue
+
+            type_id = int(material.get("type_id") or 0)
+            if type_id <= 0:
+                continue
+
+            required_qty = _coerce_material_float(material.get("needed_qty_total"))
+            if required_qty <= 0:
+                required_qty = _coerce_material_float(material.get("quantity"))
+            if required_qty <= 0:
+                continue
+
+            line_cost_total = _coerce_material_float(material.get("total_line_cost"))
+            if line_cost_total <= 0:
+                fallback_line_cost = _coerce_material_float(material.get("line_cost"))
+                base_qty = _coerce_material_float(material.get("quantity"))
+                if fallback_line_cost > 0 and base_qty > 0:
+                    line_cost_total = fallback_line_cost * (required_qty / base_qty)
+
+            unit_price = _coerce_material_float(material.get("unit_price"))
+            if unit_price <= 0 and required_qty > 0 and line_cost_total > 0:
+                unit_price = line_cost_total / required_qty
+
+            volume_m3 = _coerce_material_float(material.get("volume_m3"))
+            if volume_m3 <= 0:
+                volume_m3 = _get_volume_m3(type_id)
+
+            row = aggregate.setdefault(type_id, {
+                "type_id": type_id,
+                "name": material.get("name") or planner_asset_source.get("names", {}).get(str(type_id)) or planner_asset_source.get("names", {}).get(type_id) or f"Type {type_id}",
+                "required_qty": 0.0,
+                "total_required_cost": 0.0,
+                "unit_volume_m3": volume_m3,
+                "groups": set(),
+                "consumers": set(),
+            })
+            row["required_qty"] += required_qty
+            row["total_required_cost"] += line_cost_total if line_cost_total > 0 else (unit_price * required_qty)
+            row["unit_volume_m3"] = max(float(row.get("unit_volume_m3") or 0.0), volume_m3)
+            row["groups"].add(material_group)
+            if consumer_name:
+                row["consumers"].add(str(consumer_name))
+
+    inbound_requirement_map: dict[int, dict] = {}
+    for item in items:
+        if item.get("is_idle"):
+            continue
+        action_type = str(item.get("action_type") or "").strip().lower()
+        if action_type == "manufacture":
+            source_materials = item.get("resolved_material_breakdown") if item.get("resolved_material_breakdown") else item.get("material_breakdown")
+            _collect_inbound_material_rows(source_materials or [], inbound_requirement_map, str(item.get("name") or ""))
+        elif action_type in {"invent_first", "copy_then_invent"}:
+            datacore_materials = [
+                material
+                for material in (item.get("material_breakdown") or [])
+                if str(material.get("group") or "").strip().lower() == "datacore"
+            ]
+            _collect_inbound_material_rows(datacore_materials, inbound_requirement_map, str(item.get("name") or ""), allowed_groups={"datacore"})
+
+    inbound_assets = dict(planner_asset_source.get("assets") or {})
+    inbound_rows = []
+    for type_id, row in inbound_requirement_map.items():
+        required_qty = _coerce_material_float(row.get("required_qty"))
+        if required_qty <= 0:
+            continue
+        available_qty = _coerce_material_float(inbound_assets.get(type_id, inbound_assets.get(str(type_id), 0)))
+        delta_qty = max(0.0, required_qty - available_qty)
+        total_required_cost = _coerce_material_float(row.get("total_required_cost"))
+        unit_price = (total_required_cost / required_qty) if required_qty > 0 else 0.0
+        unit_volume_m3 = _coerce_material_float(row.get("unit_volume_m3"), _get_volume_m3(type_id))
+        delta_cost = unit_price * delta_qty
+        inbound_rows.append({
+            "type_id": type_id,
+            "name": row.get("name") or f"Type {type_id}",
+            "groups": sorted(str(group).upper() for group in (row.get("groups") or set())),
+            "consumer_count": len(row.get("consumers") or set()),
+            "consumer_names": sorted(str(name) for name in (row.get("consumers") or set())),
+            "required_qty": _normalize_requirement_quantity(required_qty),
+            "available_qty": _normalize_requirement_quantity(available_qty),
+            "delta_qty": _normalize_requirement_quantity(delta_qty),
+            "stocked": delta_qty <= 0,
+            "unit_price": round(unit_price, 2) if unit_price > 0 else 0.0,
+            "total_required_cost": round(total_required_cost, 2),
+            "delta_cost": round(delta_cost, 2),
+            "unit_volume_m3": round(unit_volume_m3, 4) if unit_volume_m3 > 0 else 0.0,
+            "required_volume_m3": round(unit_volume_m3 * required_qty, 2),
+            "delta_volume_m3": round(unit_volume_m3 * delta_qty, 2),
+        })
+
+    inbound_rows.sort(key=lambda row: (
+        row.get("delta_qty", 0) <= 0,
+        -float(row.get("delta_cost") or 0.0),
+        -float(row.get("total_required_cost") or 0.0),
+        str(row.get("name") or ""),
+    ))
+
+    inbound_summary = {
+        "row_count": len(inbound_rows),
+        "stocked_count": sum(1 for row in inbound_rows if bool(row.get("stocked"))),
+        "missing_count": sum(1 for row in inbound_rows if float(row.get("delta_qty") or 0) > 0),
+        "datacore_count": sum(1 for row in inbound_rows if "DATACORE" in (row.get("groups") or [])),
+        "consumer_count": len([
+            item for item in items
+            if not item.get("is_idle") and str(item.get("action_type") or "") in {"manufacture", "invent_first", "copy_then_invent"}
+        ]),
+        "total_required_cost": round(sum(float(row.get("total_required_cost") or 0.0) for row in inbound_rows), 2),
+        "total_delta_cost": round(sum(float(row.get("delta_cost") or 0.0) for row in inbound_rows), 2),
+        "total_required_m3": round(sum(float(row.get("required_volume_m3") or 0.0) for row in inbound_rows), 2),
+        "total_delta_m3": round(sum(float(row.get("delta_volume_m3") or 0.0) for row in inbound_rows), 2),
+    }
+
     # ── Persist displayed queue items so footer mirrors Queue Planner exactly ─
     global _QUEUE_PLANNER_CANDIDATES_CACHE, _QUEUE_PLANNER_CANDIDATES_TS
     _QUEUE_PLANNER_CANDIDATES_CACHE = list(items)
@@ -5255,6 +5808,10 @@ def api_job_planner():
             key: value
             for key, value in planner_asset_source.items()
             if key != "assets" and key != "names"
+        },
+        "inbound_requirements": {
+            "rows": inbound_rows,
+            "summary": inbound_summary,
         },
         # Echo back cycle config for UI sync
         "cycle_config":     cycle_config,
@@ -6040,17 +6597,47 @@ def api_bpo_market_scan():
         bpid_to_calc = _build_scan_bpid_map(calc_results)
         personal_bp_ids, corp_bp_ids = _load_owned_bp_ids()
         wallet_total_isk = round(_get_wallet(), 2)
+        invention_info_by_bp = _load_bpo_invention_info()
 
-        wanted_bp_ids: set[int] = set()
+        wanted_entry_bp_ids: set[int] = set()
+        candidate_rows: list[dict] = []
+        t1_candidates = 0
+        t2_candidates = 0
         for row in calc_results:
             blueprint_id = int(row.get("blueprint_id") or 0)
             if blueprint_id <= 0:
                 continue
             if float(row.get("net_profit", 0) or 0) <= 0:
                 continue
-            wanted_bp_ids.add(blueprint_id)
 
-        if not wanted_bp_ids:
+            sde_row = bp_info.get(blueprint_id, {})
+            if _is_t2_prognosis_row(row, sde_row):
+                invention_info = invention_info_by_bp.get(blueprint_id) or {}
+                entry_blueprint_id = int(invention_info.get("t1_blueprint_id") or 0)
+                if entry_blueprint_id <= 0:
+                    continue
+                wanted_entry_bp_ids.add(entry_blueprint_id)
+                candidate_rows.append({
+                    "mode": "invention",
+                    "blueprint_id": blueprint_id,
+                    "entry_blueprint_id": entry_blueprint_id,
+                    "calc_row": row,
+                    "invention_info": invention_info,
+                })
+                t2_candidates += 1
+                continue
+
+            wanted_entry_bp_ids.add(blueprint_id)
+            candidate_rows.append({
+                "mode": "market",
+                "blueprint_id": blueprint_id,
+                "entry_blueprint_id": blueprint_id,
+                "calc_row": row,
+                "invention_info": None,
+            })
+            t1_candidates += 1
+
+        if not candidate_rows:
             return jsonify({
                 "results": [],
                 "matched": 0,
@@ -6060,18 +6647,37 @@ def api_bpo_market_scan():
             })
 
         from pricer import get_prices_bulk
-        market_prices = get_prices_bulk(list(wanted_bp_ids), history_ids=[])
+        market_prices = get_prices_bulk(list(wanted_entry_bp_ids), history_ids=[])
 
         results = []
         market_match_count = 0
-        for blueprint_id in wanted_bp_ids:
-            calc_row = bpid_to_calc.get(blueprint_id, {})
-            market_row = market_prices.get(blueprint_id) or {}
+        t1_matches = 0
+        t2_matches = 0
+        for candidate in candidate_rows:
+            blueprint_id = int(candidate.get("blueprint_id") or 0)
+            entry_blueprint_id = int(candidate.get("entry_blueprint_id") or 0)
+            calc_row = candidate.get("calc_row") or bpid_to_calc.get(blueprint_id, {})
+            market_row = market_prices.get(entry_blueprint_id) or {}
             market_price = float(market_row.get("sell") or 0)
             if market_price > 0:
                 market_match_count += 1
             if market_price <= 0:
                 continue
+
+            if candidate.get("mode") == "invention":
+                results.append(_build_t2_invention_prognosis_row(
+                    blueprint_id=blueprint_id,
+                    calc_row=calc_row,
+                    personal_bp_ids=personal_bp_ids,
+                    corp_bp_ids=corp_bp_ids,
+                    bp_info=bp_info,
+                    invention_info=candidate.get("invention_info") or {},
+                    entry_market_row=market_row,
+                    wallet_total_isk=wallet_total_isk,
+                ))
+                t2_matches += 1
+                continue
+
             results.append(_build_bpo_acquisition_row(
                 blueprint_id=blueprint_id,
                 calc_row=calc_row,
@@ -6081,6 +6687,7 @@ def api_bpo_market_scan():
                 market_row=market_row,
                 wallet_total_isk=wallet_total_isk,
             ))
+            t1_matches += 1
 
         results.sort(key=lambda x: (
             x.get("payback_days") is None,
@@ -6093,10 +6700,14 @@ def api_bpo_market_scan():
             "results": results,
             "matched": len(results),
             "market_matches": market_match_count,
-            "bp_candidates": len(wanted_bp_ids),
-            "market_only": True,
+            "bp_candidates": len(candidate_rows),
+            "t1_candidates": t1_candidates,
+            "t2_candidates": t2_candidates,
+            "t1_matches": t1_matches,
+            "t2_matches": t2_matches,
+            "market_only": False,
             "wallet_total_isk": wallet_total_isk,
-            "message": None if results else "No live Jita market listings found for profitable blueprint originals.",
+            "message": None if results else "No live Jita market listings found for profitable entry blueprints.",
         })
     except Exception as e:
         import traceback
@@ -6395,7 +7006,7 @@ def _load_owned_bp_ids() -> tuple[set, set]:
             return set(_OWNED_BP_CACHE.get("personal", set())), set(_OWNED_BP_CACHE.get("corp", set()))
 
     personal_bp_ids = set()
-    corp_bp_ids = set(CORP_BPO_TYPE_IDS)
+    corp_bp_ids = set()
     try:
         from characters import get_all_auth_headers
         import requests as _req
@@ -6457,6 +7068,7 @@ def _load_owned_bp_ids() -> tuple[set, set]:
 
 # ── All-SDE blueprint info cache ──────────────────────────────────────────────
 _ALL_BP_INFO_CACHE: dict | None = None
+_BPO_INVENTION_INFO_CACHE: dict | None = None
 
 def _load_all_bp_info() -> tuple[set, dict]:
     """Return (all_bp_ids, bp_info) from crest.db blueprints table.
@@ -6496,6 +7108,68 @@ def _load_all_bp_info() -> tuple[set, dict]:
         }
     _ALL_BP_INFO_CACHE = (all_ids, bp_info)
     return _ALL_BP_INFO_CACHE
+
+
+def _load_bpo_invention_info() -> dict:
+    """Return T2 blueprint_id -> invention metadata from crest.db."""
+    global _BPO_INVENTION_INFO_CACHE
+    if _BPO_INVENTION_INFO_CACHE is not None:
+        return _BPO_INVENTION_INFO_CACHE
+
+    import sqlite3 as _sql
+
+    db_path = os.path.join(os.path.dirname(__file__), "crest.db")
+    if not os.path.exists(db_path):
+        _BPO_INVENTION_INFO_CACHE = {}
+        return _BPO_INVENTION_INFO_CACHE
+
+    conn = _sql.connect(db_path)
+    conn.row_factory = _sql.Row
+    try:
+        rows = conn.execute(
+            "SELECT t2_blueprint_id, t1_blueprint_id, base_success_chance, output_runs_per_bpc FROM blueprint_invention"
+        ).fetchall()
+    except Exception:
+        rows = []
+    conn.close()
+
+    invention_info: dict[int, dict] = {}
+    for row in rows:
+        t2_blueprint_id = int(row["t2_blueprint_id"] or 0)
+        t1_blueprint_id = int(row["t1_blueprint_id"] or 0)
+        if t2_blueprint_id <= 0 or t1_blueprint_id <= 0:
+            continue
+        invention_info[t2_blueprint_id] = {
+            "t1_blueprint_id": t1_blueprint_id,
+            "base_success_chance": float(row["base_success_chance"] or 0.34),
+            "output_runs_per_bpc": int(row["output_runs_per_bpc"] or 10),
+        }
+
+    _BPO_INVENTION_INFO_CACHE = invention_info
+    return _BPO_INVENTION_INFO_CACHE
+
+
+def _is_t2_prognosis_row(calc_row: dict, sde_row: dict | None = None) -> bool:
+    tech_value = calc_row.get("tech")
+    tech_level = calc_row.get("tech_level")
+    if tech_level is None:
+        tech_level = (sde_row or {}).get("tech")
+    try:
+        if int(tech_level or 0) == 2:
+            return True
+    except Exception:
+        pass
+    tech_text = str(tech_value or (sde_row or {}).get("tech") or "").strip().upper()
+    return tech_text in {"II", "2", "T2"}
+
+
+def _blueprint_display_name(name: str | None) -> str | None:
+    text = str(name or "").strip()
+    if not text:
+        return None
+    if text.endswith(" Blueprint"):
+        return text
+    return f"{text} Blueprint"
 
 
 def _build_scan_result_row(match: dict, bpid_to_calc: dict, personal_bp_ids: set, corp_bp_ids: set, bp_info: dict | None = None) -> dict:
@@ -6613,6 +7287,7 @@ def _build_bpo_acquisition_row(
         acquisition_score = (expected_daily_profit * max(roi, 0.0)) / max(math.sqrt(acquisition_price), 1.0)
     daily_yield_pct = ((expected_daily_profit / acquisition_price) * 100.0) if acquisition_price > 0 and expected_daily_profit > 0 else None
     market_spread_pct = ((market_sell_price - market_buy_price) / market_sell_price * 100.0) if market_sell_price > 0 and market_buy_price > 0 else None
+    entry_blueprint_name = _blueprint_display_name(sde_row.get("name") or calc_row.get("name"))
 
     personal_owned = blueprint_id in personal_bp_ids
     corp_owned = blueprint_id in corp_bp_ids
@@ -6632,6 +7307,17 @@ def _build_bpo_acquisition_row(
         "market_buy_price": round(market_buy_price, 2) if market_buy_price > 0 else None,
         "contract_price": None,
         "price": round(acquisition_price, 2),
+        "entry_blueprint_id": blueprint_id,
+        "entry_blueprint_name": entry_blueprint_name,
+        "entry_blueprint_price": round(market_sell_price, 2) if market_sell_price > 0 else None,
+        "entry_blueprint_buy_price": round(market_buy_price, 2) if market_buy_price > 0 else None,
+        "entry_blueprint_history_type_id": blueprint_id,
+        "entry_blueprint_adjusted_price": round(float(adjusted_price), 2) if adjusted_price not in (None, "") else None,
+        "entry_blueprint_average_price": round(float(average_price), 2) if average_price not in (None, "") else None,
+        "entry_blueprint_market_spread_pct": round(market_spread_pct, 2) if market_spread_pct is not None else None,
+        "entry_blueprint_affordable": affordable,
+        "t1_blueprint_id": blueprint_id,
+        "t1_blueprint_name": entry_blueprint_name,
         "me": 0,
         "te": 0,
         "is_bpc": False,
@@ -6649,6 +7335,141 @@ def _build_bpo_acquisition_row(
         "avg_daily_volume": round(avg_daily_volume, 2),
         "output_qty": output_qty,
         "duration": duration_secs,
+        "invention_detail": None,
+        "invention_success_chance": None,
+        "inv_output_runs_per_bpc": None,
+        "invention_cost_per_run": None,
+        "expected_runs_per_day": round(expected_runs_per_day, 2),
+        "expected_daily_profit": round(expected_daily_profit, 2),
+        "daily_yield_pct": round(daily_yield_pct, 2) if daily_yield_pct is not None else None,
+        "payback_days": round(payback_days, 2) if payback_days is not None else None,
+        "breakeven_runs": breakeven_runs,
+        "category": calc_row.get("category") or sde_row.get("category", ""),
+        "tech": calc_row.get("tech") or sde_row.get("tech", ""),
+        "item_group": sde_row.get("item_group", ""),
+        "adj_net_profit": round(net_profit_1r, 2),
+        "adj_roi": round(roi, 2),
+        "total_adj_profit": None,
+        "can_breakeven": net_profit_1r > 0,
+        "bpc_feasible": True,
+        "has_calc_data": bool(calc_row),
+        "cheapest_price": round(acquisition_price, 2) if acquisition_price > 0 else None,
+        "adjusted_price": round(float(adjusted_price), 2) if adjusted_price not in (None, "") else None,
+        "average_price": round(float(average_price), 2) if average_price not in (None, "") else None,
+        "market_spread_pct": round(market_spread_pct, 2) if market_spread_pct is not None else None,
+        "score": round(acquisition_score, 4),
+        "wallet_total_isk": round(wallet_total_isk, 2) if wallet_total_isk is not None else None,
+        "affordable": affordable,
+    }
+
+
+def _build_t2_invention_prognosis_row(
+    *,
+    blueprint_id: int,
+    calc_row: dict,
+    personal_bp_ids: set,
+    corp_bp_ids: set,
+    bp_info: dict | None = None,
+    invention_info: dict | None = None,
+    entry_market_row: dict | None = None,
+    wallet_total_isk: float | None = None,
+) -> dict:
+    import math
+
+    sde_row = (bp_info or {}).get(blueprint_id, {})
+    entry_blueprint_id = int((invention_info or {}).get("t1_blueprint_id") or 0)
+    entry_sde_row = (bp_info or {}).get(entry_blueprint_id, {})
+    output_id = calc_row.get("output_id") or sde_row.get("output_id")
+    net_profit_1r = float(calc_row.get("net_profit", 0) or 0)
+    roi = float(calc_row.get("roi", 0) or 0)
+    isk_per_hour = float(calc_row.get("isk_per_hour", 0) or 0)
+    mat_cost_1r = float(calc_row.get("material_cost", 0) or 0)
+    gross_rev_1r = float(calc_row.get("gross_revenue", 0) or 0)
+    avg_daily_volume = float(calc_row.get("avg_daily_volume", 0) or 0)
+    output_qty = max(1, int(calc_row.get("output_qty") or 1))
+    duration_secs = max(1, int(calc_row.get("duration") or calc_row.get("time_seconds") or 0) or 1)
+
+    market_sell_price = float((entry_market_row or {}).get("sell") or 0)
+    market_buy_price = float((entry_market_row or {}).get("buy") or 0)
+    acquisition_price = market_sell_price
+    adjusted_price = (entry_market_row or {}).get("adjusted_price")
+    average_price = (entry_market_row or {}).get("average_price")
+
+    build_runs_per_day = 86400.0 / max(1, duration_secs)
+    demand_runs_per_day = (avg_daily_volume / output_qty) if output_qty > 0 and avg_daily_volume > 0 else 0.0
+    expected_runs_per_day = min(build_runs_per_day, demand_runs_per_day) if demand_runs_per_day > 0 else build_runs_per_day
+    expected_daily_profit = net_profit_1r * expected_runs_per_day
+    payback_days = (acquisition_price / expected_daily_profit) if acquisition_price > 0 and expected_daily_profit > 0 else None
+    breakeven_runs = math.ceil(acquisition_price / net_profit_1r) if acquisition_price > 0 and net_profit_1r > 0 else None
+    acquisition_score = 0.0
+    if acquisition_price > 0 and expected_daily_profit > 0:
+        acquisition_score = (expected_daily_profit * max(roi, 0.0)) / max(math.sqrt(acquisition_price), 1.0)
+    daily_yield_pct = ((expected_daily_profit / acquisition_price) * 100.0) if acquisition_price > 0 and expected_daily_profit > 0 else None
+    market_spread_pct = ((market_sell_price - market_buy_price) / market_sell_price * 100.0) if market_sell_price > 0 and market_buy_price > 0 else None
+
+    personal_owned = entry_blueprint_id in personal_bp_ids
+    corp_owned = entry_blueprint_id in corp_bp_ids
+    already_owned = personal_owned or corp_owned
+    affordable = acquisition_price > 0 and wallet_total_isk is not None and wallet_total_isk >= acquisition_price
+
+    invention_detail = dict(calc_row.get("invention_detail") or {}) or None
+    success_chance = (invention_detail or {}).get("success_chance")
+    if success_chance in (None, ""):
+        success_chance = (invention_info or {}).get("base_success_chance")
+    runs_per_bpc = (invention_detail or {}).get("output_runs_per_bpc")
+    if runs_per_bpc in (None, ""):
+        runs_per_bpc = (invention_info or {}).get("output_runs_per_bpc")
+    invention_cost_per_run = (invention_detail or {}).get("total_cost_per_run")
+    if invention_cost_per_run in (None, ""):
+        invention_cost_per_run = calc_row.get("invention_cost")
+
+    entry_blueprint_name = _blueprint_display_name(entry_sde_row.get("name"))
+
+    return {
+        "blueprint_id": blueprint_id,
+        "output_id": output_id,
+        "name": calc_row.get("name") or sde_row.get("name", "?"),
+        "source": "invention",
+        "source_label": "T1 BPO + INVENTION",
+        "available_sources": ["invention"],
+        "market_available": market_sell_price > 0,
+        "contract_available": False,
+        "market_price": round(market_sell_price, 2) if market_sell_price > 0 else None,
+        "market_buy_price": round(market_buy_price, 2) if market_buy_price > 0 else None,
+        "contract_price": None,
+        "price": round(acquisition_price, 2),
+        "entry_blueprint_id": entry_blueprint_id or None,
+        "entry_blueprint_name": entry_blueprint_name,
+        "entry_blueprint_price": round(market_sell_price, 2) if market_sell_price > 0 else None,
+        "entry_blueprint_buy_price": round(market_buy_price, 2) if market_buy_price > 0 else None,
+        "entry_blueprint_history_type_id": entry_blueprint_id or None,
+        "entry_blueprint_adjusted_price": round(float(adjusted_price), 2) if adjusted_price not in (None, "") else None,
+        "entry_blueprint_average_price": round(float(average_price), 2) if average_price not in (None, "") else None,
+        "entry_blueprint_market_spread_pct": round(market_spread_pct, 2) if market_spread_pct is not None else None,
+        "entry_blueprint_affordable": affordable,
+        "t1_blueprint_id": entry_blueprint_id or None,
+        "t1_blueprint_name": entry_blueprint_name,
+        "me": 0,
+        "te": 0,
+        "is_bpc": False,
+        "runs": -1,
+        "contract_id": None,
+        "listing_count": 0,
+        "already_owned": already_owned,
+        "personal_owned": personal_owned,
+        "corp_owned": corp_owned,
+        "net_profit": round(net_profit_1r, 2),
+        "roi": round(roi, 2),
+        "isk_per_hour": round(isk_per_hour, 2),
+        "material_cost": round(mat_cost_1r, 2),
+        "gross_revenue": round(gross_rev_1r, 2),
+        "avg_daily_volume": round(avg_daily_volume, 2),
+        "output_qty": output_qty,
+        "duration": duration_secs,
+        "invention_detail": invention_detail,
+        "invention_success_chance": float(success_chance) if success_chance not in (None, "") else None,
+        "inv_output_runs_per_bpc": int(runs_per_bpc) if runs_per_bpc not in (None, "") else None,
+        "invention_cost_per_run": round(float(invention_cost_per_run), 2) if invention_cost_per_run not in (None, "") else None,
         "expected_runs_per_day": round(expected_runs_per_day, 2),
         "expected_daily_profit": round(expected_daily_profit, 2),
         "daily_yield_pct": round(daily_yield_pct, 2) if daily_yield_pct is not None else None,
@@ -7235,19 +8056,19 @@ def api_planner_utilization_history():
 @app.route("/api/blueprints/corp", methods=["GET"])
 def api_blueprints_corp():
     """
-    Return the set of output_ids for blueprints in the corp stash.
-    Uses the static corp_BPOs file (loaded at startup into CORP_BPO_TYPE_IDS).
+    Return the set of output_ids for corp blueprints currently visible via ESI.
     Response: { output_ids: [int, ...], count: int }
     """
     try:
         import sqlite3 as _sq
+        _personal_bp_ids, corp_bp_ids = _load_owned_bp_ids()
         cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
-        # Get output_id for each blueprint_id in the corp stash
-        if CORP_BPO_TYPE_IDS:
-            placeholders = ",".join("?" * len(CORP_BPO_TYPE_IDS))
+        # Get output_id for each corp-owned blueprint_id currently visible via ESI
+        if corp_bp_ids:
+            placeholders = ",".join("?" * len(corp_bp_ids))
             rows = cdb.execute(
                 f"SELECT blueprint_id, output_id, output_name FROM blueprints WHERE blueprint_id IN ({placeholders})",
-                list(CORP_BPO_TYPE_IDS)
+                list(corp_bp_ids)
             ).fetchall()
         else:
             rows = []
@@ -7351,7 +8172,7 @@ def api_blueprints_esi():
             return cid, char_name, headers, bps_out, corp_id
 
         all_bps = []
-        char_corp_info = []  # [(cid, char_name, headers, corp_id, corp_bp_access), ...]
+        auth_characters = []
 
         personal_fetch_started = time.time()
         with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
@@ -7359,48 +8180,74 @@ def api_blueprints_esi():
             for f in as_completed(futures):
                 cid, char_name, headers, bps, corp_id = f.result()
                 all_bps.extend(bps)
-                if corp_id:
-                    corp_bp_access = str(char_records.get(cid, {}).get("corp_bp_access") or "auto").strip().lower()
-                    if corp_bp_access not in {"auto", "allow", "block"}:
-                        corp_bp_access = "auto"
-                    char_corp_info.append((cid, char_name, headers, corp_id, corp_bp_access))
+                corp_bp_access = str(char_records.get(cid, {}).get("corp_bp_access") or "auto").strip().lower()
+                if corp_bp_access not in {"auto", "allow", "block"}:
+                    corp_bp_access = "auto"
+                auth_characters.append({
+                    "character_id": str(cid),
+                    "character_name": char_name,
+                    "headers": headers,
+                    "reported_corp_id": int(corp_id or 0),
+                    "corp_bp_access": corp_bp_access,
+                })
         personal_fetch_done = time.time()
 
         corp_access_by_corp_id: dict[int, list[dict]] = {}
         corp_fetch_seed_by_corp_id: dict[int, tuple[str, str, dict, list]] = {}
         corp_allow_overrides_by_corp_id: dict[int, list[dict]] = {}
         corp_esi_reachable_any = False
+        known_corp_ids = {
+            int(character.get("reported_corp_id") or 0)
+            for character in auth_characters
+            if int(character.get("reported_corp_id") or 0) > 0
+        }
+        for cached_bp in _ESI_BP_CACHE.get("blueprints", []) or []:
+            cached_corp_id = int(cached_bp.get("corp_id") or 0)
+            if cached_corp_id > 0:
+                known_corp_ids.add(cached_corp_id)
+        for character in auth_characters:
+            reported_corp_id = int(character.get("reported_corp_id") or 0)
+            if reported_corp_id <= 0 or character.get("corp_bp_access") != "allow":
+                continue
+            allow_chars = corp_allow_overrides_by_corp_id.setdefault(reported_corp_id, [])
+            if not any(str(member.get("character_id") or "") == str(character.get("character_id") or "") for member in allow_chars):
+                allow_chars.append({
+                    "character_id": str(character.get("character_id") or ""),
+                    "character_name": character.get("character_name") or f"Char {character.get('character_id')}",
+                })
 
         corp_probe_started = time.time()
-        for cid, char_name, headers, corp_id, corp_bp_access in char_corp_info:
-            if not corp_id:
-                continue
-            if corp_bp_access == "allow":
-                allow_chars = corp_allow_overrides_by_corp_id.setdefault(corp_id, [])
-                if not any(str(member.get("character_id") or "") == str(cid) for member in allow_chars):
-                    allow_chars.append({"character_id": str(cid), "character_name": char_name})
-            try:
-                cr = req.get(
-                    f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
-                    headers=headers, params={"page": 1}, timeout=15
-                )
-            except Exception:
-                continue
-            if not cr.ok:
-                continue
-
-            corp_esi_reachable_any = True
-            if corp_bp_access != "block":
-                access_chars = corp_access_by_corp_id.setdefault(corp_id, [])
-                if not any(str(member.get("character_id") or "") == str(cid) for member in access_chars):
-                    access_chars.append({"character_id": str(cid), "character_name": char_name})
-
-            if corp_id not in corp_fetch_seed_by_corp_id:
+        for corp_id in sorted(known_corp_ids):
+            for character in auth_characters:
+                corp_bp_access = str(character.get("corp_bp_access") or "auto")
+                if corp_bp_access == "block":
+                    continue
+                cid = str(character.get("character_id") or "")
+                char_name = character.get("character_name") or f"Char {cid}"
+                headers = character.get("headers") or {}
                 try:
-                    first_page = list(cr.json() or [])
+                    cr = req.get(
+                        f"https://esi.evetech.net/latest/corporations/{corp_id}/blueprints/",
+                        headers=headers,
+                        params={"page": 1},
+                        timeout=15,
+                    )
                 except Exception:
-                    first_page = []
-                corp_fetch_seed_by_corp_id[corp_id] = (str(cid), char_name, headers, first_page)
+                    continue
+                if not cr.ok:
+                    continue
+
+                corp_esi_reachable_any = True
+                access_chars = corp_access_by_corp_id.setdefault(corp_id, [])
+                if not any(str(member.get("character_id") or "") == cid for member in access_chars):
+                    access_chars.append({"character_id": cid, "character_name": char_name})
+
+                if corp_id not in corp_fetch_seed_by_corp_id:
+                    try:
+                        first_page = list(cr.json() or [])
+                    except Exception:
+                        first_page = []
+                    corp_fetch_seed_by_corp_id[corp_id] = (cid, char_name, headers, first_page)
         corp_probe_done = time.time()
 
         for corp_id, allow_chars in corp_allow_overrides_by_corp_id.items():
@@ -7445,27 +8292,6 @@ def api_blueprints_esi():
                     break
                 page += 1
         corp_pages_done = time.time()
-
-        if not corp_esi_reachable_any and CORP_BPO_TYPE_IDS:
-            fallback_cid = char_corp_info[0][0] if char_corp_info else None
-            fallback_name = char_corp_info[0][1] if char_corp_info else "corp"
-            fallback_corp_id = char_corp_info[0][3] if char_corp_info else None
-            fallback_access_characters = list(corp_access_by_corp_id.get(fallback_corp_id, []))
-            print(f"  [esi-bps] No corp ESI blueprint data available - using static corp_BPOs fallback once ({len(CORP_BPO_TYPE_IDS)} BPOs)")
-            for tid in CORP_BPO_TYPE_IDS:
-                all_bps.append({
-                    "type_id": tid,
-                    "material_efficiency": 10,
-                    "time_efficiency": 20,
-                    "runs": -1,
-                    "location_id": None,
-                    "quantity": 1,
-                    "_character_id": fallback_cid,
-                    "_character_name": fallback_name,
-                    "_owner": "corp",
-                    "_corp_id": fallback_corp_id,
-                    "_access_characters": fallback_access_characters,
-                })
 
         if not all_bps:
             _set_esi_bp_fetch_info({
@@ -7525,6 +8351,7 @@ def api_blueprints_esi():
                 "runs":           bp.get("runs", -1),
                 "bp_type":        "BPO" if bp.get("runs", -1) == -1 else "BPC",
                 "location_id":    bp.get("location_id"),
+                "location_flag":  bp.get("location_flag"),
                 "quantity":       bp.get("quantity", 1),
                 "character_id":   bp["_character_id"],
                 "character_name": bp["_character_name"],
@@ -7754,6 +8581,7 @@ def api_industry_jobs():
                     for j in resp.json():
                         j["_character_id"]   = cid
                         j["_character_name"] = char_name
+                        j["_job_owner"]      = "personal"
                         personal.append(j)
             except Exception as e:
                 print(f"  [jobs] Failed for {char_name}: {e}")
@@ -7803,6 +8631,7 @@ def api_industry_jobs():
                             installer_name = char_records.get(installer_id, {}).get("character_name", char_name)
                             j["_character_id"]   = installer_id
                             j["_character_name"] = installer_name
+                            j["_job_owner"]      = "corp"
                             all_jobs.append(j)
             except Exception as e:
                 print(f"  [jobs] Corp jobs failed for {char_name}: {e}")
@@ -7937,6 +8766,7 @@ def api_industry_jobs():
                 "installer_id":      j.get("installer_id"),
                 "character_id":      j["_character_id"],
                 "character_name":    j["_character_name"],
+                "job_owner":         str(j.get("_job_owner") or ""),
                 "sell_price":        sell_price,
                 "sell_total":        round(sell_price * runs, 2) if sell_price is not None else None,
                 **_build_profit(pid, runs, sell_price, material_cost_per_unit),
@@ -8842,6 +9672,7 @@ def _fetch_hub_sell_prices(hub: dict, type_ids: list[int]) -> dict[int, float]:
     # filtered to the hub station and parallelised with a thread pool.
     # Returns { type_id: best_sell_price }; missing entries mean no stock.
     result: dict[int, float] = {}
+    missing_type_ids = list(type_ids)
 
     if hub["name"] == "Jita":
         # Fast path: local SQLite cache (populated by pricer._fetch_all_orders)
@@ -8862,7 +9693,9 @@ def _fetch_hub_sell_prices(hub: dict, type_ids: list[int]) -> dict[int, float]:
                     result[row["type_id"]] = row["best_sell"]
         except Exception:
             pass
-        return result
+        missing_type_ids = [tid for tid in type_ids if tid not in result]
+        if not missing_type_ids:
+            return result
 
     # Non-Jita: use the ESI per-type endpoint, one call per item, parallelised.
     # GET /markets/{region_id}/orders/?order_type=sell&type_id={type_id}
@@ -8893,7 +9726,7 @@ def _fetch_hub_sell_prices(hub: dict, type_ids: list[int]) -> dict[int, float]:
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
     # Cap workers at 15; ESI allows about 20 req/s, so stay polite.
     with _TPE(max_workers=15) as pool:
-        futures = {pool.submit(_fetch_one, tid): tid for tid in type_ids}
+        futures = {pool.submit(_fetch_one, tid): tid for tid in missing_type_ids}
         for fut in _ac(futures):
             tid, price = fut.result()
             if price is not None:
@@ -8908,6 +9741,7 @@ def _fetch_hub_sell_books(hub: dict, type_ids: list[int]) -> dict[int, dict]:
     result: dict[int, dict] = {}
     if not type_ids:
         return result
+    missing_type_ids = list(type_ids)
 
     if hub["name"] == "Jita":
         try:
@@ -8936,7 +9770,9 @@ def _fetch_hub_sell_books(hub: dict, type_ids: list[int]) -> dict[int, dict]:
                     result[tid] = book
         except Exception:
             pass
-        return result
+        missing_type_ids = [tid for tid in type_ids if tid not in result]
+        if not missing_type_ids:
+            return result
 
     region_id = hub["region_id"]
     station_id = hub["station_id"]
@@ -8966,7 +9802,7 @@ def _fetch_hub_sell_books(hub: dict, type_ids: list[int]) -> dict[int, dict]:
     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
 
     with _TPE(max_workers=15) as pool:
-        futures = {pool.submit(_fetch_one, tid): tid for tid in type_ids}
+        futures = {pool.submit(_fetch_one, tid): tid for tid in missing_type_ids}
         for fut in _ac(futures):
             tid, book = fut.result()
             if book:
@@ -9735,10 +10571,11 @@ def api_bp_utilization():
         import sqlite3 as _sq
         from database import get_craft_log
 
-        # Total owned blueprints — ESI cache if warm, otherwise static corp BPO list
+        # Total owned blueprints — ESI cache if warm, otherwise refresh via ESI ownership snapshot
         owned_bp_ids = {bp["type_id"] for bp in _ESI_BP_CACHE.get("blueprints", [])}
         if not owned_bp_ids:
-            owned_bp_ids = set(CORP_BPO_TYPE_IDS)
+            personal_bp_ids, corp_bp_ids = _load_owned_bp_ids()
+            owned_bp_ids = set(personal_bp_ids) | set(corp_bp_ids)
         owned_count = len(owned_bp_ids)
 
         if owned_count == 0:
@@ -9773,24 +10610,18 @@ def api_bp_utilization():
 
 @app.route("/api/alerts/status", methods=["GET"])
 def api_alerts_status():
-    # Return the current status of the background alert scanner.
-    return jsonify(_alert_scanner.status)
+    # Return the current status of the background queue notifier.
+    return jsonify(_queue_notifier.status)
 
 
 # ─── Bot / Telegram settings ──────────────────────────────────────────────────
 
 _SETTINGS_ALLOW = {
-    "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID",
-    "ROI_THRESHOLD", "BREAKEVEN_MAX_RUNS", "MIN_NET_PROFIT",
-    "ALERT_COOLDOWN_HOURS", "CONTRACT_SCAN_INTERVAL", "JOB_SCAN_INTERVAL",
-    "MAX_PAGES", "REGION_ID", "BLUEPRINT_TYPE",
+    "TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "JOB_SCAN_INTERVAL",
 }
 _SETTINGS_NUMERIC = {
-    "ROI_THRESHOLD", "BREAKEVEN_MAX_RUNS", "MIN_NET_PROFIT",
-    "ALERT_COOLDOWN_HOURS", "CONTRACT_SCAN_INTERVAL", "JOB_SCAN_INTERVAL",
-    "MAX_PAGES", "REGION_ID",
+    "JOB_SCAN_INTERVAL",
 }
-_BLUEPRINT_TYPE_VALUES = {"bpo", "bpc", "both"}
 
 
 def _rewrite_env(updates: dict) -> None:
@@ -9822,13 +10653,13 @@ def _rewrite_env(updates: dict) -> None:
 
 @app.route("/api/settings/bot", methods=["GET"])
 def api_settings_bot_get():
-    # Return the current bot/alert config with the token partially masked.
-    return jsonify({**_alert_scanner.get_public_config(), **_alert_scanner.status})
+    # Return the current queue notification bot config with the token partially masked.
+    return jsonify({**_queue_notifier.get_public_config(), **_queue_notifier.status})
 
 
 @app.route("/api/settings/bot", methods=["POST"])
 async def api_settings_bot_post():
-    # Save bot/alert settings to .env and hot-reload the in-memory config.
+    # Save queue notification bot settings to .env and hot-reload the in-memory config.
     try:
         body = (await request.get_json(force=True, silent=True)) or {}
     except Exception:
@@ -9847,45 +10678,41 @@ async def api_settings_bot_post():
                 validated[key] = float(val) if "." in str(val) else int(val)
             except (TypeError, ValueError):
                 return jsonify({"ok": False, "error": f"Invalid value for {key}"}), 400
-        elif key == "BLUEPRINT_TYPE":
-            if str(val) not in _BLUEPRINT_TYPE_VALUES:
-                return jsonify({"ok": False, "error": "BLUEPRINT_TYPE must be bpo, bpc, or both"}), 400
-            validated[key] = str(val)
         else:
             string_val = str(val).strip()
             if key == "TELEGRAM_TOKEN":
-                masked_token = _alert_scanner.get_public_config().get("TELEGRAM_TOKEN", "")
+                masked_token = _queue_notifier.get_public_config().get("TELEGRAM_TOKEN", "")
                 if "*" in string_val and ":" not in string_val:
                     if string_val == masked_token:
                         continue
                     return jsonify({"ok": False, "error": "Bot token looks masked. Paste the full token from @BotFather."}), 400
-                token_error = _alert_scanner.validate_telegram_config(
+                token_error = _queue_notifier.validate_telegram_config(
                     token=string_val,
-                    chat_id=_alert_scanner.CONFIG.get("TELEGRAM_CHAT_ID", ""),
+                    chat_id=_queue_notifier.CONFIG.get("TELEGRAM_CHAT_ID", ""),
                 )
                 if token_error and "chat ID" not in token_error:
                     return jsonify({"ok": False, "error": token_error}), 400
             elif key == "TELEGRAM_CHAT_ID" and any(ch.isspace() for ch in string_val):
                 return jsonify({"ok": False, "error": "Telegram chat ID cannot contain whitespace."}), 400
             validated[key] = string_val
-    # Persist strings to .env (token + chat_id + blueprint_type)
+    # Persist queue notification settings so they survive backend restarts.
     env_updates = {k: str(v) for k, v in validated.items()}
-    _rewrite_env({k: v for k, v in env_updates.items() if k in {"TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "BLUEPRINT_TYPE"}})
-    # Hot-reload scanner memory
-    _alert_scanner.update_config(validated)
-    return jsonify({"ok": True, **_alert_scanner.get_public_config()})
+    _rewrite_env({k: v for k, v in env_updates.items() if k in {"TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "JOB_SCAN_INTERVAL"}})
+    # Hot-reload queue notifier memory.
+    _queue_notifier.update_config(validated)
+    return jsonify({"ok": True, **_queue_notifier.get_public_config()})
 
 
 @app.route("/api/settings/bot/test", methods=["POST"])
 async def api_settings_bot_test():
-    # Send a test Telegram message using the current config.
-    config_error = _alert_scanner.validate_telegram_config()
+    # Send a test Telegram message using the current queue notification config.
+    config_error = _queue_notifier.validate_telegram_config()
     if config_error:
         return jsonify({"ok": False, "error": config_error}), 200
-    ok = _alert_scanner._tg_send("<b>CREST</b> - test message. Bot is connected.")
+    ok = _queue_notifier._tg_send("<b>CREST</b> - test message. Bot is connected.")
     if ok:
         return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": _alert_scanner.status.get("last_error") or "Send failed - check token and chat ID"}), 200
+    return jsonify({"ok": False, "error": _queue_notifier.status.get("last_error") or "Send failed - check token and chat ID"}), 200
 
 
 @app.route("/api/contracts/status", methods=["GET"])
@@ -9908,7 +10735,7 @@ async def _startup():
     asyncio.get_event_loop().create_task(orders_refresh_loop(), name="pricer-refresh")
     asyncio.get_event_loop().create_task(_prewarm_task(), name="prewarm")
     asyncio.get_event_loop().create_task(_wealth_snapshot_task(), name="wealth-snapshot")
-    _alert_scanner.start_alert_scanner(_calc_cache, CALC_CACHE_TTL, warmup_event=_warmup_done)
+    _queue_notifier.start_queue_notifier()
     # Start contract cache background refresher
     _t = threading.Thread(
         target=_contract_cache_refresher, daemon=True, name="contract-cache"

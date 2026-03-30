@@ -2,9 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import Header from './components/Header';
 import OverviewPage from './pages/OverviewPage';
 import CalculatorPage from './pages/CalculatorPage';
-import CharactersPage from './pages/CharactersPage';
 import CraftLogPage from './pages/CraftLogPage';
-import MessagesPage from './pages/MessagesPage';
 import QueuePlannerPage from './pages/QueuePlannerPage';
 import OrdersPage from './pages/OrdersPage';
 import InventoryPage from './pages/InventoryPage';
@@ -27,6 +25,7 @@ export default function App() {
   const [refreshing,   setRefreshing]   = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState(null);
   const [activeTab,    setActiveTab]    = useState('OVERVIEW');
+  const [tabJumpKey,   setTabJumpKey]   = useState(0);
   const [appSettings, setAppSettings] = useState(() => loadAppSettings());
   const [booted,       setBooted]       = useState(false);
   // Lazy mount: only mount a tab's page the first time the user visits it.
@@ -76,6 +75,7 @@ export default function App() {
 
   // Mount the tab's page on first visit, keep it mounted forever after.
   const handleTabChange = useCallback((tab) => {
+    setTabJumpKey((value) => value + 1);
     setActiveTab(tab);
     setMountedTabs(prev => {
       if (prev.has(tab)) return prev;
@@ -102,6 +102,9 @@ export default function App() {
     setRefreshing(false);
     setLastRefreshAt(Date.now());
   }
+
+  const settingsVisited = mountedTabs.has('APP_SETTINGS') || mountedTabs.has('CHARACTERS') || mountedTabs.has('MESSAGES');
+  const settingsActive = activeTab === 'APP_SETTINGS' || activeTab === 'CHARACTERS' || activeTab === 'MESSAGES';
 
   // Show BootScreen when:
   //   (a) backend is offline — need INITIALIZE button, OR
@@ -148,9 +151,14 @@ export default function App() {
               <OpportunitiesPage appSettings={appSettings} />
             </div>
           )}
-          {mountedTabs.has('APP_SETTINGS') && (
-            <div style={{ display: activeTab === 'APP_SETTINGS' ? 'contents' : 'none' }}>
-              <AppSettingsPage appSettings={appSettings} onSaveSettings={handleSaveSettings} />
+          {settingsVisited && (
+            <div style={{ display: settingsActive ? 'contents' : 'none' }}>
+              <AppSettingsPage
+                appSettings={appSettings}
+                onSaveSettings={handleSaveSettings}
+                activeSection={activeTab}
+                navigationRequestKey={tabJumpKey}
+              />
             </div>
           )}
           {mountedTabs.has('RESEARCH') && (
@@ -196,16 +204,6 @@ export default function App() {
           {mountedTabs.has('INVENTORY') && (
             <div style={{ display: activeTab === 'INVENTORY' ? 'contents' : 'none' }}>
               <InventoryPage />
-            </div>
-          )}
-          {mountedTabs.has('CHARACTERS') && (
-            <div style={{ display: activeTab === 'CHARACTERS' ? 'contents' : 'none' }}>
-              <CharactersPage />
-            </div>
-          )}
-          {mountedTabs.has('MESSAGES') && (
-            <div style={{ display: activeTab === 'MESSAGES' ? 'contents' : 'none' }}>
-              <MessagesPage />
             </div>
           )}
         </div>

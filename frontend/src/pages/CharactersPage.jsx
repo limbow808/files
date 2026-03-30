@@ -266,7 +266,7 @@ function CharacterCard({ char, charStats, onRemove, onBpPermissionsChange, bpPer
   );
 }
 
-export default function CharactersPage() {
+export default function CharactersPage({ embedded = false, sectionId }) {
   const [characters, setCharacters] = useState([]);
   const [stats,      setStats]      = useState({});  // charId → { wallet, active_jobs }
   const [bpPermissionsSaving, setBpPermissionsSaving] = useState({});
@@ -385,9 +385,8 @@ export default function CharactersPage() {
   const totalWallet = characters.reduce((s, c) => s + (stats[c.character_id]?.wallet || 0), 0);
   const totalJobs   = characters.reduce((s, c) => s + (stats[c.character_id]?.active_jobs || 0), 0);
 
-  return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', height: '100%', overflowY: 'auto' }}>
-    <div style={{ padding: '20px 24px', width: '100%', maxWidth: 780, display: 'flex', flexDirection: 'column', gap: 20 }}>
+  const content = (
+    <>
 
       {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -471,7 +470,28 @@ export default function CharactersPage() {
           ))}
         </div>
       )}
-    </div>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <section
+        id={sectionId}
+        className="settings-stack-section"
+        style={{ display: 'flex', justifyContent: 'center', background: 'rgba(255,255,255,0.018)', border: '1px solid rgba(255,255,255,0.06)' }}
+      >
+        <div style={{ padding: '20px 24px', width: '100%', maxWidth: 900, display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {content}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'flex-start', height: '100%', overflowY: 'auto' }}>
+      <div style={{ padding: '20px 24px', width: '100%', maxWidth: 780, display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {content}
+      </div>
     </div>
   );
 }

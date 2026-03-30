@@ -32,6 +32,7 @@ const ACCESS_FLAG_META = {
   personal_bpo: { label: 'PERS BPO', bg: '#4da6ff' },
   personal_bpc: { label: 'PERS BPC', bg: '#66ccff' },
   corp_bpo: { label: 'CORP BPO', bg: '#9098a1' },
+  corp_bpc: { label: 'CORP BPC', bg: '#c6a07a' },
   future_personal_bpc: { label: 'FUTURE BPC', bg: '#ffd24d' },
 };
 
@@ -42,32 +43,36 @@ function getEffectiveAccessFlag(item) {
   return fallbackKind ? ACCESS_FLAG_META[fallbackKind] : null;
 }
 
-function DetailRow({ label, value }) {
+function DetailRow({ label, value, valueColor = 'var(--text)' }) {
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 11, borderBottom: '1px solid #0d0d0d' }}>
-      <span style={{ color: 'var(--dim)', letterSpacing: 0.3 }}>{label}</span>
-      <span style={{ fontFamily: 'var(--mono)', color: 'var(--text)' }}>{value}</span>
+    <div className="planner-detail-row">
+      <span className="planner-detail-row__label">{label}</span>
+      <span className="planner-detail-row__value" style={{ color: valueColor }}>{value}</span>
     </div>
   );
 }
 
-function DetailBlock({ label, value, color = 'var(--dim)' }) {
+function DetailBlock({ label, value, color = 'var(--dim)', className = '' }) {
   if (!value) return null;
   return (
-    <div style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(255,255,255,0.03)', border: '1px solid #0d0d0d', borderRadius: 2 }}>
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color, letterSpacing: 0.8, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 11, color: 'var(--text)', lineHeight: 1.5 }}>{value}</div>
+    <div
+      className={`planner-detail-card planner-detail-card--note ${className}`.trim()}
+      style={{ '--planner-detail-accent': color }}
+    >
+      <div className="planner-detail-card__title">{label}</div>
+      <div className="planner-detail-note">{value}</div>
     </div>
   );
 }
 
-function DetailSection({ title, color = 'var(--dim)', children }) {
+function DetailSection({ title, color = 'var(--dim)', children, className = '' }) {
   return (
-    <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #0d0d0d' }}>
-      <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.8, color, marginBottom: 4 }}>
-        {title}
-      </div>
-      {children}
+    <div
+      className={`planner-detail-card ${className}`.trim()}
+      style={{ '--planner-detail-accent': color }}
+    >
+      <div className="planner-detail-card__title">{title}</div>
+      <div className="planner-detail-card__content">{children}</div>
     </div>
   );
 }
@@ -307,9 +312,9 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
       </div>
 
       {isOpen && (
-        <div style={{ background: 'var(--bg2)', borderLeft: '3px solid var(--planner-mfg)', padding: '8px 12px', borderBottom: '1px solid #0d0d0d' }}>
-          <div className="planner-detail-grid">
-            <div>
+        <div className="planner-detail-shell planner-detail-shell--mfg">
+          <div className="planner-detail-grid planner-detail-grid--summary">
+            <DetailSection title="BATCH OVERVIEW" color="var(--planner-mfg)" className="planner-detail-card--summary">
               <DetailRow label="Duration" value={formatSeconds(item.duration_secs || item.duration_seconds || 0)} />
               <DetailRow label="Net profit/run" value={`${((item.net_profit || 0) / 1_000_000).toFixed(1)}M`} />
               <DetailRow label="Material cost" value={fmtISK(item.material_cost || 0)} />
@@ -321,8 +326,8 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
               {item.me_bonus_pct > 0 && <DetailRow label="ME rig bonus" value={`−${item.me_bonus_pct}% mats`} />}
               {item.te_bonus_pct > 0 && <DetailRow label="TE rig bonus" value={`−${item.te_bonus_pct}% time`} />}
               {item.capital_share_pct > 0 && <DetailRow label="Capital lock" value={`${item.capital_share_pct.toFixed(1)}% of wallet`} />}
-            </div>
-            <div>
+            </DetailSection>
+            <DetailSection title="MARKET + CAPACITY" color="#4da6ff" className="planner-detail-card--summary">
               <DetailRow label="Market vol/day" value={(item.avg_daily_volume || 0).toFixed(1)} />
               <DetailRow label="Saturation" value={`${saturationPct.toFixed(1)}%`} />
               <DetailRow label="Days to sell" value={`${daysToSell.toFixed(1)}d`} />
@@ -332,69 +337,73 @@ const ManufacturingQueueRow = memo(function ManufacturingQueueRow({ item, hasMfg
               <DetailRow label="Usable BPCs" value={`${item.direct_bpc_usable_parallel || 0}/${item.direct_bpc_count || 0}`} />
               <DetailRow label="BPC runs available" value={`${item.direct_bpc_total_runs || 0}`} />
               {hasPrerequisites && <DetailRow label="Chain duration" value={formatSeconds(item.chain_total_duration_secs || item.time_until_manufactured_secs || 0)} />}
-            </div>
+            </DetailSection>
           </div>
-          {jc && (
-            <DetailSection title="JOB COST" color="#7ec8ff">
-              <DetailRow label="Estimated item value (EIV)" value={scaleCost(jc.eiv)} />
-              <DetailRow label="System cost index" value={`${((Number(jc.sci || 0)) * 100).toFixed(2)}% EIV`} />
-              <DetailRow label="Job gross cost" value={scaleCost(jc.gross)} />
-              {(jc.gross_bonus_amount ?? 0) !== 0 && (
-                <>
-                  <DetailRow label="Structure role bonus" value={`${((Number(jc.role_bonus || 0)) * 100).toFixed(1)}%`} />
-                  {Number(jc.rig_bonus || 0) !== 0 && <DetailRow label="Rig bonus" value={`${((Number(jc.rig_bonus || 0)) * 100).toFixed(1)}%`} />}
-                  <DetailRow label="Bonuses" value={scaleCost(jc.gross_bonus_amount)} />
-                </>
-              )}
-              <DetailRow label="Total job gross cost" value={scaleCost(jc.gross_after_bonus)} />
-              <DetailRow label="Facility tax" value={`${((Number(jc.facility_tax_rate || 0)) * 100).toFixed(2)}% EIV · ${scaleCost(jc.facility_tax)}`} />
-              <DetailRow label="SCC surcharge" value={`${((Number(jc.scc_surcharge_rate || 0)) * 100).toFixed(2)}% EIV · ${scaleCost(jc.scc_surcharge)}`} />
-              <DetailRow label="Total taxes" value={scaleCost(jc.taxes_total ?? ((jc.facility_tax || 0) + (jc.scc_surcharge || 0)))} />
-              <DetailRow label="Total job cost" value={scaleCost(jc.total_job_cost || item.job_cost || 0)} />
-            </DetailSection>
-          )}
-          {materials.length > 0 && (
-            <DetailSection title={`MATERIALS (${materials.length})`}>
-              {materials.map((material) => (
-                <DetailRow
-                  key={`${material.type_id}-${material.source || 'base'}-${material.prerequisite_output_id || 0}`}
-                  label={`${material.name || `Type ${material.type_id}`}${material.source === 'craft' ? ' · crafted' : material.source === 'inventory' ? ' · in stock' : material.source === 'buy' ? ' · buy' : ''}`}
-                  value={material.have_qty != null && Number(material.have_qty) < Number(material.needed_qty_total || 0)
-                    ? `${Number(material.have_qty).toLocaleString('en-US')}/${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`
-                    : `${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`}
-                  valueColor={material.have_qty != null && Number(material.have_qty) < Number(material.needed_qty_total || 0)
-                    ? '#ff5f5f'
-                    : '#4cff91'}
-                />
-              ))}
-              <div style={{ marginTop: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 10, letterSpacing: 2, color: 'var(--dim)' }}>TOTAL</span>
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>
-                  {fmtISK(totalMaterialsCost)}
-                </span>
-              </div>
-            </DetailSection>
-          )}
-          {hasPrerequisites && Array.isArray(item.prerequisite_jobs) && item.prerequisite_jobs.length > 0 && (
-            <DetailSection title={`PREREQUISITES (${item.prerequisite_jobs.length})`} color="#ffd24d">
-              {item.prerequisite_jobs.map((job) => (
-                <DetailBlock
-                  key={`${job.output_id}-${job.run_count}-${job.depth || 0}`}
-                  label={job.name}
-                  value={`${job.run_count || 0} runs · ${formatSeconds(job.total_duration_secs || job.duration_secs || 0)} · ${fmtISK(job.resolved_total_cost || 0)}${Array.isArray(job.children) && job.children.length > 0 ? ` · ${job.children.length} child batch${job.children.length === 1 ? '' : 'es'}` : ''}`}
-                  color="#ffd24d"
-                />
-              ))}
-            </DetailSection>
-          )}
-          <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
-          {item.runner_up_name && (
-            <DetailBlock
-              label="RUNNER-UP"
-              value={`${item.runner_up_name} · ${((item.runner_up_profit_per_cycle || 0) / 1_000_000).toFixed(1)}M/cycle`}
-              color="#ff9d3d"
-            />
-          )}
+
+          <div className="planner-detail-card-grid">
+            {jc && (
+              <DetailSection title="JOB COST" color="#7ec8ff" className="planner-detail-card--dense">
+                <DetailRow label="Estimated item value (EIV)" value={scaleCost(jc.eiv)} />
+                <DetailRow label="System cost index" value={`${((Number(jc.sci || 0)) * 100).toFixed(2)}% EIV`} />
+                <DetailRow label="Job gross cost" value={scaleCost(jc.gross)} />
+                {(jc.gross_bonus_amount ?? 0) !== 0 && (
+                  <>
+                    <DetailRow label="Structure role bonus" value={`${((Number(jc.role_bonus || 0)) * 100).toFixed(1)}%`} />
+                    {Number(jc.rig_bonus || 0) !== 0 && <DetailRow label="Rig bonus" value={`${((Number(jc.rig_bonus || 0)) * 100).toFixed(1)}%`} />}
+                    <DetailRow label="Bonuses" value={scaleCost(jc.gross_bonus_amount)} />
+                  </>
+                )}
+                <DetailRow label="Total job gross cost" value={scaleCost(jc.gross_after_bonus)} />
+                <DetailRow label="Facility tax" value={`${((Number(jc.facility_tax_rate || 0)) * 100).toFixed(2)}% EIV · ${scaleCost(jc.facility_tax)}`} />
+                <DetailRow label="SCC surcharge" value={`${((Number(jc.scc_surcharge_rate || 0)) * 100).toFixed(2)}% EIV · ${scaleCost(jc.scc_surcharge)}`} />
+                <DetailRow label="Total taxes" value={scaleCost(jc.taxes_total ?? ((jc.facility_tax || 0) + (jc.scc_surcharge || 0)))} />
+                <DetailRow label="Total job cost" value={scaleCost(jc.total_job_cost || item.job_cost || 0)} />
+              </DetailSection>
+            )}
+            {materials.length > 0 && (
+              <DetailSection title={`MATERIALS (${materials.length})`} color="#4cff91" className="planner-detail-card--dense">
+                {materials.map((material) => (
+                  <DetailRow
+                    key={`${material.type_id}-${material.source || 'base'}-${material.prerequisite_output_id || 0}`}
+                    label={`${material.name || `Type ${material.type_id}`}${material.source === 'craft' ? ' · crafted' : material.source === 'inventory' ? ' · in stock' : material.source === 'buy' ? ' · buy' : ''}`}
+                    value={material.have_qty != null && Number(material.have_qty) < Number(material.needed_qty_total || 0)
+                      ? `${Number(material.have_qty).toLocaleString('en-US')}/${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`
+                      : `${Number(material.needed_qty_total || 0).toLocaleString('en-US')}`}
+                    valueColor={material.have_qty != null && Number(material.have_qty) < Number(material.needed_qty_total || 0)
+                      ? '#ff5f5f'
+                      : '#4cff91'}
+                  />
+                ))}
+                <div className="planner-detail-total">
+                  <span className="planner-detail-total__label">TOTAL</span>
+                  <span className="planner-detail-total__value">{fmtISK(totalMaterialsCost)}</span>
+                </div>
+              </DetailSection>
+            )}
+            {hasPrerequisites && Array.isArray(item.prerequisite_jobs) && item.prerequisite_jobs.length > 0 && (
+              <DetailSection title={`PREREQUISITES (${item.prerequisite_jobs.length})`} color="#ffd24d" className="planner-detail-card--dense">
+                <div className="planner-detail-stack">
+                  {item.prerequisite_jobs.map((job) => (
+                    <DetailBlock
+                      key={`${job.output_id}-${job.run_count}-${job.depth || 0}`}
+                      label={job.name}
+                      value={`${job.run_count || 0} runs · ${formatSeconds(job.total_duration_secs || job.duration_secs || 0)} · ${fmtISK(job.resolved_total_cost || 0)}${Array.isArray(job.children) && job.children.length > 0 ? ` · ${job.children.length} child batch${job.children.length === 1 ? '' : 'es'}` : ''}`}
+                      color="#ffd24d"
+                      className="planner-detail-card--subnote"
+                    />
+                  ))}
+                </div>
+              </DetailSection>
+            )}
+            <DetailBlock label="WHY THIS WON" value={item.why} color="#4cff91" />
+            {item.runner_up_name && (
+              <DetailBlock
+                label="RUNNER-UP"
+                value={`${item.runner_up_name} · ${((item.runner_up_profit_per_cycle || 0) / 1_000_000).toFixed(1)}M/cycle`}
+                color="#ff9d3d"
+              />
+            )}
+          </div>
         </div>
       )}
     </div>
