@@ -12,7 +12,7 @@
 :root {
   /* Primary surfaces */
   --bg:      #0d0d0d;     /* Main background */
-  --bg2:     #121212;     /* Secondary background (Item Cards, etc...)*/
+  --bg2:     #110e11;     /* Secondary background (Item Cards, etc...)*/
   
   /* Text colors */
   --text:    #E0E0E0;     /* Primary text */
@@ -31,13 +31,16 @@
   
   /* Layout structure — used for headers, footers, tables */
   --header-bg: #0d0d0d;       /* Page/panel header background */
-  --subheader-bg: #121212;    /* Sub-header, toolbar, panel header bg */
+  --subheader-bg: #110e11;    /* Sub-header, toolbar, panel header bg */
   --footer-bg: #444444;       /* Footer background */
   --table-shell-bg: #0d0d0d;  /* Table container/wrapper background */
-  --table-row-bg: #121212;    /* Table row & header background */
+  --table-row-bg: #110e11;    /* Table row & header background */
   
   /* Font */
   --mono:    'Space Grotesk', sans-serif;
+
+  /* temp */
+  --temp #110e11;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }

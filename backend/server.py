@@ -32,7 +32,7 @@ from blueprints import load_blueprints, load_blueprint_lookup, MINERALS
 from calculator import calculate_all, CONFIG as CALC_CONFIG
 from database import (
     save_scan, record_wallet_snapshot, record_wealth_snapshot, get_wallet_history,
-    sync_open_orders, get_sell_history_stats,
+        sync_open_orders, get_sell_history_stats, get_open_order_activity_by_id,
     upsert_craft_jobs, get_craft_log, get_craft_stats, get_craft_timeline,
     get_sell_velocity_by_type_id,
 )
@@ -580,6 +580,11 @@ def _unsubscribe_progress(cache_key: str, q: _queue.Queue):
         subs = _progress_subscribers.get(cache_key, [])
         if q in subs:
             subs.remove(q)
+
+
+def _subscriber_count(cache_key: str) -> int:
+    with _progress_lock:
+        return len(_progress_subscribers.get(cache_key, []))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -7882,6 +7887,9 @@ _ESI_JOBS_CACHE:    dict  = {}
 _ESI_JOBS_CACHE_TS: float = 0
 _ESI_JOBS_TTL             = 120   # 2 min
 _ESI_JOBS_SIGNAL_TTL      = 20    # planner change-detection cadence
+_CRAFT_LOG_SYNC_TS: float = 0
+_CRAFT_LOG_SYNC_TTL       = 900   # 15 min
+_CRAFT_LOG_SYNC_LOCK      = threading.Lock()
 
 _QUEUE_SUMMARY_CACHE:    dict  = {}
 _QUEUE_SUMMARY_CACHE_TS: float = 0
@@ -7919,6 +7927,235 @@ def _industry_jobs_signature(cache: dict | None) -> str:
 
     payload = json.dumps(sorted(signal_rows), separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+_INDUSTRY_JOBS_SIGNAL_CACHE: dict = {}
+_INDUSTRY_JOBS_SIGNAL_CACHE_TS: float = 0
+_PLANNER_LIVE_STREAM_KEY = "__planner_live__"
+_PLANNER_LIVE_STATE = {
+    "type": "snapshot",
+    "signature": "empty",
+    "count": 0,
+    "ready": False,
+    "last_check_at": None,
+    "last_change_at": None,
+    "last_error": None,
+}
+_PLANNER_LIVE_STATE_LOCK = threading.Lock()
+_PLANNER_LIVE_STOP = threading.Event()
+_PLANNER_LIVE_THREAD: threading.Thread | None = None
+
+
+def _get_planner_live_state() -> dict:
+    with _PLANNER_LIVE_STATE_LOCK:
+        return dict(_PLANNER_LIVE_STATE)
+
+
+def _update_planner_live_state(**updates) -> dict:
+    with _PLANNER_LIVE_STATE_LOCK:
+        _PLANNER_LIVE_STATE.update(updates)
+        return dict(_PLANNER_LIVE_STATE)
+
+
+def _parse_esi_datetime(value: str | None) -> int:
+    if not value:
+        return 0
+    try:
+        from datetime import datetime
+
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return 0
+
+
+def _fetch_industry_jobs_signal_snapshot() -> dict:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from characters import get_all_auth_headers, load_characters
+
+    char_records = load_characters()
+    auth_headers = get_all_auth_headers()
+    if not auth_headers:
+        return {"jobs": [], "count": 0}
+
+    memberships = _get_character_corporations(force_refresh=False)
+    our_char_ids = {int(cid) for cid in char_records.keys()}
+
+    def _signal_job(job: dict, character_id: int) -> dict | None:
+        job_id = int(job.get("job_id") or 0)
+        if job_id <= 0:
+            return None
+        return {
+            "job_id": job_id,
+            "activity_id": int(job.get("activity_id") or 0),
+            "product_type_id": int(job.get("product_type_id") or 0),
+            "blueprint_type_id": int(job.get("blueprint_type_id") or 0),
+            "runs": int(job.get("runs") or 0),
+            "end_ts": _parse_esi_datetime(job.get("end_date")),
+            "character_id": int(character_id or 0),
+            "status": str(job.get("status") or ""),
+        }
+
+    def _fetch_character_jobs(cid, headers):
+        corp_id = int((memberships.get(str(cid), {}) or {}).get("corporation_id") or 0)
+        jobs = []
+        try:
+            resp = requests.get(
+                f"https://esi.evetech.net/latest/characters/{cid}/industry/jobs/",
+                headers=headers,
+                params={"include_completed": False},
+                timeout=15,
+            )
+            if resp.ok:
+                for job in resp.json() or []:
+                    signal_job = _signal_job(job, cid)
+                    if signal_job:
+                        jobs.append(signal_job)
+        except Exception:
+            pass
+        return cid, headers, corp_id, jobs
+
+    jobs: list[dict] = []
+    seen_job_ids: set[int] = set()
+    corp_candidates: list[tuple[int, dict, int]] = []
+
+    with ThreadPoolExecutor(max_workers=max(1, len(auth_headers))) as pool:
+        futures = [pool.submit(_fetch_character_jobs, cid, headers) for cid, headers in auth_headers]
+        for future in as_completed(futures):
+            cid, headers, corp_id, personal_jobs = future.result()
+            for job in personal_jobs:
+                job_id = int(job.get("job_id") or 0)
+                if job_id > 0 and job_id not in seen_job_ids:
+                    seen_job_ids.add(job_id)
+                    jobs.append(job)
+            if corp_id > 0:
+                corp_candidates.append((cid, headers, corp_id))
+
+    seen_corp_ids: set[int] = set()
+    for _cid, headers, corp_id in corp_candidates:
+        if corp_id in seen_corp_ids:
+            continue
+        try:
+            resp = requests.get(
+                f"https://esi.evetech.net/latest/corporations/{corp_id}/industry/jobs/",
+                headers=headers,
+                params={"include_completed": False},
+                timeout=15,
+            )
+        except Exception:
+            continue
+        if not resp.ok:
+            continue
+
+        seen_corp_ids.add(corp_id)
+        for job in resp.json() or []:
+            installer_id = int(job.get("installer_id") or 0)
+            if installer_id not in our_char_ids:
+                continue
+            signal_job = _signal_job(job, installer_id)
+            if not signal_job:
+                continue
+            job_id = int(signal_job.get("job_id") or 0)
+            if job_id > 0 and job_id not in seen_job_ids:
+                seen_job_ids.add(job_id)
+                jobs.append(signal_job)
+
+    jobs.sort(key=lambda item: (int(item.get("end_ts") or 0), int(item.get("job_id") or 0)))
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+def _refresh_industry_jobs_signal_snapshot(force: bool = False) -> dict:
+    global _INDUSTRY_JOBS_SIGNAL_CACHE, _INDUSTRY_JOBS_SIGNAL_CACHE_TS
+    global _ESI_JOBS_CACHE_TS
+
+    now = time.time()
+    cache_age = (now - _INDUSTRY_JOBS_SIGNAL_CACHE_TS) if _INDUSTRY_JOBS_SIGNAL_CACHE_TS else None
+    refreshed = False
+    changed = False
+
+    if force or not _INDUSTRY_JOBS_SIGNAL_CACHE or cache_age is None or cache_age >= _ESI_JOBS_SIGNAL_TTL:
+        snapshot = _fetch_industry_jobs_signal_snapshot()
+        next_signature = _industry_jobs_signature(snapshot)
+        next_count = int(snapshot.get("count") or len(snapshot.get("jobs") or []))
+        with _ESI_STATE_CACHE_LOCK:
+            previous_signature = str((_INDUSTRY_JOBS_SIGNAL_CACHE or {}).get("signature") or "empty")
+            changed = previous_signature != next_signature
+            _INDUSTRY_JOBS_SIGNAL_CACHE = {
+                "signature": next_signature,
+                "count": next_count,
+            }
+            _INDUSTRY_JOBS_SIGNAL_CACHE_TS = now
+            if changed:
+                _ESI_JOBS_CACHE_TS = 0
+        refreshed = True
+
+    effective_age = (time.time() - _INDUSTRY_JOBS_SIGNAL_CACHE_TS) if _INDUSTRY_JOBS_SIGNAL_CACHE_TS else None
+    return {
+        "signature": str((_INDUSTRY_JOBS_SIGNAL_CACHE or {}).get("signature") or "empty"),
+        "count": int((_INDUSTRY_JOBS_SIGNAL_CACHE or {}).get("count") or 0),
+        "cache_age_seconds": round(effective_age or 0.0, 1),
+        "refreshed": refreshed,
+        "changed": changed,
+    }
+
+
+def _planner_live_worker() -> None:
+    previous_signature = None
+    while not _PLANNER_LIVE_STOP.is_set():
+        if _subscriber_count(_PLANNER_LIVE_STREAM_KEY) <= 0:
+            _PLANNER_LIVE_STOP.wait(5)
+            continue
+
+        checked_at = int(time.time())
+        try:
+            signal = _refresh_industry_jobs_signal_snapshot(force=True)
+            next_signature = str(signal.get("signature") or "empty")
+            _update_planner_live_state(
+                type="snapshot",
+                signature=next_signature,
+                count=int(signal.get("count") or 0),
+                ready=True,
+                last_check_at=checked_at,
+                last_error=None,
+            )
+
+            if previous_signature is None:
+                previous_signature = next_signature
+                _update_planner_live_state(last_change_at=checked_at)
+            elif next_signature != previous_signature:
+                previous_signature = next_signature
+                _update_planner_live_state(last_change_at=checked_at)
+                _broadcast_progress(
+                    _PLANNER_LIVE_STREAM_KEY,
+                    {
+                        "type": "planner_changed",
+                        "reason": "industry_jobs",
+                        "signature": next_signature,
+                        "count": int(signal.get("count") or 0),
+                        "ts": checked_at,
+                    },
+                )
+        except Exception as exc:
+            _update_planner_live_state(
+                ready=True,
+                last_check_at=checked_at,
+                last_error=str(exc),
+            )
+
+        _PLANNER_LIVE_STOP.wait(_ESI_JOBS_SIGNAL_TTL)
+
+
+def _start_planner_live_watcher() -> None:
+    global _PLANNER_LIVE_THREAD
+    if _PLANNER_LIVE_THREAD and _PLANNER_LIVE_THREAD.is_alive():
+        return
+    _PLANNER_LIVE_STOP.clear()
+    _PLANNER_LIVE_THREAD = threading.Thread(
+        target=_planner_live_worker,
+        daemon=True,
+        name="planner-live",
+    )
+    _PLANNER_LIVE_THREAD.start()
 
 _UTILIZATION_HISTORY_FILE = os.path.join(os.path.dirname(__file__), "utilization_history.json")
 _UTILIZATION_HISTORY_TTL  = 300  # 5 min between persisted samples
@@ -8794,37 +9031,281 @@ def api_industry_jobs():
 
 @app.route("/api/industry/jobs/signal", methods=["GET"])
 def api_industry_jobs_signal():
-    global _ESI_JOBS_CACHE, _ESI_JOBS_CACHE_TS
+    try:
+        signal = _refresh_industry_jobs_signal_snapshot(force=False)
+        _update_planner_live_state(
+            type="snapshot",
+            signature=str(signal.get("signature") or "empty"),
+            count=int(signal.get("count") or 0),
+            ready=True,
+            last_check_at=int(time.time()),
+            last_error=None,
+        )
+        return jsonify(signal)
+    except Exception as _e:
+        state = _get_planner_live_state()
+        cache_age = (time.time() - _INDUSTRY_JOBS_SIGNAL_CACHE_TS) if _INDUSTRY_JOBS_SIGNAL_CACHE_TS else None
+        return jsonify({
+            "error": str(_e),
+            "signature": str(state.get("signature") or "empty"),
+            "count": int(state.get("count") or 0),
+            "cache_age_seconds": round(cache_age or 0.0, 1),
+            "refreshed": False,
+            "changed": False,
+        }), 200
 
-    refreshed = False
-    cache_age = time.time() - _ESI_JOBS_CACHE_TS if _ESI_JOBS_CACHE_TS else None
 
-    if not _ESI_JOBS_CACHE or cache_age is None or cache_age >= _ESI_JOBS_SIGNAL_TTL:
+@app.route("/api/job-planner/stream", methods=["GET"])
+def api_job_planner_stream():
+    q = _subscribe_progress(_PLANNER_LIVE_STREAM_KEY)
+
+    def generate():
         try:
-            prev_jobs_cache_ts = _ESI_JOBS_CACHE_TS
-            _ESI_JOBS_CACHE_TS = 0
-            api_industry_jobs()
-            refreshed = True
-        except Exception as _e:
-            _ESI_JOBS_CACHE_TS = prev_jobs_cache_ts
-            return jsonify({
-                "error": str(_e),
-                "signature": _industry_jobs_signature(_ESI_JOBS_CACHE),
-                "count": len((_ESI_JOBS_CACHE or {}).get("jobs") or []),
-                "cache_age_seconds": round(cache_age or 0.0, 1),
-                "refreshed": refreshed,
-            }), 200
+            snapshot = _get_planner_live_state()
+            yield "retry: 10000\n"
+            yield f"data: {json.dumps(snapshot)}\n\n"
+            while True:
+                try:
+                    msg = q.get(timeout=60)
+                    yield f"data: {json.dumps(msg)}\n\n"
+                except _queue.Empty:
+                    yield ": ping\n\n"
+        finally:
+            _unsubscribe_progress(_PLANNER_LIVE_STREAM_KEY, q)
 
-    effective_age = time.time() - _ESI_JOBS_CACHE_TS if _ESI_JOBS_CACHE_TS else None
-    return jsonify({
-        "signature": _industry_jobs_signature(_ESI_JOBS_CACHE),
-        "count": len((_ESI_JOBS_CACHE or {}).get("jobs") or []),
-        "cache_age_seconds": round(effective_age or 0.0, 1),
-        "refreshed": refreshed,
-    })
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Craft Log ─────────────────────────────────────────────────────────────────
+def _sync_craft_log_from_esi(force: bool = False) -> dict:
+    global _CRAFT_LOG_SYNC_TS
+
+    now = time.time()
+    if not force and _CRAFT_LOG_SYNC_TS and (now - _CRAFT_LOG_SYNC_TS) < _CRAFT_LOG_SYNC_TTL:
+        return {"refreshed": False, "job_count": 0, "upserted": 0}
+
+    with _CRAFT_LOG_SYNC_LOCK:
+        now = time.time()
+        if not force and _CRAFT_LOG_SYNC_TS and (now - _CRAFT_LOG_SYNC_TS) < _CRAFT_LOG_SYNC_TTL:
+            return {"refreshed": False, "job_count": 0, "upserted": 0}
+
+        from characters import get_all_auth_headers, load_characters
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import requests as req
+
+        char_records = load_characters()
+        auth_headers = get_all_auth_headers()
+        if not auth_headers:
+            _CRAFT_LOG_SYNC_TS = time.time()
+            return {"refreshed": False, "job_count": 0, "upserted": 0}
+
+        ACTIVITY_NAMES = {
+            1: "Manufacturing", 3: "TE Research", 4: "ME Research",
+            5: "Copying", 8: "Invention", 9: "Reactions", 11: "Reaction",
+        }
+
+        def _fetch_completed(cid, headers):
+            char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
+            jobs = []
+            try:
+                resp = req.get(
+                    f"https://esi.evetech.net/latest/characters/{cid}/industry/jobs/",
+                    headers=headers, params={"include_completed": True}, timeout=20,
+                )
+                if resp.ok:
+                    for job in resp.json():
+                        if job.get("status") == "delivered" and job.get("activity_id") in (1, 9, 11):
+                            job["_char_id"] = cid
+                            job["_char_name"] = char_name
+                            jobs.append(job)
+            except Exception as exc:
+                print(f"  [craft-log] ESI failed for {char_name}: {exc}")
+            return jobs
+
+        raw_jobs = []
+        seen_ids = set()
+        with ThreadPoolExecutor(max_workers=max(1, len(auth_headers))) as pool:
+            futures = [pool.submit(_fetch_completed, cid, headers) for cid, headers in auth_headers]
+            for future in as_completed(futures):
+                for job in future.result():
+                    job_id = job.get("job_id")
+                    if job_id and job_id not in seen_ids:
+                        seen_ids.add(job_id)
+                        raw_jobs.append(job)
+
+        inserted = 0
+        if raw_jobs:
+            product_ids = list({job.get("product_type_id") for job in raw_jobs if job.get("product_type_id")})
+            names, market_prices = {}, {}
+            if product_ids:
+                for index in range(0, len(product_ids), 1000):
+                    try:
+                        nr = req.post(
+                            "https://esi.evetech.net/latest/universe/names/",
+                            json=product_ids[index:index + 1000], timeout=10,
+                        )
+                        if nr.ok:
+                            for item in nr.json():
+                                names[item["id"]] = item["name"]
+                    except Exception:
+                        pass
+                try:
+                    from pricer import get_prices_bulk
+                    market_prices = get_prices_bulk(product_ids)
+                except Exception:
+                    pass
+
+            mat_cost_per_unit: dict[int, float] = {}
+            if product_ids:
+                try:
+                    import sqlite3 as _sq
+
+                    craft_db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+                    craft_db.row_factory = _sq.Row
+                    placeholders = ",".join("?" * len(product_ids))
+                    bp_map = {
+                        row["output_id"]: row["blueprint_id"]
+                        for row in craft_db.execute(
+                            f"SELECT output_id, blueprint_id FROM blueprints WHERE output_id IN ({placeholders})",
+                            product_ids,
+                        ).fetchall()
+                    }
+                    bp_ids = list(set(bp_map.values()))
+                    bp_mats: dict[int, list[tuple[int, float]]] = {}
+                    if bp_ids:
+                        bp_placeholders = ",".join("?" * len(bp_ids))
+                        for row in craft_db.execute(
+                            f"SELECT blueprint_id, material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id IN ({bp_placeholders})",
+                            bp_ids,
+                        ).fetchall():
+                            bp_mats.setdefault(row["blueprint_id"], []).append(
+                                (row["material_type_id"], row["base_quantity"])
+                            )
+                    craft_db.close()
+                    all_mat_ids = {mid for mats in bp_mats.values() for mid, _ in mats}
+                    missing_ids = all_mat_ids - set(market_prices.keys())
+                    if missing_ids:
+                        from pricer import get_prices_bulk as _get_prices_bulk
+                        market_prices.update(_get_prices_bulk(list(missing_ids)))
+                    for product_id in product_ids:
+                        blueprint_id = bp_map.get(product_id)
+                        if not blueprint_id or blueprint_id not in bp_mats:
+                            continue
+                        material_cost = 0.0
+                        for material_id, qty in bp_mats[blueprint_id]:
+                            price_row = market_prices.get(material_id)
+                            if price_row and price_row.get("sell"):
+                                material_cost += price_row["sell"] * qty
+                            else:
+                                material_cost = None
+                                break
+                        if material_cost is not None:
+                            mat_cost_per_unit[product_id] = material_cost
+                except Exception as exc:
+                    print(f"  [craft-log] mat cost failed: {exc}")
+
+            t2_inv_data: dict[int, dict] = {}
+            if product_ids:
+                try:
+                    import sqlite3 as _sq
+                    from invention import calculate_invention_cost as _calc_inv
+
+                    craft_db = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
+                    craft_db.row_factory = _sq.Row
+                    placeholders = ",".join("?" * len(product_ids))
+                    t2_rows = craft_db.execute(
+                        f"""
+                        SELECT b.output_id,
+                               bi.base_success_chance, bi.output_runs_per_bpc
+                        FROM blueprints b
+                        JOIN blueprint_invention bi ON bi.t2_blueprint_id = b.blueprint_id
+                        WHERE b.output_id IN ({placeholders})
+                        """,
+                        product_ids,
+                    ).fetchall()
+                    craft_db.close()
+                    for row in t2_rows:
+                        product_id = row["output_id"]
+                        product_name = names.get(product_id, f"Type {product_id}")
+                        inv_result = _calc_inv(product_name, prices=market_prices)
+                        if inv_result is None:
+                            continue
+                        t2_inv_data[product_id] = {
+                            "success_chance": float(inv_result.get("success_chance") or float(row["base_success_chance"] or 0.34)),
+                            "runs_per_bpc": max(1, int(row["output_runs_per_bpc"] or 10)),
+                            "datacore_cost_per_run": float(inv_result.get("cost_per_run") or 0.0),
+                        }
+                except Exception as exc:
+                    print(f"  [craft-log] T2 overhead lookup failed: {exc}")
+
+            to_store = []
+            for job in raw_jobs:
+                product_id = job.get("product_type_id")
+                runs = job.get("runs", 1)
+                price_row = market_prices.get(product_id) if product_id else None
+                sell_price = price_row["sell"] if price_row and price_row.get("sell") else None
+                cost_per_unit = mat_cost_per_unit.get(product_id)
+                material_cost = round(cost_per_unit * runs, 2) if cost_per_unit is not None else None
+                est_revenue = round(sell_price * runs, 2) if sell_price is not None else None
+
+                overhead_cost = None
+                t2_data = t2_inv_data.get(product_id) if product_id else None
+                if t2_data:
+                    try:
+                        from calculator import calculate_industry_job_cost as _calc_job_cost
+
+                        eiv = float(mat_cost_per_unit.get(product_id) or 0.0)
+                        system_id = str(job.get("solar_system_id") or "")
+                        invention_index = _resolve_sci(system_id, activity="invention")
+                        copying_index = _resolve_sci(system_id, activity="copying")
+                        success_chance = max(t2_data["success_chance"], 1e-9)
+                        runs_per_bpc = t2_data["runs_per_bpc"]
+                        invention_job = float((_calc_job_cost(
+                            activity="invention", eiv=eiv, sci=invention_index,
+                            cfg={"facility_tax_rate": 0.001, "scc_surcharge_rate": 0.04,
+                                 "invention_activity_multiplier": 0.02},
+                        ).get("total_job_cost") or 0.0)) / success_chance / runs_per_bpc
+                        copying_job = float((_calc_job_cost(
+                            activity="copying", eiv=eiv, sci=copying_index,
+                            cfg={"facility_tax_rate": 0.001, "scc_surcharge_rate": 0.04,
+                                 "copying_activity_multiplier": 0.02},
+                        ).get("total_job_cost") or 0.0)) / runs_per_bpc
+                        overhead_per_run = t2_data["datacore_cost_per_run"] + invention_job + copying_job
+                        overhead_cost = round(overhead_per_run * runs, 2)
+                    except Exception:
+                        overhead_cost = None
+
+                total_material_cost = (cost_per_unit or 0.0) * runs
+                total_cost = total_material_cost + (overhead_cost or 0.0)
+                est_profit = round(est_revenue - total_cost, 2) if (est_revenue is not None and material_cost is not None) else None
+                margin_pct = round(est_profit / total_cost * 100, 2) if (est_profit is not None and total_cost > 0) else None
+                to_store.append({
+                    "job_id": job.get("job_id"),
+                    "char_id": job["_char_id"],
+                    "char_name": job["_char_name"],
+                    "product_type_id": product_id,
+                    "product_name": names.get(product_id, f"Type {product_id}") if product_id else "—",
+                    "activity_id": job.get("activity_id"),
+                    "activity": ACTIVITY_NAMES.get(job.get("activity_id"), "Unknown"),
+                    "runs": runs,
+                    "material_cost": material_cost,
+                    "sell_price": sell_price,
+                    "est_profit": est_profit,
+                    "margin_pct": margin_pct,
+                    "overhead_cost": overhead_cost,
+                    "completed_at": job.get("end_date", ""),
+                })
+
+            inserted = upsert_craft_jobs(to_store)
+
+        _CRAFT_LOG_SYNC_TS = time.time()
+        return {"refreshed": True, "job_count": len(raw_jobs), "upserted": inserted}
+
+
 @app.route("/api/craft-log", methods=["GET"])
 def api_craft_log():
     """
@@ -8833,207 +9314,11 @@ def api_craft_log():
     """
     try:
         pass  # request already imported at top
-        from characters import get_all_auth_headers, load_characters
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import requests as req
-        from datetime import datetime, timezone
-
         days = int(request.args.get("days", 90))
         force = request.args.get("force", "0") == "1"
 
-        # Only re-fetch from ESI when forced (expensive); otherwise just return DB
         if force:
-            char_records = load_characters()
-            auth_headers = get_all_auth_headers()
-            our_char_ids = {int(k) for k in char_records.keys()}
-
-            ACTIVITY_NAMES = {
-                1: "Manufacturing", 3: "TE Research", 4: "ME Research",
-                5: "Copying", 8: "Invention", 9: "Reactions", 11: "Reaction",
-            }
-
-            def _fetch_completed(cid, headers):
-                char_name = char_records.get(cid, {}).get("character_name", f"Char {cid}")
-                jobs = []
-                try:
-                    r = req.get(
-                        f"https://esi.evetech.net/latest/characters/{cid}/industry/jobs/",
-                        headers=headers, params={"include_completed": True}, timeout=20,
-                    )
-                    if r.ok:
-                        for j in r.json():
-                            if j.get("status") == "delivered" and j.get("activity_id") in (1, 9, 11):
-                                j["_char_id"] = cid
-                                j["_char_name"] = char_name
-                                jobs.append(j)
-                except Exception as e:
-                    print(f"  [craft-log] ESI failed for {char_name}: {e}")
-                return jobs
-
-            raw_jobs = []
-            seen_ids = set()
-            with ThreadPoolExecutor(max_workers=len(auth_headers)) as pool:
-                futures = [pool.submit(_fetch_completed, cid, h) for cid, h in auth_headers]
-                for f in as_completed(futures):
-                    for j in f.result():
-                        jid = j.get("job_id")
-                        if jid and jid not in seen_ids:
-                            seen_ids.add(jid)
-                            raw_jobs.append(j)
-
-            if raw_jobs:
-                # Name + price resolution (reuse active-jobs logic)
-                product_ids = list({j.get("product_type_id") for j in raw_jobs if j.get("product_type_id")})
-                names, market_prices = {}, {}
-                if product_ids:
-                    for i in range(0, len(product_ids), 1000):
-                        try:
-                            nr = req.post("https://esi.evetech.net/latest/universe/names/",
-                                          json=product_ids[i:i+1000], timeout=10)
-                            if nr.ok:
-                                for item in nr.json():
-                                    names[item["id"]] = item["name"]
-                        except Exception:
-                            pass
-                    try:
-                        from pricer import get_prices_bulk
-                        market_prices = get_prices_bulk(product_ids)
-                    except Exception:
-                        pass
-
-                # Material costs
-                mat_cost_per_unit: dict[int, float] = {}
-                try:
-                    import sqlite3 as _sq
-                    _cdb = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
-                    _cdb.row_factory = _sq.Row
-                    ph = ",".join("?" * len(product_ids))
-                    bp_map = {row["output_id"]: row["blueprint_id"] for row in _cdb.execute(
-                        f"SELECT output_id, blueprint_id FROM blueprints WHERE output_id IN ({ph})",
-                        product_ids).fetchall()}
-                    bp_ids = list(set(bp_map.values()))
-                    bp_mats: dict = {}
-                    if bp_ids:
-                        ph2 = ",".join("?" * len(bp_ids))
-                        for row in _cdb.execute(
-                            f"SELECT blueprint_id, material_type_id, base_quantity FROM blueprint_materials WHERE blueprint_id IN ({ph2})",
-                            bp_ids).fetchall():
-                            bp_mats.setdefault(row["blueprint_id"], []).append(
-                                (row["material_type_id"], row["base_quantity"]))
-                    _cdb.close()
-                    all_mat_ids = {mid for mats in bp_mats.values() for mid, _ in mats}
-                    missing = all_mat_ids - set(market_prices.keys())
-                    if missing:
-                        from pricer import get_prices_bulk as _gpb
-                        market_prices.update(_gpb(list(missing)))
-                    for pid in product_ids:
-                        bpid = bp_map.get(pid)
-                        if not bpid or bpid not in bp_mats:
-                            continue
-                        cost = 0.0
-                        for mid, qty in bp_mats[bpid]:
-                            mp = market_prices.get(mid)
-                            if mp and mp.get("sell"):
-                                cost += mp["sell"] * qty
-                            else:
-                                cost = None
-                                break
-                        if cost is not None:
-                            mat_cost_per_unit[pid] = cost
-                except Exception as _e:
-                    print(f"  [craft-log] mat cost failed: {_e}")
-
-                # ── T2 overhead: datacores + invention job + copy job, amortised per run ─
-                t2_inv_data: dict[int, dict] = {}
-                try:
-                    from invention import calculate_invention_cost as _calc_inv
-                    from calculator import calculate_industry_job_cost as _calc_job_cost
-                    _cdb2 = _sq.connect(os.path.join(os.path.dirname(__file__), "crest.db"))
-                    _cdb2.row_factory = _sq.Row
-                    ph_t2 = ",".join("?" * len(product_ids))
-                    t2_rows = _cdb2.execute(
-                        f"""
-                        SELECT b.output_id,
-                               bi.base_success_chance, bi.output_runs_per_bpc
-                        FROM blueprints b
-                        JOIN blueprint_invention bi ON bi.t2_blueprint_id = b.blueprint_id
-                        WHERE b.output_id IN ({ph_t2})
-                        """,
-                        product_ids,
-                    ).fetchall()
-                    _cdb2.close()
-                    for row in t2_rows:
-                        pid2     = row["output_id"]
-                        pname    = names.get(pid2, f"Type {pid2}")
-                        inv_res  = _calc_inv(pname, prices=market_prices)
-                        if inv_res is None:
-                            continue
-                        t2_inv_data[pid2] = {
-                            "success_chance":        float(inv_res.get("success_chance") or float(row["base_success_chance"] or 0.34)),
-                            "runs_per_bpc":          max(1, int(row["output_runs_per_bpc"] or 10)),
-                            "datacore_cost_per_run": float(inv_res.get("cost_per_run") or 0.0),
-                        }
-                except Exception as _t2e:
-                    print(f"  [craft-log] T2 overhead lookup failed: {_t2e}")
-
-                to_store = []
-                for j in raw_jobs:
-                    pid   = j.get("product_type_id")
-                    runs  = j.get("runs", 1)
-                    p     = market_prices.get(pid) if pid else None
-                    sell  = p["sell"] if p and p.get("sell") else None
-                    cpu   = mat_cost_per_unit.get(pid)
-                    mat   = round(cpu * runs, 2) if cpu is not None else None
-                    rev   = round(sell * runs, 2) if sell is not None else None
-
-                    # T2 overhead: invention datacores + inv job fee + copy job fee
-                    overhead_cost = None
-                    t2 = t2_inv_data.get(pid) if pid else None
-                    if t2:
-                        try:
-                            from calculator import calculate_industry_job_cost as _calc_job_cost
-                            _eiv     = float(mat_cost_per_unit.get(pid) or 0.0)
-                            _sys_id  = str(j.get("solar_system_id") or "")
-                            _inv_sci = _resolve_sci(_sys_id, activity="invention")
-                            _cpy_sci = _resolve_sci(_sys_id, activity="copying")
-                            _sc      = max(t2["success_chance"], 1e-9)
-                            _rpb     = t2["runs_per_bpc"]
-                            _inv_job = float((_calc_job_cost(
-                                activity="invention", eiv=_eiv, sci=_inv_sci,
-                                cfg={"facility_tax_rate": 0.001, "scc_surcharge_rate": 0.04,
-                                     "invention_activity_multiplier": 0.02},
-                            ).get("total_job_cost") or 0.0)) / _sc / _rpb
-                            _cpy_job = float((_calc_job_cost(
-                                activity="copying", eiv=_eiv, sci=_cpy_sci,
-                                cfg={"facility_tax_rate": 0.001, "scc_surcharge_rate": 0.04,
-                                     "copying_activity_multiplier": 0.02},
-                            ).get("total_job_cost") or 0.0)) / _rpb
-                            overhead_per_run = t2["datacore_cost_per_run"] + _inv_job + _cpy_job
-                            overhead_cost = round(overhead_per_run * runs, 2)
-                        except Exception:
-                            overhead_cost = None
-
-                    total_mat_run = (cpu or 0.0) * runs
-                    total_cost_run = total_mat_run + (overhead_cost or 0.0)
-                    prof  = round(rev - total_cost_run, 2) if (rev is not None and mat is not None) else None
-                    mgn   = round(prof / total_cost_run * 100, 2) if (prof is not None and total_cost_run > 0) else None
-                    to_store.append({
-                        "job_id":          j.get("job_id"),
-                        "char_id":         j["_char_id"],
-                        "char_name":       j["_char_name"],
-                        "product_type_id": pid,
-                        "product_name":    names.get(pid, f"Type {pid}") if pid else "—",
-                        "activity_id":     j.get("activity_id"),
-                        "activity":        ACTIVITY_NAMES.get(j.get("activity_id"), "Unknown"),
-                        "runs":            runs,
-                        "material_cost":   mat,
-                        "sell_price":      sell,
-                        "est_profit":      prof,
-                        "margin_pct":      mgn,
-                        "overhead_cost":   overhead_cost,
-                        "completed_at":    j.get("end_date", ""),
-                    })
-                upsert_craft_jobs(to_store)
+            _sync_craft_log_from_esi(force=True)
 
         log = get_craft_log(days=days)
         return jsonify({"log": log, "count": len(log)})
@@ -9430,6 +9715,7 @@ def _refresh_orders() -> dict:
     # ── Enrich sell orders with market position + competitor count ─────────
     # market_position   = 1-based sell rank at the order's known hub
     # competitor_count  = ALL visible sell listings for that hub/type
+    market_books: dict[str, dict[int, dict]] = {}
     try:
         sell_orders = [o for o in sell if o.get("type_id")]
         hub_type_ids: dict[str, set[int]] = {}
@@ -9441,8 +9727,6 @@ def _refresh_orders() -> dict:
                 continue
             order_hubs[int(oid)] = hub
             hub_type_ids.setdefault(hub["name"], set()).add(int(o["type_id"]))
-
-        market_books: dict[str, dict[int, dict]] = {}
         for hub in _MARKET_HUBS_SMART:
             tids = sorted(hub_type_ids.get(hub["name"], set()))
             if tids:
@@ -9493,6 +9777,50 @@ def _refresh_orders() -> dict:
         newly_fulfilled = sync_open_orders(sell)
     except Exception as e:
         print(f"  [orders] sync_open_orders failed: {e}")
+
+    try:
+        from pricer import get_prices_bulk
+
+        sell_type_ids = sorted({int(order.get("type_id") or 0) for order in sell if int(order.get("type_id") or 0) > 0})
+        price_rows = get_prices_bulk(sell_type_ids, history_ids=sell_type_ids) if sell_type_ids else {}
+        activity_by_order = get_open_order_activity_by_id()
+        overall_avg_days = (get_sell_history_stats().get("overall") or {}).get("avg_days_to_sell")
+        personal_velocity = get_sell_velocity_by_type_id()
+        calc_results_by_output = _get_fresh_calc_results_by_output_id()
+        sales_tax_fraction = float(CALC_CONFIG.get("sales_tax", 0.0))
+        broker_fee_fraction = float(CALC_CONFIG.get("broker_fee", 0.0))
+
+        active_sell_by_type: dict[int, int] = {}
+        for order in sell:
+            type_id = int(order.get("type_id") or 0)
+            if not type_id:
+                continue
+            active_sell_by_type[type_id] = active_sell_by_type.get(type_id, 0) + int(order.get("volume_remain") or 0)
+
+        for order in sell:
+            type_id = int(order.get("type_id") or 0)
+            if not type_id:
+                order["order_advice"] = None
+                continue
+
+            hub_name = order.get("market_hub")
+            hub_book = (market_books.get(hub_name) or {}).get(type_id) if hub_name else None
+            order_qty = int(order.get("volume_remain") or 0)
+            same_type_other_qty = max(0, int(active_sell_by_type.get(type_id) or 0) - order_qty)
+            order["order_advice"] = _build_live_sell_order_advice(
+                order,
+                hub_book,
+                price_rows.get(type_id) or {},
+                calc_results_by_output.get(type_id),
+                activity_by_order.get(int(order.get("order_id") or 0)) or {},
+                personal_velocity.get(type_id) or {},
+                overall_avg_days,
+                same_type_other_qty,
+                sales_tax_fraction,
+                broker_fee_fraction,
+            )
+    except Exception as _e:
+        print(f"  [orders] advisory enrichment failed: {_e}")
 
     _ESI_ORDERS_CACHE = {"sell": sell, "buy": buy, "newly_fulfilled": newly_fulfilled}
     _ESI_ORDERS_CACHE_TS = time.time()
@@ -9594,6 +9922,51 @@ def _market_price_tick(price: float | None) -> float:
     if not price or price <= 0:
         return 0.01
     return max(0.01, round(price * 0.0005, 2))
+
+
+def _parse_market_order_timestamp(ts_str: str | None) -> float | None:
+    if not ts_str:
+        return None
+    try:
+        from datetime import datetime, timezone
+        return datetime.fromisoformat(str(ts_str).rstrip("Z")).replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return None
+
+
+def _get_fresh_calc_results_by_output_id() -> dict[int, dict]:
+    best_payload = None
+    best_ts = 0.0
+    now_ts = time.time()
+    for payload in _calc_cache.values():
+        ts = float(payload.get("generated_at", 0) or 0)
+        if ts <= 0 or (now_ts - ts) >= CALC_CACHE_TTL:
+            continue
+        if ts > best_ts:
+            best_payload = payload
+            best_ts = ts
+
+    if not best_payload:
+        return {}
+
+    _upgrade_calc_payload_formula(best_payload)
+    return {
+        int(result.get("output_id") or 0): result
+        for result in (best_payload.get("results") or [])
+        if int(result.get("output_id") or 0) > 0
+    }
+
+
+def _relist_break_even_price(break_even_price: float | None, sales_tax_fraction: float,
+                             broker_fee_fraction: float) -> float | None:
+    if not break_even_price or break_even_price <= 0:
+        return None
+    base_denom = 1.0 - sales_tax_fraction - broker_fee_fraction
+    relist_denom = 1.0 - sales_tax_fraction - (broker_fee_fraction * 2.0)
+    if base_denom <= 0 or relist_denom <= 0:
+        return None
+    unit_cost = break_even_price * base_denom
+    return round(unit_cost / relist_denom, 2)
 
 
 def _market_hub_for_location(location_id: int | None) -> dict | None:
@@ -9826,12 +10199,14 @@ def _fetch_hub_sell_overview(hub: dict, type_ids: list[int]) -> dict[int, dict]:
 
 
 def _recommend_sell_price(goal: str, best_sell: float | None, second_sell: float | None,
-                          fallback_price: float | None, floor_price: float) -> float | None:
+                          fallback_price: float | None, floor_price: float,
+                          broker_fee_fraction: float = 0.0) -> dict | None:
     anchor = best_sell or fallback_price
     if not anchor or anchor <= 0:
         return None
 
     tick = _market_price_tick(anchor)
+    relist_guard_triggered = False
 
     if best_sell:
         if goal == "fast":
@@ -9854,7 +10229,17 @@ def _recommend_sell_price(goal: str, best_sell: float | None, second_sell: float
         else:
             target = anchor * 1.015
 
-    return round(max(floor_price, target), 2)
+    if best_sell and broker_fee_fraction > 0 and target > best_sell:
+        premium_ratio = max(0.0, (target - best_sell) / best_sell)
+        relist_guard_ratio = broker_fee_fraction * (1.0 if goal == "max" else 0.65)
+        if premium_ratio < relist_guard_ratio:
+            target = best_sell - tick
+            relist_guard_triggered = True
+
+    return {
+        "price": round(max(floor_price, target), 2),
+        "relist_guard_triggered": relist_guard_triggered,
+    }
 
 
 def _estimate_sell_days(goal: str, quantity: int, recommended_price: float | None,
@@ -9888,6 +10273,237 @@ def _estimate_sell_days(goal: str, quantity: int, recommended_price: float | Non
 
     estimate = baseline * competition_mult * quantity_mult * goal_mult * premium_mult
     return round(max(0.25, estimate), 2)
+
+
+def _build_live_sell_order_advice(order: dict, hub_book: dict | None, price_row: dict | None,
+                                  calc_row: dict | None, activity: dict | None,
+                                  personal_velocity: dict | None, overall_avg_days: float | None,
+                                  existing_listed_qty_other: int,
+                                  sales_tax_fraction: float, broker_fee_fraction: float) -> dict:
+    order_price = float(order.get("price") or 0.0)
+    quantity = int(order.get("volume_remain") or 0)
+    best_sell = (hub_book or {}).get("best_sell")
+    second_sell = (hub_book or {}).get("second_sell")
+    order_count = int((hub_book or {}).get("order_count") or 0)
+    daily_volume = (price_row or {}).get("avg_daily_volume")
+    market_position = order.get("market_position")
+    fallback_price = (
+        (price_row or {}).get("sell")
+        or (price_row or {}).get("average_price")
+        or (price_row or {}).get("adjusted_price")
+        or (price_row or {}).get("buy")
+    )
+
+    break_even_price = None
+    if calc_row and calc_row.get("break_even_price"):
+        try:
+            break_even_price = float(calc_row.get("break_even_price") or 0.0)
+        except Exception:
+            break_even_price = None
+    relist_break_even = _relist_break_even_price(break_even_price, sales_tax_fraction, broker_fee_fraction)
+
+    market_floor = max(
+        float((price_row or {}).get("buy") or 0) * 1.01,
+        float((price_row or {}).get("adjusted_price") or 0) * 0.9,
+        float((price_row or {}).get("average_price") or 0) * 0.88,
+        0.01,
+    )
+    recommended_floor = max(market_floor, break_even_price or 0.0)
+
+    tracked_anchor_ts = None
+    if activity:
+        tracked_anchor_ts = activity.get("last_fill_ts") or activity.get("first_seen_ts")
+    issued_ts = _parse_market_order_timestamp(order.get("issued"))
+    now_ts = time.time()
+    order_age_hours = round(max(0.0, (now_ts - issued_ts) / 3600.0), 1) if issued_ts else None
+    tracked_no_fill_hours = round(max(0.0, (now_ts - tracked_anchor_ts) / 3600.0), 1) if tracked_anchor_ts else None
+    stagnant_24h = tracked_no_fill_hours is not None and tracked_no_fill_hours >= 24.0
+
+    current_estimated_days = _estimate_sell_days(
+        "balanced",
+        quantity,
+        order_price,
+        best_sell,
+        daily_volume,
+        order_count,
+        (personal_velocity or {}).get("avg_days_to_sell"),
+        overall_avg_days,
+        existing_listed_qty_other,
+    )
+
+    suggestion_goal = "balanced"
+    if stagnant_24h and (market_position is None or market_position > 1):
+        suggestion_goal = "fast"
+    elif market_position is not None and market_position > 3:
+        suggestion_goal = "fast"
+
+    recommendation = _recommend_sell_price(
+        suggestion_goal,
+        best_sell,
+        second_sell,
+        fallback_price,
+        recommended_floor,
+        broker_fee_fraction=broker_fee_fraction,
+    )
+    recommended_price = float(recommendation["price"]) if recommendation else order_price
+    relist_guard_triggered = bool(recommendation.get("relist_guard_triggered")) if recommendation else False
+
+    recommended_estimated_days = _estimate_sell_days(
+        suggestion_goal,
+        quantity,
+        recommended_price,
+        best_sell,
+        daily_volume,
+        order_count,
+        (personal_velocity or {}).get("avg_days_to_sell"),
+        overall_avg_days,
+        existing_listed_qty_other,
+    )
+
+    tick = _market_price_tick(best_sell or order_price or fallback_price)
+    market_drop_pct = None
+    if best_sell and order_price > 0:
+        market_drop_pct = round(max(0.0, ((order_price - best_sell) / order_price) * 100.0), 2)
+    reprice_gap_pct = None
+    if recommended_price and order_price > 0:
+        reprice_gap_pct = round(((order_price - recommended_price) / order_price) * 100.0, 2)
+
+    profit_proxy_state = "unknown"
+    if relist_break_even:
+        if best_sell and best_sell < relist_break_even:
+            profit_proxy_state = "at_risk"
+        elif recommended_price < relist_break_even:
+            profit_proxy_state = "at_risk"
+        else:
+            profit_proxy_state = "safe"
+
+    can_improve_by_relisting = (
+        recommended_price > 0
+        and (order_price - recommended_price) > max(tick, order_price * 0.003)
+    )
+    keep_as_slow_seller = (
+        not can_improve_by_relisting
+        and profit_proxy_state != "at_risk"
+        and market_position == 1
+        and recommended_estimated_days is not None
+        and recommended_estimated_days >= 1.0
+    )
+
+    warning_level = "none"
+    action = "keep"
+    summary = "No change needed"
+    reason = "The order is still priced close to the visible market and does not currently need a relist."
+
+    if profit_proxy_state == "at_risk":
+        warning_level = "critical"
+        action = "review-margin"
+        summary = "Margin risk"
+        reason = "Current hub pricing is below the relist break-even proxy, so chasing the market could erase manufacturing margin."
+    elif stagnant_24h and can_improve_by_relisting and (market_position is None or market_position > 1):
+        warning_level = "warning"
+        action = "relist"
+        summary = "Stagnant 24h"
+        reason = "No tracked fills for at least 24 hours and the order is no longer at the best visible sell price."
+    elif market_position is not None and market_position > 3 and can_improve_by_relisting:
+        warning_level = "warning"
+        action = "relist"
+        summary = "Book position slipping"
+        reason = "The order has fallen several steps behind the top of book and a lower price should improve time to sell."
+    elif keep_as_slow_seller:
+        action = "keep"
+        summary = "Slow seller"
+        reason = "This item looks slow-moving rather than broken: it is still at the top of book and the market does not currently justify a relist."
+
+    return {
+        "warning_level": warning_level,
+        "action": action,
+        "summary": summary,
+        "reason": reason,
+        "recommended_price": round(recommended_price, 2),
+        "goal": suggestion_goal,
+        "estimated_days_current": current_estimated_days,
+        "estimated_days_relisted": recommended_estimated_days,
+        "order_age_hours": order_age_hours,
+        "tracked_no_fill_hours": tracked_no_fill_hours,
+        "stagnant_24h": stagnant_24h,
+        "market_drop_pct": market_drop_pct,
+        "reprice_gap_pct": reprice_gap_pct,
+        "best_sell": round(float(best_sell), 2) if best_sell else None,
+        "second_sell": round(float(second_sell), 2) if second_sell else None,
+        "relist_guard_triggered": relist_guard_triggered,
+        "profit_proxy": {
+            "state": profit_proxy_state,
+            "break_even_price": round(float(break_even_price), 2) if break_even_price else None,
+            "relist_break_even_price": relist_break_even,
+            "source": "calc_cache" if break_even_price else None,
+        },
+    }
+
+
+def _build_sell_recommendation_for_hub(goal: str, hub_name: str, overview: dict, price_row: dict,
+                                       quantity: int, floor_price: float, daily_volume: float | None,
+                                       personal_avg_days: float | None, overall_avg_days: float | None,
+                                       existing_listed_qty: int, sales_tax_fraction: float,
+                                       broker_fee_fraction: float) -> dict | None:
+    best_sell = overview.get("best_sell")
+    second_sell = overview.get("second_sell")
+    fallback_price = (
+        price_row.get("sell")
+        or price_row.get("average_price")
+        or price_row.get("adjusted_price")
+        or price_row.get("buy")
+    )
+    if not best_sell and not fallback_price:
+        return None
+
+    recommendation = _recommend_sell_price(
+        goal,
+        best_sell,
+        second_sell,
+        fallback_price,
+        floor_price,
+        broker_fee_fraction=broker_fee_fraction,
+    )
+    if not recommendation:
+        return None
+
+    recommended_price = float(recommendation["price"])
+    order_count = int(overview.get("order_count") or 0)
+    estimated_days = _estimate_sell_days(
+        goal,
+        quantity,
+        recommended_price,
+        best_sell,
+        daily_volume,
+        order_count,
+        personal_avg_days,
+        overall_avg_days,
+        existing_listed_qty,
+    )
+
+    sales_tax_per_unit = round(recommended_price * sales_tax_fraction, 2)
+    broker_fee_per_unit = round(recommended_price * broker_fee_fraction, 2)
+    net_after_fees_per_unit = round(recommended_price - sales_tax_per_unit - broker_fee_per_unit, 2)
+    net_after_one_relist_per_unit = round(net_after_fees_per_unit - broker_fee_per_unit, 2)
+
+    return {
+        "hub": hub_name,
+        "recommended_price": round(recommended_price, 2),
+        "best_sell": round(float(best_sell), 2) if best_sell else None,
+        "second_sell": round(float(second_sell), 2) if second_sell else None,
+        "order_count": order_count,
+        "visible_volume": int(overview.get("visible_volume") or 0),
+        "estimated_days_to_sell": estimated_days,
+        "sales_tax_per_unit": sales_tax_per_unit,
+        "broker_fee_per_unit": broker_fee_per_unit,
+        "relist_broker_fee_per_unit": broker_fee_per_unit,
+        "net_after_fees_per_unit": net_after_fees_per_unit,
+        "net_after_one_relist_per_unit": net_after_one_relist_per_unit,
+        "total_recommended_value": round(recommended_price * quantity, 2),
+        "total_net_after_fees": round(net_after_fees_per_unit * quantity, 2),
+        "total_net_after_one_relist": round(net_after_one_relist_per_unit * quantity, 2),
+        "relist_guard_triggered": bool(recommendation.get("relist_guard_triggered")),
+    }
 
 
 def _get_volume_m3(type_id: int, fallback: float = 0.01) -> float:
@@ -10162,9 +10778,155 @@ def api_shopping_optimal_sources():
         return jsonify({"error": str(e)}), 500
 
 
+def _build_outbound_pipeline_rows(asset_source: dict, active_sell_by_type: dict[int, int],
+                                  lookback_days: int = 60) -> tuple[list[dict], dict]:
+    if not _ESI_JOBS_CACHE or (time.time() - _ESI_JOBS_CACHE_TS) >= _ESI_JOBS_TTL:
+        try:
+            api_industry_jobs()
+        except Exception as exc:
+            print(f"  [sell-recommendations] jobs refresh failed: {exc}")
+
+    try:
+        _sync_craft_log_from_esi(force=False)
+    except Exception as exc:
+        print(f"  [sell-recommendations] craft-log sync failed: {exc}")
+
+    asset_qty_by_type: dict[int, int] = {}
+    asset_names = dict(asset_source.get("names") or {})
+    for raw_type_id, raw_qty in (asset_source.get("assets") or {}).items():
+        try:
+            type_id = int(raw_type_id)
+        except Exception:
+            continue
+        quantity = int(raw_qty or 0)
+        if quantity > 0:
+            asset_qty_by_type[type_id] = quantity
+
+    pipeline_by_type: dict[int, dict] = {}
+    now_ts = int(time.time())
+
+    def _ensure_row(type_id: int, fallback_name: str | None = None) -> dict:
+        row = pipeline_by_type.get(type_id)
+        if row is None:
+            row = {
+                "type_id": type_id,
+                "name": (
+                    asset_names.get(str(type_id))
+                    or asset_names.get(type_id)
+                    or fallback_name
+                    or f"Type {type_id}"
+                ),
+                "delivered_job_quantity": 0,
+                "delivered_job_count": 0,
+                "delivered_asset_quantity": 0,
+                "asset_quantity": 0,
+                "ready_job_quantity": 0,
+                "ready_job_count": 0,
+                "active_job_quantity": 0,
+                "active_job_count": 0,
+                "next_completion_ts": None,
+                "last_completed_ts": None,
+            }
+            pipeline_by_type[type_id] = row
+        elif fallback_name and (not row.get("name") or str(row.get("name", "")).startswith("Type ")):
+            row["name"] = fallback_name
+        return row
+
+    for craft_row in get_craft_log(days=lookback_days):
+        try:
+            type_id = int(craft_row.get("product_type_id") or 0)
+        except Exception:
+            type_id = 0
+        runs = int(craft_row.get("runs") or 0)
+        if type_id <= 0 or runs <= 0:
+            continue
+        row = _ensure_row(type_id, craft_row.get("product_name"))
+        row["delivered_job_quantity"] += runs
+        row["delivered_job_count"] += 1
+        completed_ts = _parse_market_order_timestamp(craft_row.get("completed_at"))
+        if completed_ts is not None:
+            row["last_completed_ts"] = max(int(completed_ts), int(row.get("last_completed_ts") or 0))
+
+    for job in (_ESI_JOBS_CACHE or {}).get("jobs", []):
+        activity_id = int(job.get("activity_id") or 0)
+        if activity_id not in (1, 9, 11):
+            continue
+        type_id = int(job.get("product_type_id") or 0)
+        runs = int(job.get("runs") or 0)
+        if type_id <= 0 or runs <= 0:
+            continue
+        row = _ensure_row(type_id, job.get("product_name"))
+        end_ts = int(job.get("end_ts") or 0)
+        if end_ts > now_ts:
+            row["active_job_quantity"] += runs
+            row["active_job_count"] += 1
+            if not row.get("next_completion_ts") or end_ts < int(row.get("next_completion_ts") or 0):
+                row["next_completion_ts"] = end_ts
+        else:
+            row["ready_job_quantity"] += runs
+            row["ready_job_count"] += 1
+            row["last_completed_ts"] = max(end_ts, int(row.get("last_completed_ts") or 0))
+
+    for type_id, quantity in asset_qty_by_type.items():
+        row = pipeline_by_type.get(type_id)
+        if row is None:
+            continue
+        row["asset_quantity"] = quantity
+        delivered_visible_qty = quantity
+        if row["delivered_job_quantity"] > 0:
+            delivered_visible_qty = min(quantity, int(row["delivered_job_quantity"]))
+        row["delivered_asset_quantity"] = max(0, int(delivered_visible_qty))
+
+    ready_rows = []
+    for row in pipeline_by_type.values():
+        ready_quantity = int(row.get("delivered_asset_quantity") or 0) + int(row.get("ready_job_quantity") or 0)
+        if ready_quantity <= 0:
+            continue
+        listed_qty = int(active_sell_by_type.get(int(row["type_id"]), 0) or 0)
+        if row.get("delivered_asset_quantity") and row.get("ready_job_quantity"):
+            pipeline_state = "mixed"
+            pipeline_state_label = "STOCK + READY"
+        elif row.get("ready_job_quantity"):
+            pipeline_state = "delivery-ready"
+            pipeline_state_label = "READY"
+        else:
+            pipeline_state = "unlisted-stock"
+            pipeline_state_label = "UNLISTED"
+        ready_rows.append({
+            **row,
+            "quantity": ready_quantity,
+            "existing_listed_qty": listed_qty,
+            "pipeline_state": pipeline_state,
+            "pipeline_state_label": pipeline_state_label,
+        })
+
+    ready_rows.sort(key=lambda item: (
+        -(int(item.get("quantity") or 0)),
+        -(int(item.get("active_job_quantity") or 0)),
+        str(item.get("name") or ""),
+    ))
+
+    summary = {
+        "lookback_days": lookback_days,
+        "tracked_type_count": len(pipeline_by_type),
+        "ready_type_count": len(ready_rows),
+        "ready_units": sum(int(row.get("quantity") or 0) for row in ready_rows),
+        "delivered_asset_units": sum(int(row.get("delivered_asset_quantity") or 0) for row in ready_rows),
+        "ready_job_units": sum(int(row.get("ready_job_quantity") or 0) for row in ready_rows),
+        "tracked_asset_types": sum(1 for row in pipeline_by_type.values() if int(row.get("asset_quantity") or 0) > 0),
+        "in_progress_type_count": sum(1 for row in pipeline_by_type.values() if int(row.get("active_job_quantity") or 0) > 0),
+        "in_progress_units": sum(int(row.get("active_job_quantity") or 0) for row in pipeline_by_type.values()),
+        "active_job_count": sum(int(row.get("active_job_count") or 0) for row in pipeline_by_type.values()),
+        "ready_job_count": sum(int(row.get("ready_job_count") or 0) for row in pipeline_by_type.values()),
+        "delivered_job_count": sum(int(row.get("delivered_job_count") or 0) for row in pipeline_by_type.values()),
+        "listed_type_count": sum(1 for type_id, qty in active_sell_by_type.items() if qty > 0 and type_id in pipeline_by_type),
+    }
+    return ready_rows, summary
+
+
 @app.route("/api/haul/sell-recommendations", methods=["GET"])
 def api_haul_sell_recommendations():
-    # Recommend listing prices for inventory that looks worth selling.
+    # Recommend listing prices for manufactured output that is ready to list.
     global _SELL_RECOMMENDATION_CACHE
     try:
         goal = (request.args.get("goal") or "balanced").strip().lower()
@@ -10181,6 +10943,13 @@ def api_haul_sell_recommendations():
             (hub for hub in _MARKET_HUBS_SMART if hub["name"].lower() == requested_hub.lower()),
             _MARKET_HUBS_SMART[0],
         )
+        sales_tax_fraction = float(CALC_CONFIG.get("sales_tax", 0.0))
+        broker_fee_fraction = float(CALC_CONFIG.get("broker_fee", 0.0))
+        fee_model = {
+            "sales_tax_rate": round(sales_tax_fraction, 6),
+            "broker_fee_rate": round(broker_fee_fraction, 6),
+            "assumes_one_additional_relist_broker_fee": True,
+        }
 
         cache_key = json.dumps({
             "goal": goal,
@@ -10199,45 +10968,63 @@ def api_haul_sell_recommendations():
             division_flag=corp_output_division,
             fallback_to_personal=not bool(operations_corp_id),
         )
-        assets = dict(asset_source.get("assets") or {})
-        names = dict(asset_source.get("names") or {})
+        inventory_source = {
+            key: value
+            for key, value in asset_source.items()
+            if key != "assets" and key != "names"
+        }
 
-        if not assets:
-            payload = {
+        _refresh_orders_if_stale()
+        live_sell_orders = (_ESI_ORDERS_CACHE or {}).get("sell", [])
+        active_sell_by_type: dict[int, int] = {}
+        for order in live_sell_orders:
+            type_id = int(order.get("type_id") or 0)
+            if not type_id:
+                continue
+            active_sell_by_type[type_id] = active_sell_by_type.get(type_id, 0) + int(order.get("volume_remain") or 0)
+
+        pipeline_rows, pipeline_summary = _build_outbound_pipeline_rows(asset_source, active_sell_by_type)
+
+        def _empty_payload() -> dict:
+            return {
                 "goal": goal,
                 "selected_hub": target_hub["name"],
                 "hubs": [hub["name"] for hub in _MARKET_HUBS_SMART],
+                "fee_model": fee_model,
+                "inventory_source": inventory_source,
+                "pipeline_summary": pipeline_summary,
                 "summary": {
                     "item_count": 0,
                     "total_units": 0,
                     "total_recommended_value": 0.0,
+                    "total_net_after_fees": 0.0,
+                    "total_net_after_one_relist": 0.0,
                     "items_with_better_hub": 0,
-                },
-                "inventory_source": {
-                    key: value
-                    for key, value in asset_source.items()
-                    if key != "assets" and key != "names"
+                    "pipeline_candidates_considered": 0,
                 },
                 "items": [],
             }
+
+        if not pipeline_rows:
+            payload = _empty_payload()
             _SELL_RECOMMENDATION_CACHE[cache_key] = {**payload, "_ts": time.time()}
             return jsonify(payload)
 
         try:
             from pricer import get_prices_bulk
-            asset_type_ids = [int(type_id) for type_id, qty in assets.items() if int(qty or 0) > 0]
-            reference_prices = get_prices_bulk(asset_type_ids, history_ids=[])
+            candidate_type_ids = [int(row["type_id"]) for row in pipeline_rows if int(row.get("quantity") or 0) > 0]
+            reference_prices = get_prices_bulk(candidate_type_ids, history_ids=[])
         except Exception:
             reference_prices = {}
 
         candidate_rows = []
-        for raw_type_id, raw_qty in assets.items():
-            type_id = int(raw_type_id)
-            quantity = int(raw_qty or 0)
+        for pipeline_row in pipeline_rows:
+            type_id = int(pipeline_row["type_id"])
+            quantity = int(pipeline_row.get("quantity") or 0)
             if quantity <= 0:
                 continue
 
-            name = names.get(str(type_id)) or names.get(type_id) or f"Type {type_id}"
+            name = str(pipeline_row.get("name") or f"Type {type_id}")
             if "blueprint" in name.lower():
                 continue
 
@@ -10258,12 +11045,7 @@ def api_haul_sell_recommendations():
             if rough_total_value < min_total_value:
                 continue
 
-            candidate_rows.append({
-                "type_id": type_id,
-                "name": name,
-                "quantity": quantity,
-                "rough_total_value": round(rough_total_value, 2),
-            })
+            candidate_rows.append({**pipeline_row, "rough_total_value": round(rough_total_value, 2)})
 
         candidate_rows.sort(key=lambda row: row["rough_total_value"], reverse=True)
         fetch_cap = min(len(candidate_rows), max(limit, 40))
@@ -10271,37 +11053,12 @@ def api_haul_sell_recommendations():
         scoped_type_ids = [row["type_id"] for row in scoped_candidates]
 
         if not scoped_type_ids:
-            payload = {
-                "goal": goal,
-                "selected_hub": target_hub["name"],
-                "hubs": [hub["name"] for hub in _MARKET_HUBS_SMART],
-                "summary": {
-                    "item_count": 0,
-                    "total_units": 0,
-                    "total_recommended_value": 0.0,
-                    "items_with_better_hub": 0,
-                },
-                "inventory_source": {
-                    key: value
-                    for key, value in asset_source.items()
-                    if key != "assets" and key != "names"
-                },
-                "items": [],
-            }
+            payload = _empty_payload()
             _SELL_RECOMMENDATION_CACHE[cache_key] = {**payload, "_ts": time.time()}
             return jsonify(payload)
 
         from pricer import get_prices_bulk
         scoped_prices = get_prices_bulk(scoped_type_ids, history_ids=scoped_type_ids)
-
-        _refresh_orders_if_stale()
-        live_sell_orders = (_ESI_ORDERS_CACHE or {}).get("sell", [])
-        active_sell_by_type: dict[int, int] = {}
-        for order in live_sell_orders:
-            type_id = int(order.get("type_id") or 0)
-            if not type_id:
-                continue
-            active_sell_by_type[type_id] = active_sell_by_type.get(type_id, 0) + int(order.get("volume_remain") or 0)
 
         sell_velocity = get_sell_velocity_by_type_id()
         sell_history = get_sell_history_stats()
@@ -10311,26 +11068,12 @@ def api_haul_sell_recommendations():
             hub["name"]: _fetch_hub_sell_overview(hub, scoped_type_ids)
             for hub in _MARKET_HUBS_SMART
         }
-
-        fee_fraction = float(CALC_CONFIG.get("sales_tax", 0.0)) + float(CALC_CONFIG.get("broker_fee", 0.0))
         items = []
 
         for row in scoped_candidates:
             type_id = row["type_id"]
             quantity = row["quantity"]
             price_row = scoped_prices.get(type_id) or {}
-            selected_overview = (hub_overviews.get(target_hub["name"]) or {}).get(type_id, {})
-
-            best_sell = selected_overview.get("best_sell")
-            second_sell = selected_overview.get("second_sell")
-            fallback_price = (
-                price_row.get("sell")
-                or price_row.get("average_price")
-                or price_row.get("adjusted_price")
-                or price_row.get("buy")
-            )
-            if not best_sell and not fallback_price:
-                continue
 
             floor_price = max(
                 float(price_row.get("buy") or 0) * 1.01,
@@ -10338,74 +11081,97 @@ def api_haul_sell_recommendations():
                 float(price_row.get("average_price") or 0) * 0.88,
                 0.01,
             )
-            recommended_price = _recommend_sell_price(
-                goal,
-                best_sell,
-                second_sell,
-                fallback_price,
-                floor_price,
-            )
-            if not recommended_price:
-                continue
 
             personal_velocity = sell_velocity.get(type_id) or {}
             daily_volume = price_row.get("avg_daily_volume")
-            order_count = int(selected_overview.get("order_count") or 0)
             existing_listed_qty = int(active_sell_by_type.get(type_id) or 0)
-            estimated_days = _estimate_sell_days(
-                goal,
-                quantity,
-                recommended_price,
-                best_sell,
-                daily_volume,
-                order_count,
-                personal_velocity.get("avg_days_to_sell"),
-                overall_avg_days,
-                existing_listed_qty,
-            )
 
-            hub_prices = []
+            hub_recommendations = []
             for hub in _MARKET_HUBS_SMART:
                 overview = (hub_overviews.get(hub["name"]) or {}).get(type_id, {})
-                hub_best_sell = overview.get("best_sell")
-                if hub_best_sell:
-                    hub_prices.append({
-                        "hub": hub["name"],
-                        "best_sell": round(float(hub_best_sell), 2),
-                        "order_count": int(overview.get("order_count") or 0),
-                    })
+                hub_recommendation = _build_sell_recommendation_for_hub(
+                    goal,
+                    hub["name"],
+                    overview,
+                    price_row,
+                    quantity,
+                    floor_price,
+                    daily_volume,
+                    personal_velocity.get("avg_days_to_sell"),
+                    overall_avg_days,
+                    existing_listed_qty,
+                    sales_tax_fraction,
+                    broker_fee_fraction,
+                )
+                if hub_recommendation:
+                    hub_recommendations.append(hub_recommendation)
+
+            if not hub_recommendations:
+                continue
+
+            hub_recommendations.sort(key=lambda entry: entry["total_net_after_fees"], reverse=True)
+            selected_recommendation = next(
+                (entry for entry in hub_recommendations if entry["hub"] == target_hub["name"]),
+                hub_recommendations[0],
+            )
+            recommended_price = selected_recommendation["recommended_price"]
+            order_count = int(selected_recommendation.get("order_count") or 0)
+            best_sell = selected_recommendation.get("best_sell")
+            second_sell = selected_recommendation.get("second_sell")
+            estimated_days = selected_recommendation.get("estimated_days_to_sell")
+            hub_prices = [
+                {
+                    "hub": entry["hub"],
+                    "best_sell": entry["best_sell"],
+                    "recommended_price": entry["recommended_price"],
+                    "order_count": entry["order_count"],
+                }
+                for entry in hub_recommendations
+                if entry.get("best_sell")
+            ]
 
             best_elsewhere = None
-            for hub_price in sorted(hub_prices, key=lambda entry: entry["best_sell"], reverse=True):
-                if hub_price["hub"] == target_hub["name"]:
+            for hub_price in hub_recommendations:
+                if hub_price["hub"] == selected_recommendation["hub"]:
                     continue
-                delta_per_unit = hub_price["best_sell"] - recommended_price
-                delta_total = delta_per_unit * quantity
+                delta_per_unit = hub_price["net_after_fees_per_unit"] - selected_recommendation["net_after_fees_per_unit"]
+                delta_total = hub_price["total_net_after_fees"] - selected_recommendation["total_net_after_fees"]
                 if delta_per_unit > max(recommended_price * 0.05, 10000) and delta_total > 1000000:
                     best_elsewhere = {
                         "hub": hub_price["hub"],
                         "best_sell": hub_price["best_sell"],
+                        "recommended_price": hub_price["recommended_price"],
                         "delta_per_unit": round(delta_per_unit, 2),
                         "delta_total": round(delta_total, 2),
                     }
                     break
 
-            net_after_fees_per_unit = round(recommended_price * (1.0 - fee_fraction), 2)
-            total_net_after_fees = round(net_after_fees_per_unit * quantity, 2)
-            total_recommended_value = round(recommended_price * quantity, 2)
+            total_recommended_value = round(selected_recommendation["total_recommended_value"], 2)
 
             items.append({
                 "type_id": type_id,
                 "name": row["name"],
                 "quantity": quantity,
-                "selected_hub": target_hub["name"],
+                "asset_quantity": int(row.get("asset_quantity") or 0),
+                "delivered_asset_quantity": int(row.get("delivered_asset_quantity") or 0),
+                "ready_job_quantity": int(row.get("ready_job_quantity") or 0),
+                "ready_job_count": int(row.get("ready_job_count") or 0),
+                "active_job_quantity": int(row.get("active_job_quantity") or 0),
+                "active_job_count": int(row.get("active_job_count") or 0),
+                "delivered_job_quantity": int(row.get("delivered_job_quantity") or 0),
+                "delivered_job_count": int(row.get("delivered_job_count") or 0),
+                "pipeline_state": row.get("pipeline_state"),
+                "pipeline_state_label": row.get("pipeline_state_label"),
+                "next_completion_ts": row.get("next_completion_ts"),
+                "last_completed_ts": row.get("last_completed_ts"),
+                "selected_hub": selected_recommendation["hub"],
                 "goal": goal,
                 "recommended_price": round(recommended_price, 2),
                 "price_floor": round(floor_price, 2),
-                "selected_hub_best_sell": round(float(best_sell), 2) if best_sell else None,
-                "selected_hub_second_sell": round(float(second_sell), 2) if second_sell else None,
+                "selected_hub_best_sell": best_sell,
+                "selected_hub_second_sell": second_sell,
                 "selected_hub_order_count": order_count,
-                "selected_hub_visible_volume": int(selected_overview.get("visible_volume") or 0),
+                "selected_hub_visible_volume": int(selected_recommendation.get("visible_volume") or 0),
                 "jita_best_sell": round(float(price_row.get("sell")), 2) if price_row.get("sell") else None,
                 "jita_best_buy": round(float(price_row.get("buy")), 2) if price_row.get("buy") else None,
                 "daily_volume": round(float(daily_volume), 2) if daily_volume is not None else None,
@@ -10413,11 +11179,18 @@ def api_haul_sell_recommendations():
                 "existing_listed_qty": existing_listed_qty,
                 "history_avg_days_to_sell": personal_velocity.get("avg_days_to_sell"),
                 "history_total_sold": personal_velocity.get("total_sold"),
-                "net_after_fees_per_unit": net_after_fees_per_unit,
-                "total_net_after_fees": total_net_after_fees,
+                "sales_tax_per_unit": selected_recommendation["sales_tax_per_unit"],
+                "broker_fee_per_unit": selected_recommendation["broker_fee_per_unit"],
+                "relist_broker_fee_per_unit": selected_recommendation["relist_broker_fee_per_unit"],
+                "net_after_fees_per_unit": selected_recommendation["net_after_fees_per_unit"],
+                "net_after_one_relist_per_unit": selected_recommendation["net_after_one_relist_per_unit"],
+                "total_net_after_fees": selected_recommendation["total_net_after_fees"],
+                "total_net_after_one_relist": selected_recommendation["total_net_after_one_relist"],
                 "total_recommended_value": total_recommended_value,
+                "relist_guard_triggered": bool(selected_recommendation.get("relist_guard_triggered")),
                 "better_hub": best_elsewhere,
                 "hub_prices": hub_prices,
+                "hub_recommendations": hub_recommendations,
             })
 
         items.sort(
@@ -10433,18 +11206,17 @@ def api_haul_sell_recommendations():
             "goal": goal,
             "selected_hub": target_hub["name"],
             "hubs": [hub["name"] for hub in _MARKET_HUBS_SMART],
-            "inventory_source": {
-                key: value
-                for key, value in asset_source.items()
-                if key != "assets" and key != "names"
-            },
+            "fee_model": fee_model,
+            "inventory_source": inventory_source,
+            "pipeline_summary": pipeline_summary,
             "summary": {
                 "item_count": len(items),
                 "total_units": sum(item["quantity"] for item in items),
                 "total_recommended_value": round(sum(item["total_recommended_value"] for item in items), 2),
                 "total_net_after_fees": round(sum(item["total_net_after_fees"] for item in items), 2),
+                "total_net_after_one_relist": round(sum(item["total_net_after_one_relist"] for item in items), 2),
                 "items_with_better_hub": sum(1 for item in items if item.get("better_hub")),
-                "asset_candidates_considered": len(scoped_candidates),
+                "pipeline_candidates_considered": len(scoped_candidates),
             },
             "items": items,
         }
@@ -10742,10 +11514,13 @@ async def _startup():
     )
     _t.start()
     print("  [contract-cache] background refresher started")
+    _start_planner_live_watcher()
+    print(f"  [planner-live] watcher started ({_ESI_JOBS_SIGNAL_TTL}s cadence)")
 
 
 @app.after_serving
 async def _shutdown():
+    _PLANNER_LIVE_STOP.set()
     await _esi.esi.close()
 
 

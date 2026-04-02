@@ -790,7 +790,6 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   const [plannerRefreshLoading, setPlannerRefreshLoading] = useState(false);
   const plannerRefreshStartedRef = useRef(false);
   const jobsSignalRef = useRef(null);
-  const jobsPollBusyRef = useRef(false);
   const cycleConfig = appSettings;
   const plannerStructureType = facilityToPlannerStructureType(appSettings?.facility);
   const calcQueryParams = useMemo(() => {
@@ -935,34 +934,81 @@ export default function QueuePlannerView({ appSettings = DEFAULT_APP_SETTINGS, r
   }, [tpData, realSciItems, realMfgItems]);
 
   useEffect(() => {
-    let cancelled = false;
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') return undefined;
 
-    async function pollJobsSignal() {
-      if (cancelled || document.visibilityState !== 'visible' || jobsPollBusyRef.current) return;
-      jobsPollBusyRef.current = true;
-      try {
-        const res = await fetch(`${API}/api/industry/jobs/signal`, { signal: AbortSignal.timeout(15000) });
-        if (!res.ok) return;
-        const signal = await res.json();
-        const nextSignature = String(signal?.signature || 'empty');
+    let cancelled = false;
+    let reconnectId = null;
+    let stream = null;
+
+    function clearReconnect() {
+      if (!reconnectId) return;
+      clearTimeout(reconnectId);
+      reconnectId = null;
+    }
+
+    function connect() {
+      if (cancelled || stream) return;
+
+      const nextStream = new EventSource(`${API}/api/job-planner/stream`);
+      stream = nextStream;
+
+      nextStream.onmessage = (event) => {
+        let message = null;
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        const nextSignature = String(message?.signature || 'empty');
+        if (message?.type === 'snapshot') {
+          jobsSignalRef.current = nextSignature;
+          return;
+        }
+        if (message?.type !== 'planner_changed') return;
+
         const prevSignature = jobsSignalRef.current;
         jobsSignalRef.current = nextSignature;
-
-        if (prevSignature && prevSignature !== nextSignature) {
-          refetch();
+        if (!prevSignature || prevSignature !== nextSignature) {
+          if (document.visibilityState === 'visible') {
+            refetch();
+          }
         }
-      } catch {
-        // Silent failure: keep existing planner data and retry on next interval.
-      } finally {
-        jobsPollBusyRef.current = false;
+      };
+
+      nextStream.onerror = () => {
+        if (stream !== nextStream) return;
+        nextStream.close();
+        stream = null;
+        clearReconnect();
+        if (!cancelled) {
+          reconnectId = setTimeout(() => {
+            reconnectId = null;
+            connect();
+          }, 10_000);
+        }
+      };
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState !== 'visible') return;
+      refetch();
+      clearReconnect();
+      if (!stream) {
+        connect();
       }
     }
 
-    pollJobsSignal();
-    const id = setInterval(pollJobsSignal, 20_000);
+    connect();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      clearReconnect();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (stream) {
+        stream.close();
+        stream = null;
+      }
     };
   }, [refetch]);
 

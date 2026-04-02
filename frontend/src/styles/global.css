@@ -2311,6 +2311,63 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   opacity: 0.92;
 }
 
+.orders-advice-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border: 1px solid rgba(255,255,255,0.1);
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.orders-advice-pill--warning {
+  color: #ffb347;
+  border-color: rgba(255, 179, 71, 0.45);
+  background: rgba(255, 179, 71, 0.08);
+}
+
+.orders-advice-pill--critical {
+  color: #ff6644;
+  border-color: rgba(255, 102, 68, 0.45);
+  background: rgba(255, 102, 68, 0.08);
+}
+
+.orders-advice-note {
+  color: var(--dim);
+}
+
+.orders-advice-callout {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+}
+
+.orders-advice-callout--warning {
+  border-color: rgba(255, 179, 71, 0.45);
+  background: rgba(255, 179, 71, 0.08);
+}
+
+.orders-advice-callout--critical {
+  border-color: rgba(255, 102, 68, 0.45);
+  background: rgba(255, 102, 68, 0.08);
+}
+
+.orders-advice-callout__title {
+  color: var(--text);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+}
+
+.orders-advice-callout__body {
+  margin-top: 4px;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .revenue-summary-card .app-summary-card__value {
   line-height: 1.15;
 }
@@ -2374,6 +2431,188 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
   opacity: 0.92;
 }
 
+.outbound-pricing-table {
+  min-width: 980px;
+}
+
+.outbound-pricing-table__row--active td {
+  background: rgba(255,255,255,0.05);
+}
+
+.outbound-pricing-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.outbound-pricing-item__icon {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  opacity: 0.92;
+}
+
+.outbound-pricing-item__name {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outbound-pricing-item__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 2px;
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.4px;
+}
+
+.outbound-pipeline-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.05);
+  color: var(--text);
+  font-size: 9px;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+}
+
+.outbound-pipeline-badge--unlisted-stock {
+  border-color: rgba(76, 255, 145, 0.35);
+  color: var(--green);
+}
+
+.outbound-pipeline-badge--delivery-ready {
+  border-color: rgba(255, 204, 86, 0.35);
+  color: #ffcc56;
+}
+
+.outbound-pipeline-badge--mixed {
+  border-color: rgba(255, 123, 69, 0.4);
+  color: var(--accent);
+}
+
+.outbound-pricing-table__hub {
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.outbound-pricing-alt-hub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.outbound-pricing-detail__head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.outbound-pricing-detail__icon {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  opacity: 0.92;
+}
+
+.outbound-pricing-callout {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.outbound-pricing-callout--warning {
+  border-color: rgba(255, 172, 91, 0.45);
+  background: rgba(255, 172, 91, 0.08);
+}
+
+.outbound-pricing-hubs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.outbound-pricing-hubs__title {
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+}
+
+.outbound-pricing-hub-card {
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.02);
+  padding: 10px 12px;
+}
+
+.outbound-pricing-hub-card--selected {
+  border-color: rgba(255, 204, 86, 0.45);
+  box-shadow: inset 0 0 0 1px rgba(255, 204, 86, 0.18);
+}
+
+.outbound-pricing-hub-card__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.outbound-pricing-hub-card__title {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.8px;
+}
+
+.outbound-pricing-hub-card__subtitle {
+  margin-top: 2px;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.outbound-pricing-hub-card__badge {
+  color: var(--accent);
+  font-size: 9px;
+  letter-spacing: 1px;
+}
+
+.outbound-pricing-hub-card__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin-top: 10px;
+}
+
+.outbound-pricing-hub-card__label {
+  color: var(--dim);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.outbound-pricing-hub-card__value {
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+
 @media (max-width: 1100px) {
   .app-summary-grid,
   .bp-investment-summary-grid {
@@ -2409,6 +2648,10 @@ input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 @media (max-width: 720px) {
   .app-summary-grid,
   .bp-investment-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .outbound-pricing-hub-card__grid {
     grid-template-columns: 1fr;
   }
 

@@ -58,6 +58,39 @@ function orderPositionLabel(order) {
   return `Position ${position}`;
 }
 
+function formatSellDays(value) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  const days = Number(value);
+  if (days < 1) return `${(days * 24).toFixed(days < 0.5 ? 1 : 0)}h`;
+  return `${days.toFixed(days >= 10 ? 0 : 1)}d`;
+}
+
+function formatTrackedHours(value) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  const hours = Number(value);
+  if (hours < 24) return `${hours.toFixed(hours >= 10 ? 0 : 1)}h`;
+  return `${(hours / 24).toFixed(hours >= 240 ? 0 : 1)}d`;
+}
+
+function orderAdviceBadge(advice) {
+  if (!advice) return null;
+  if (advice.warning_level === 'critical') {
+    return { tone: 'critical', label: 'MARGIN RISK' };
+  }
+  if (advice.warning_level === 'warning') {
+    return { tone: 'warning', label: advice.action === 'relist' ? 'RELIST' : 'CHECK' };
+  }
+  return null;
+}
+
+function orderAdviceTone(advice) {
+  if (!advice) return null;
+  if (advice.warning_level === 'critical') return '#ff6644';
+  if (advice.warning_level === 'warning') return '#ffb347';
+  if (advice.summary === 'Slow seller') return 'var(--dim)';
+  return 'var(--green)';
+}
+
 function FullOrderTable({ orders, tab, multiChar, sellHistByTypeId, scanMap, selectedOrderId, onSelect }) {
   const isBuy = tab === 'buy';
 
@@ -95,6 +128,8 @@ function FullOrderTable({ orders, tab, multiChar, sellHistByTypeId, scanMap, sel
           const scanItem  = scanMap?.[o.type_id];
           const roi       = scanItem?.roi ?? null;
           const roiColor  = roi == null ? 'var(--dim)' : roi >= 15 ? '#4cff91' : roi >= 5 ? 'var(--accent)' : '#ff6644';
+          const advice    = !isBuy ? o.order_advice : null;
+          const adviceBadge = orderAdviceBadge(advice);
 
           return (
             <tr
@@ -115,6 +150,19 @@ function FullOrderTable({ orders, tab, multiChar, sellHistByTypeId, scanMap, sel
                     <div style={{ fontFamily: 'var(--mono)', fontSize: 12, letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={o.type_name}>{o.type_name}</div>
                     <div className="bp-investment-item__meta">
                       <span>{filledLabel} filled</span>
+                      {!isBuy && adviceBadge && (
+                        <span className={`orders-advice-pill orders-advice-pill--${adviceBadge.tone}`}>
+                          ! {adviceBadge.label}
+                        </span>
+                      )}
+                      {!isBuy && advice?.summary === 'Slow seller' && (
+                        <span className="orders-advice-note">Slow seller · hold</span>
+                      )}
+                      {!isBuy && advice?.estimated_days_relisted != null && (
+                        <span style={{ color: orderAdviceTone(advice) || 'var(--dim)' }}>
+                          ETA {formatSellDays(advice.estimated_days_relisted)}
+                        </span>
+                      )}
                       {!isBuy && avgDays != null && (
                         <span style={{ color: avgDays <= 3 ? '#4cff91' : avgDays >= 14 ? '#ff6644' : 'var(--dim)' }}>
                           {avgDays.toFixed(1)}d sell
@@ -243,6 +291,22 @@ export default memo(function OrdersPage() {
     () => sell.reduce((count, order) => count + (order.market_position == null ? 0 : 1), 0),
     [sell],
   );
+  const relistSuggestedCount = useMemo(
+    () => sell.reduce((count, order) => count + (order.order_advice?.action === 'relist' ? 1 : 0), 0),
+    [sell],
+  );
+  const marginRiskCount = useMemo(
+    () => sell.reduce((count, order) => count + (order.order_advice?.warning_level === 'critical' ? 1 : 0), 0),
+    [sell],
+  );
+  const stagnantCount = useMemo(
+    () => sell.reduce((count, order) => count + (order.order_advice?.stagnant_24h ? 1 : 0), 0),
+    [sell],
+  );
+  const slowSellerCount = useMemo(
+    () => sell.reduce((count, order) => count + (order.order_advice?.summary === 'Slow seller' ? 1 : 0), 0),
+    [sell],
+  );
 
   const selectedOrder = visibleOrders.find((order) => order.order_id === selectedOrderId) || null;
   const selectedIsBuy = tab === 'buy';
@@ -250,6 +314,7 @@ export default memo(function OrdersPage() {
   const selectedValue = orderBookValue(selectedOrder, selectedIsBuy);
   const selectedHistory = !selectedIsBuy && selectedOrder ? sellHistByTypeId[selectedOrder.type_id] : null;
   const selectedScan = selectedOrder ? scanMap[selectedOrder.type_id] : null;
+  const selectedAdvice = !selectedIsBuy ? selectedOrder?.order_advice : null;
   const selectedCharColor = selectedOrder?.character_id ? charColor(selectedOrder.character_id) : 'var(--dim)';
   const liveStatus = error && data
     ? 'Last refresh failed, showing cached orders'
@@ -299,6 +364,11 @@ export default memo(function OrdersPage() {
             label="Hub Coverage"
             value={data ? `${trackedHubCount.toLocaleString()} hubs` : 'Awaiting snapshot'}
             meta={tab === 'sell' ? 'Sell orders surface live position and competitor counts when hub telemetry is available.' : 'Buy orders keep the same live refresh cadence while tracking escrow exposure.'}
+          />
+          <ContextCard
+            label="Order Advisory"
+            value={data ? `${relistSuggestedCount} relist · ${marginRiskCount} risk` : 'Awaiting advisory'}
+            meta={data ? `${stagnantCount} sell orders tracked with no fill for 24h · ${slowSellerCount} slow movers currently marked no-change` : 'Loading live stagnation and margin-risk warnings.'}
           />
         </div>
 
@@ -388,8 +458,18 @@ export default memo(function OrdersPage() {
                     <div className="app-detail-copy">
                       {selectedIsBuy
                         ? `Open buy order for ${NUMBER_FORMATTER.format(selectedOrder.volume_remain)} of ${NUMBER_FORMATTER.format(selectedOrder.volume_total)} units at ${fmtISK(selectedOrder.price)} each, with escrow and fill progress refreshed from the live order feed.`
-                        : `Open sell order for ${NUMBER_FORMATTER.format(selectedOrder.volume_remain)} of ${NUMBER_FORMATTER.format(selectedOrder.volume_total)} units at ${fmtISK(selectedOrder.price)} each, with market position and sell-time overlays when cached telemetry is available.`}
+                        : `Open sell order for ${NUMBER_FORMATTER.format(selectedOrder.volume_remain)} of ${NUMBER_FORMATTER.format(selectedOrder.volume_total)} units at ${fmtISK(selectedOrder.price)} each, with market position, stagnation tracking, and relist guidance carried in from the live order advisory.`}
                     </div>
+
+                    {!selectedIsBuy && selectedAdvice && (
+                      <div className={`orders-advice-callout orders-advice-callout--${selectedAdvice.warning_level === 'critical' ? 'critical' : selectedAdvice.warning_level === 'warning' ? 'warning' : 'neutral'}`}>
+                        <div className="orders-advice-callout__title">
+                          {selectedAdvice.summary}
+                          {selectedAdvice.action === 'relist' ? ` · relist around ${fmtISK(selectedAdvice.recommended_price)}` : ''}
+                        </div>
+                        <div className="orders-advice-callout__body">{selectedAdvice.reason}</div>
+                      </div>
+                    )}
 
                     <div className="app-detail-grid">
                       <DetailStat label="Remaining" value={`${NUMBER_FORMATTER.format(selectedOrder.volume_remain)} / ${NUMBER_FORMATTER.format(selectedOrder.volume_total)}`} />
@@ -398,6 +478,10 @@ export default memo(function OrdersPage() {
                       <DetailStat label={selectedIsBuy ? 'Escrow' : 'Exposure'} value={fmtISK(selectedValue)} tone={selectedIsBuy ? 'var(--blue)' : 'var(--accent)'} />
                       <DetailStat label="MFG ROI" value={selectedScan?.roi != null ? `${selectedScan.roi.toFixed(1)}%` : '—'} tone={selectedScan?.roi == null ? undefined : selectedScan.roi >= 15 ? 'var(--green)' : selectedScan.roi >= 5 ? 'var(--accent)' : '#ff6644'} />
                       <DetailStat label="Hub" value={selectedOrder.market_hub || '—'} />
+                      {!selectedIsBuy && <DetailStat label="Suggested" value={selectedAdvice ? fmtISK(selectedAdvice.recommended_price) : '—'} tone={selectedAdvice?.action === 'relist' ? 'var(--accent)' : undefined} />}
+                      {!selectedIsBuy && <DetailStat label="ETA" value={selectedAdvice ? formatSellDays(selectedAdvice.estimated_days_relisted ?? selectedAdvice.estimated_days_current) : '—'} tone={orderAdviceTone(selectedAdvice)} />}
+                      {!selectedIsBuy && <DetailStat label="No Fill Track" value={selectedAdvice ? formatTrackedHours(selectedAdvice.tracked_no_fill_hours) : '—'} tone={selectedAdvice?.stagnant_24h ? '#ffb347' : undefined} />}
+                      {!selectedIsBuy && <DetailStat label="Relist B/E" value={selectedAdvice?.profit_proxy?.relist_break_even_price != null ? fmtISK(selectedAdvice.profit_proxy.relist_break_even_price) : '—'} tone={selectedAdvice?.warning_level === 'critical' ? '#ff6644' : undefined} />}
                     </div>
 
                     <div style={{ marginTop: 14 }}>
@@ -406,9 +490,21 @@ export default memo(function OrdersPage() {
                         value={selectedIsBuy ? `${fmtISK(selectedOrder.escrow)} committed` : orderPositionLabel(selectedOrder)}
                         meta={selectedIsBuy
                           ? `${selectedFillPct.toFixed(0)}% of the original volume has already been filled.`
-                          : `${selectedOrder.competitor_count || 0} competing listings${selectedOrder.market_hub ? ` in ${selectedOrder.market_hub}` : ''}${selectedHistory?.avg_days_to_sell != null ? ` · ${selectedHistory.avg_days_to_sell.toFixed(1)}d average sell time.` : '.'}`}
+                          : `${selectedOrder.competitor_count || 0} competing listings${selectedOrder.market_hub ? ` in ${selectedOrder.market_hub}` : ''}${selectedHistory?.avg_days_to_sell != null ? ` · ${selectedHistory.avg_days_to_sell.toFixed(1)}d average sell time.` : '.'}${selectedAdvice?.action === 'relist' ? ` Relist target ${fmtISK(selectedAdvice.recommended_price)}.` : selectedAdvice?.summary === 'Slow seller' ? ' Slow seller; no relist needed right now.' : ''}`}
                       />
                     </div>
+
+                    {!selectedIsBuy && selectedAdvice?.profit_proxy?.break_even_price != null && (
+                      <div style={{ marginTop: 10 }}>
+                        <ContextCard
+                          label="Margin Proxy"
+                          value={`${fmtISK(selectedAdvice.profit_proxy.break_even_price)} break-even`}
+                          meta={selectedAdvice.warning_level === 'critical'
+                            ? `Relisting safely would need about ${fmtISK(selectedAdvice.profit_proxy.relist_break_even_price)} based on the current manufacturing cost proxy.`
+                            : `The advisory uses the cached manufacturing break-even proxy to avoid suggesting relists that would cut below fees.`}
+                        />
+                      </div>
+                    )}
 
                     <div className="bp-investment-links" style={{ marginTop: 10 }}>
                       <a href={`https://market.fuzzwork.co.uk/type/${selectedOrder.type_id}/`} target="_blank" rel="noreferrer">MARKET</a>

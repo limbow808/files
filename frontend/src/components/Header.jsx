@@ -18,6 +18,7 @@ const TAB_GROUP = {
   ORDERS:            'MARKET',
   MINERAL_PRICES:    'MARKET',
   HAUL_PLANNER:      'LOGISTICS',
+  OUTBOUND_PRICING:  'LOGISTICS',
   INVENTORY:         'LOGISTICS',
   APP_SETTINGS:      'SETTINGS',
   CHARACTERS:        'SETTINGS',
@@ -75,6 +76,12 @@ const DROPDOWNS = {
       title: 'Routing',
       items: [
         { id: 'HAUL_PLANNER', label: 'Haul Planner' },
+      ],
+    },
+    {
+      title: 'Outbound',
+      items: [
+        { id: 'OUTBOUND_PRICING', label: 'Outbound Pricing' },
       ],
     },
     {

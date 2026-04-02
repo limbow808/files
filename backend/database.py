@@ -4,8 +4,9 @@ database.py - Simple SQLite storage for scan results and sell order history
 Saves each scan's results (JSON) with a timestamp and exposes a small
 history API for the --history feature.
 
-Also tracks open market orders and detects when they disappear (= sold),
-recording the sale in sell_order_history for accurate ISK/hr calculations.
+Also tracks open market orders, their fill activity while live, and detects
+when they disappear (= sold), recording the sale in sell_order_history for
+accurate ISK/hr calculations.
 """
 import os
 import sqlite3
@@ -57,6 +58,13 @@ def init_db() -> None:
         )
         """
     )
+    existing_cols = {row[1] for row in cur.execute("PRAGMA table_info(open_orders)").fetchall()}
+    if "current_quantity" not in existing_cols:
+        cur.execute("ALTER TABLE open_orders ADD COLUMN current_quantity INTEGER")
+    if "last_seen_ts" not in existing_cols:
+        cur.execute("ALTER TABLE open_orders ADD COLUMN last_seen_ts INTEGER")
+    if "last_fill_ts" not in existing_cols:
+        cur.execute("ALTER TABLE open_orders ADD COLUMN last_fill_ts INTEGER")
     # ── Sell order history (written when an open order disappears) ─────────────
     cur.execute(
         """
@@ -139,8 +147,15 @@ def sync_open_orders(current_orders: List[Dict[str, Any]]) -> List[Dict[str, Any
     live_ids = {o["order_id"] for o in current_orders if o.get("order_id")}
 
     # ── 1. Detect fulfilled orders ────────────────────────────────────────────
-    cur.execute("SELECT order_id, type_id, item_name, character_id, quantity, price, issued FROM open_orders")
+    cur.execute(
+        """
+        SELECT order_id, type_id, item_name, character_id, quantity, current_quantity,
+               price, issued, first_seen_ts, last_seen_ts, last_fill_ts
+        FROM open_orders
+        """
+    )
     stored_rows = cur.fetchall()
+    stored_by_id = {row["order_id"]: row for row in stored_rows}
 
     fulfilled = []
     for row in stored_rows:
@@ -178,20 +193,97 @@ def sync_open_orders(current_orders: List[Dict[str, Any]]) -> List[Dict[str, Any
         oid = o.get("order_id")
         if not oid:
             continue
+        current_qty = int(o.get("volume_remain") or o.get("quantity") or 0)
+        item_name = o.get("item_name") or o.get("type_name")
+        stored = stored_by_id.get(oid)
+        if not stored:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO open_orders
+                  (order_id, type_id, item_name, character_id, quantity,
+                   price, issued, first_seen_ts, current_quantity, last_seen_ts, last_fill_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    oid,
+                    o.get("type_id"),
+                    item_name,
+                    o.get("character_id"),
+                    current_qty,
+                    o.get("price"),
+                    o.get("issued"),
+                    now_ts,
+                    current_qty,
+                    now_ts,
+                    None,
+                )
+            )
+            continue
+
+        previous_qty = stored["current_quantity"] if stored["current_quantity"] is not None else stored["quantity"]
+        last_fill_ts = stored["last_fill_ts"]
+        try:
+            if previous_qty is not None and current_qty < int(previous_qty):
+                last_fill_ts = now_ts
+        except Exception:
+            pass
+
         cur.execute(
             """
-            INSERT OR IGNORE INTO open_orders
-              (order_id, type_id, item_name, character_id, quantity,
-               price, issued, first_seen_ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            UPDATE open_orders
+            SET type_id=?, item_name=?, character_id=?, current_quantity=?,
+                price=?, issued=?, last_seen_ts=?, last_fill_ts=?
+            WHERE order_id=?
             """,
-            (oid, o.get("type_id"), o.get("item_name") or o.get("type_name"),
-             o.get("character_id"), o.get("volume_remain") or o.get("quantity"),
-             o.get("price"), o.get("issued"), now_ts)
+            (
+                o.get("type_id"),
+                item_name,
+                o.get("character_id"),
+                current_qty,
+                o.get("price"),
+                o.get("issued"),
+                now_ts,
+                last_fill_ts,
+                oid,
+            )
         )
 
     conn.commit()
     return fulfilled
+
+
+def get_open_order_activity_by_id() -> Dict[int, Dict[str, Any]]:
+    """
+    Return live tracking metadata for open orders.
+
+    Shape:
+      {
+        order_id: {
+          "first_seen_ts": int,
+          "current_quantity": int | None,
+          "last_seen_ts": int | None,
+          "last_fill_ts": int | None,
+        }
+      }
+    """
+    init_db()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT order_id, first_seen_ts, current_quantity, last_seen_ts, last_fill_ts
+        FROM open_orders
+        """
+    )
+    return {
+        row["order_id"]: {
+            "first_seen_ts": row["first_seen_ts"],
+            "current_quantity": row["current_quantity"],
+            "last_seen_ts": row["last_seen_ts"],
+            "last_fill_ts": row["last_fill_ts"],
+        }
+        for row in cur.fetchall()
+    }
 
 
 def get_sell_history_stats() -> Dict[str, Any]:

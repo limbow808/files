@@ -6,6 +6,7 @@ import CraftLogPage from './pages/CraftLogPage';
 import QueuePlannerPage from './pages/QueuePlannerPage';
 import OrdersPage from './pages/OrdersPage';
 import InventoryPage from './pages/InventoryPage';
+import OutboundPricingPage from './pages/OutboundPricingPage';
 import ResearchPage from './pages/ResearchPage';
 import InventionPage from './pages/InventionPage';
 import MineralPricesPage from './pages/MineralPricesPage';
@@ -199,6 +200,11 @@ export default function App() {
           {mountedTabs.has('HAUL_PLANNER') && (
             <div style={{ display: activeTab === 'HAUL_PLANNER' ? 'contents' : 'none' }}>
               <HaulPlannerPage appSettings={appSettings} onSaveSettings={handleSaveSettings} />
+            </div>
+          )}
+          {mountedTabs.has('OUTBOUND_PRICING') && (
+            <div style={{ display: activeTab === 'OUTBOUND_PRICING' ? 'contents' : 'none' }}>
+              <OutboundPricingPage appSettings={appSettings} />
             </div>
           )}
           {mountedTabs.has('INVENTORY') && (
